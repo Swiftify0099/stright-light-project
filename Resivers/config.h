@@ -168,13 +168,20 @@ static const char* const FEEDER_DEFAULT_NAMES[MAX_FEEDERS] = {
 };
 
 // ─────────────────────────────────────────────────────────────
-//  SENSOR CALIBRATION CONSTANTS
+//  SENSOR CALIBRATION & VOLTAGE THRESHOLDS
 // ─────────────────────────────────────────────────────────────
-#define ACS712_SENSITIVITY 0.100f // 100 mV/A for ACS712-20A module
-#define ACS712_ZERO_ADC    2048   // Midpoint ADC value for zero AC current
-#define VMPT_CALIBRATION   234.0f // Mains RMS calibration multiplier for ZMPT101B
-#define ADC_MAX            4095.0f
-#define ADC_VREF           3.3f
+#define ACS712_SENSITIVITY          0.100f  // 100 mV/A for ACS712-20A module
+#define ACS712_ZERO_ADC             2048    // Midpoint ADC value for zero AC current
+#define ZMPT101B_CALIBRATION_FACTOR 234.0f  // Mains RMS calibration multiplier for ZMPT101B
+#define VMPT_CALIBRATION            ZMPT101B_CALIBRATION_FACTOR // Backward-compatibility alias
+#define ADC_MAX                     4095.0f
+#define ADC_VREF                    3.3f
+
+// Voltage sensor validity boundaries
+#define MIN_VALID_MAINS_VOLTAGE     80.0f   // Minimum valid AC mains voltage (VAC)
+#define MAX_VALID_MAINS_VOLTAGE     280.0f  // Maximum valid AC mains voltage (VAC)
+#define ZMPT101B_MIN_P2P_ADC        25      // Minimum ADC peak-to-peak amplitude for AC signal detection
+#define DEBUG_ZMPT101B              true    // Enable Serial diagnostic banner for ZMPT101B
 
 // ─────────────────────────────────────────────────────────────
 //  NVS NAMESPACES & LOG LIMITS

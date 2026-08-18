@@ -51,6 +51,7 @@ static int  lastSchedChecked = -1;
 //  SENSOR READINGS & ENERGY ACCUMULATION
 // ─────────────────────────────────────────────────────────────
 static float voltageV = 0.0f;
+static String voltageState = "DISCONNECTED"; // "VALID", "NO_SIGNAL", "DISCONNECTED", "OUT_OF_RANGE"
 static float currentA = 0.0f;
 static float powerW   = 0.0f;
 static float energyWh = 0.0f;
@@ -223,6 +224,7 @@ void initHardware() {
   pinMode(VOLTAGE_Y_PIN, INPUT);
   pinMode(VOLTAGE_B_PIN, INPUT);
   analogReadResolution(12);
+  analogSetAttenuation(ADC_11db); // Full 0-3.3V range on ESP32 ADC1 for ZMPT101B
 
   loadPoleStateFromNVS();
 
@@ -282,22 +284,77 @@ void setRelay(bool on, const String &reason) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  SENSOR READINGS (RMS CALCULATION)
+//  SENSOR READINGS (ZMPT101B REAL RMS & STATE CLASSIFICATION)
 // ─────────────────────────────────────────────────────────────
 void updateSensors() {
-  uint32_t sumVsq = 0;
-  const int SAMPLES = 80;
+  uint64_t sumVsq = 0;
+  uint32_t sumAdc = 0;
+  uint32_t minAdc = 4095;
+  uint32_t maxAdc = 0;
+  const int SAMPLES = 400; // 4 full cycles at 50Hz (80ms sampling window)
+  
   for (int i = 0; i < SAMPLES; i++) {
-    int adc = analogRead(VOLTAGE_R_PIN);
-    int diff = adc - 2048;
-    sumVsq += (uint32_t)(diff * diff);
-    delayMicroseconds(250);
+    uint32_t adc = analogRead(VOLTAGE_R_PIN);
+    sumAdc += adc;
+    sumVsq += (uint64_t)(adc * adc);
+    if (adc < minAdc) minAdc = adc;
+    if (adc > maxAdc) maxAdc = adc;
+    delayMicroseconds(200);
   }
+  
+  float meanAdc = (float)sumAdc / SAMPLES;
   float meanVsq = (float)sumVsq / SAMPLES;
-  float rawVrms = sqrt(meanVsq) * (ADC_VREF / ADC_MAX);
-  voltageV = rawVrms * VMPT_CALIBRATION;
-  if (voltageV < 40.0f) voltageV = 0.0f;
+  uint32_t p2p  = (maxAdc >= minAdc) ? (maxAdc - minAdc) : 0;
+  
+  // Statistical variance removes the dynamic DC offset cleanly without hardcoded midpoint
+  float variance = meanVsq - (meanAdc * meanAdc);
+  if (variance < 0.0f) variance = 0.0f;
+  
+  float rawVrms = sqrt(variance) * (ADC_VREF / ADC_MAX);
+  float calculatedMainsV = rawVrms * ZMPT101B_CALIBRATION_FACTOR;
+  
+  // ── ZMPT101B State Classification ──
+  // 1. Physically disconnected or shorted: DC bias is missing (< 150) or pulled to 3.3V (> 3950)
+  if (meanAdc < 150.0f || meanAdc > 3950.0f) {
+    voltageState = "DISCONNECTED";
+    voltageV = 0.0f;
+  }
+  // 2. DC bias is normal (~2048) but AC amplitude is flat (P2P < 25 counts or < 30V mains): 0V AC / mains off
+  else if (p2p < ZMPT101B_MIN_P2P_ADC || calculatedMainsV < 30.0f) {
+    voltageState = "NO_SIGNAL";
+    voltageV = 0.0f;
+  }
+  // 3. AC waveform present but outside valid operational mains voltage thresholds
+  else if (calculatedMainsV < MIN_VALID_MAINS_VOLTAGE || calculatedMainsV > MAX_VALID_MAINS_VOLTAGE) {
+    voltageState = "OUT_OF_RANGE";
+    voltageV = calculatedMainsV;
+  }
+  // 4. Valid measured AC mains voltage
+  else {
+    voltageState = "VALID";
+    voltageV = calculatedMainsV;
+  }
 
+#if DEBUG_ZMPT101B
+  static unsigned long lastDiagPrint = 0;
+  if (millis() - lastDiagPrint >= 3000) {
+    lastDiagPrint = millis();
+    Serial.println(F("\n========== ZMPT101B =========="));
+    Serial.printf("GPIO: %d (ADC1)\n", VOLTAGE_R_PIN);
+    Serial.printf("ADC MIN: %u\n", minAdc);
+    Serial.printf("ADC MAX: %u\n", maxAdc);
+    Serial.printf("ADC AVG: %.1f\n", meanAdc);
+    Serial.printf("ADC P2P: %u\n", p2p);
+    Serial.printf("OFFSET: %.1f\n", meanAdc);
+    Serial.printf("ADC RMS: %.2f\n", rawVrms * (ADC_MAX / ADC_VREF));
+    Serial.printf("CAL: %.1f\n", ZMPT101B_CALIBRATION_FACTOR);
+    Serial.printf("VOLTAGE: %.1f V\n", voltageV);
+    Serial.printf("STATE: %s\n", voltageState.c_str());
+    Serial.println(F("=============================="));
+  }
+#endif
+
+  // Current reading via ACS712
   uint32_t sumIsq = 0;
   for (int i = 0; i < SAMPLES; i++) {
     int adc = analogRead(CURRENT_PIN);
@@ -318,13 +375,14 @@ void updateSensors() {
   }
   lastEnergyMs = now;
 
-  if (voltageV > 270.0f) {
-    currentFault = "OVER_VOLT";
-  } else if (voltageV > 0.0f && voltageV < 165.0f) {
-    currentFault = "UNDER_VOLT";
+  // Fault determination
+  if (voltageState == "DISCONNECTED") {
+    currentFault = "SENSOR_ERROR";
+  } else if (voltageState == "OUT_OF_RANGE") {
+    currentFault = (voltageV > MAX_VALID_MAINS_VOLTAGE) ? "OVER_VOLT" : "UNDER_VOLT";
   } else if (currentA > 16.0f) {
     currentFault = "OVER_CURR";
-  } else if (lightOn && currentA < 0.05f && voltageV > 200.0f) {
+  } else if (lightOn && currentA < 0.05f && voltageState == "VALID" && voltageV > 200.0f) {
     currentFault = "LAMP_FAIL";
   } else {
     currentFault = "OK";
@@ -488,15 +546,15 @@ void txMesh(const String &type, const String &dst, const String &nextHop, int tt
 //  ACK & RESPONSE GENERATORS
 // ─────────────────────────────────────────────────────────────
 void sendAck(const String &to, const String &nextHop, uint16_t seq, const String &cmd, const String &status, const String &state) {
-  String ackData = cmd + "|" + status + "|STATE=" + state + "|V=" + String(voltageV, 1) + "|A=" + String(currentA, 2);
+  String ackData = cmd + "|" + status + "|STATE=" + state + "|V=" + String(voltageV, 1) + "|VS=" + voltageState + "|A=" + String(currentA, 2);
   txMesh("ACK", to, nextHop, DEFAULT_TTL, seq, ackData);
 }
 
 void sendStatus(const String &replyTo, uint16_t seq) {
   updateSensors();
-  char buf[128];
-  snprintf(buf, sizeof(buf), "V=%.1f|A=%.2f|P=%.1f|KWH=%.2f|LGT=%s|FLT=%s|UP=%lu",
-           voltageV, currentA, powerW, (energyWh / 1000.0f),
+  char buf[144];
+  snprintf(buf, sizeof(buf), "V=%.1f|VS=%s|A=%.2f|P=%.1f|KWH=%.2f|LGT=%s|FLT=%s|UP=%lu",
+           voltageV, voltageState.c_str(), currentA, powerW, (energyWh / 1000.0f),
            lightOn ? "ON" : "OFF", currentFault.c_str(), (unsigned long)(millis() / 1000));
 
   String nh = findNextHop(replyTo);
@@ -517,6 +575,16 @@ void sendBeacon() {
   char bData[64];
   snprintf(bData, sizeof(bData), "HW_ID=%s|REG=%d", HW_NODE_ID.c_str(), isRegistered ? 1 : 0);
   txMesh("BEACON", BROADCAST_ID, BROADCAST_ID, 1, nextSeq(), String(bData));
+}
+
+void sendHeartbeat() {
+  if (!isRegistered) return;
+  String data = "LIGHT=" + String(lightOn ? "ON" : "OFF") + 
+                "|V=" + String(voltageV, 1) + 
+                "|VS=" + voltageState + 
+                "|A=" + String(currentA, 2) + 
+                "|UPTIME=" + String(millis() / 1000);
+  txMesh("HEARTBEAT", GATEWAY_ID, findNextHop(GATEWAY_ID), DEFAULT_TTL, nextSeq(), data);
 }
 
 void sendHealthReport() {
@@ -819,6 +887,14 @@ void loop() {
   if (now - tSchedCheck >= 10000) {
     tSchedCheck = now;
     checkAutonomousSchedule();
+  }
+
+  static unsigned long tHeartbeat = 0;
+  static unsigned long hbInterval = HEARTBEAT_INTERVAL_MS + random(0, 3000);
+  if (now - tHeartbeat >= hbInterval) {
+    tHeartbeat = now;
+    sendHeartbeat();
+    hbInterval = HEARTBEAT_INTERVAL_MS + random(0, 3000);
   }
 
   if (now - tBeacon >= BEACON_INTERVAL_MS) {

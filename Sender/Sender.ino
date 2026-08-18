@@ -33,12 +33,13 @@ struct NodeRecord {
   String   location;          // Installation Location
   String   type;              // "STREET", "FARMER", "CUSTOM"
   bool     registered;        // Is node registered in DB?
-  bool     online;            // Is node currently responding?
-  bool     wasOnline;         // Previous online state for change detection
+  String   onlineState;       // "ONLINE", "DEGRADED", "OFFLINE"
   int      rssi;              // Last received RSSI (dBm)
   int      snr;               // Last received SNR (dB)
   String   lightState;        // "ON", "OFF"
   float    voltage;           // AC Voltage (VAC)
+  String   voltageState;      // "VALID", "NO_SIGNAL", "DISCONNECTED", "OUT_OF_RANGE"
+  unsigned long voltageUpdatedAt; // Timestamp of last valid reading
   float    current;           // AC Current (A)
   float    power;             // Active Power (W)
   float    totalKwh;          // Accumulated Energy (kWh)
@@ -383,7 +384,7 @@ int addOrUpdateNode(const String &hwId, const String &logicalId, const String &t
     nodes[idx].rssi = rssi;
     nodes[idx].snr  = snr;
     nodes[idx].lastSeen = millis();
-    nodes[idx].online = true;
+    nodes[idx].onlineState = "ONLINE";
     if (logicalId.length() > 0) nodes[idx].logicalId = logicalId;
     if (type.length() > 0) nodes[idx].type = type;
     return idx;
@@ -398,12 +399,13 @@ int addOrUpdateNode(const String &hwId, const String &logicalId, const String &t
     nodes[i].location = "Field Area";
     nodes[i].type = (type.length() > 0) ? type : "STREET";
     nodes[i].registered = false;
-    nodes[i].online = true;
-    nodes[i].wasOnline = false;
+    nodes[i].onlineState = "ONLINE";
     nodes[i].rssi = rssi;
     nodes[i].snr  = snr;
     nodes[i].lightState = "OFF";
     nodes[i].voltage = 0.0f;
+    nodes[i].voltageState = "";
+    nodes[i].voltageUpdatedAt = 0;
     nodes[i].current = 0.0f;
     nodes[i].power = 0.0f;
     nodes[i].totalKwh = 0.0f;
@@ -476,7 +478,7 @@ void onNeighborHealthReport(const String &reportingNode, const String &data, int
   if (nodeIdx >= 0) {
     nodes[nodeIdx].rssi = rssi;
     nodes[nodeIdx].lastSeen = millis();
-    nodes[nodeIdx].online = true;
+    nodes[nodeIdx].onlineState = "ONLINE";
     updateRouteTable(reportingNode, reportingNode, 1, rssi);
   }
 
@@ -702,6 +704,22 @@ void processIncomingLoRa() {
 
   updateRouteTable(pkt.src, pkt.src, 1, rssi);
 
+  int updateIdx = findNodeIndex(pkt.src);
+  if (updateIdx >= 0) {
+    nodes[updateIdx].lastSeen = millis();
+    if (nodes[updateIdx].onlineState == "OFFLINE") {
+      if (telegramOnline && nodes[updateIdx].registered) {
+        String alert = "🟢 *POLE RECOVERED*\n\n"
+                       "📍 *Pole:* *" + nodes[updateIdx].name + "* (`" + nodes[updateIdx].logicalId + "`)\n"
+                       "⚠️ *Status:* ONLINE\n"
+                       "📶 *RSSI:* `" + String(rssi) + " dBm`\n"
+                       "🗺️ *Route:* `Gateway ← " + pkt.src + "`";
+        bot.sendMessage(OWNER_CHAT, alert, "Markdown");
+      }
+    }
+    nodes[updateIdx].onlineState = "ONLINE";
+  }
+
   // ── 1. NEW_NODE PACKET ──
   if (pkt.type == "NEW_NODE") {
     String hwId = pkt.src;
@@ -727,6 +745,11 @@ void processIncomingLoRa() {
       String regConfirm = nodes[nodeIdx].logicalId + "|" + nodes[nodeIdx].name + "|" + nodes[nodeIdx].type;
       dispatchLoRaPacket("CMD", hwId, hwId, DEFAULT_TTL, getNextSeq(), "REGISTERED|" + regConfirm);
       Serial.printf("[GW][REG] Node %s already registered. Re-sent confirm.\n", hwId.c_str());
+      
+      int uIdx = pkt.data.indexOf("UPTIME=");
+      if (uIdx >= 0) {
+          nodes[nodeIdx].uptimeSec = pkt.data.substring(uIdx + 7, pkt.data.indexOf('|', uIdx) > 0 ? pkt.data.indexOf('|', uIdx) : pkt.data.length()).toInt();
+      }
     } else if (!isPending) {
       // Find empty pending slot
       for (int i = 0; i < MAX_PENDING_REG; i++) {
@@ -771,18 +794,28 @@ void processIncomingLoRa() {
 
     int srcIdx = findNodeIndex(pkt.src);
     if (srcIdx < 0) srcIdx = addOrUpdateNode(pkt.src, pkt.src, "STREET", rssi, snr);
-
     String srcLogicalId = (srcIdx >= 0) ? nodes[srcIdx].logicalId : pkt.src;
     String srcHwId = (srcIdx >= 0) ? nodes[srcIdx].hwId : pkt.src;
 
     if (srcIdx >= 0) {
-      nodes[srcIdx].online = true;
-      nodes[srcIdx].wasOnline = true;
-      nodes[srcIdx].lastSeen = millis();
-      nodes[srcIdx].rssi = rssi;
-      nodes[srcIdx].snr  = snr;
       if (ackState.indexOf("STATE=ON") >= 0 || ackState == "ON") nodes[srcIdx].lightState = "ON";
       if (ackState.indexOf("STATE=OFF") >= 0 || ackState == "OFF") nodes[srcIdx].lightState = "OFF";
+      int pV = ackState.indexOf("V=");
+      if (pV >= 0) {
+        int endV = ackState.indexOf('|', pV);
+        nodes[srcIdx].voltage = ackState.substring(pV + 2, endV > 0 ? endV : ackState.length()).toFloat();
+        nodes[srcIdx].voltageUpdatedAt = millis();
+      }
+      int pVs = ackState.indexOf("VS=");
+      if (pVs >= 0) {
+        int endVs = ackState.indexOf('|', pVs);
+        nodes[srcIdx].voltageState = ackState.substring(pVs + 3, endVs > 0 ? endVs : ackState.length());
+      }
+      int pA = ackState.indexOf("A=");
+      if (pA >= 0) {
+        int endA = ackState.indexOf('|', pA);
+        nodes[srcIdx].current = ackState.substring(pA + 2, endA > 0 ? endA : ackState.length()).toFloat();
+      }
     }
 
     for (int i = 0; i < MAX_CMD_QUEUE; i++) {
@@ -803,13 +836,46 @@ void processIncomingLoRa() {
             String poleName = (srcIdx >= 0) ? nodes[srcIdx].name : pkt.src;
             String lightSt = (srcIdx >= 0) ? nodes[srcIdx].lightState : "UPDATED";
             
-            String confMsg = "✅ *Command Confirmed*\n\n"
-                             "📍 *Target:* *" + poleName + "* (`" + pkt.src + "`)\n"
-                             "⚡ *Command:* `" + cmdQueue[i].cmdString + "`\n"
-                             "📊 *Result:* `" + ackStatus + "`\n"
-                             "💡 *Physical Relay:* *" + lightSt + "*\n"
-                             "📶 *LoRa Signal:* `" + String(rssi) + " dBm`\n"
-                             "🕒 *Time:* `" + getFormattedTime() + "`";
+            String confMsg = "━━━━━━━━━━━━━━━━━━━━\n"
+                             "✅ *" + String(lightSt == "ON" ? "LIGHT ON" : "LIGHT OFF") + "*\n"
+                             "━━━━━━━━━━━━━━━━━━━━\n\n"
+                             "Pole:\n*" + poleName + "*\n\n"
+                             "Light:\n" + String(lightSt == "ON" ? "🟢 ON" : "🔴 OFF") + "\n\n";
+
+            unsigned long age = (millis() - nodes[srcIdx].voltageUpdatedAt);
+            if (nodes[srcIdx].voltageUpdatedAt == 0) {
+              confMsg += "Voltage:\n⚠️ No Data\n\n";
+              confMsg += "Sensor:\n⚠️ Awaiting Telemetry\n\n";
+            } else if (age > 180000UL) {
+              confMsg += "Voltage:\n⚡ " + String(nodes[srcIdx].voltage, 1) + " V (STALE)\n\n";
+              confMsg += "Sensor:\n⚠️ STALE (" + String(age / 1000) + "s ago)\n\n";
+            } else if (nodes[srcIdx].voltageState == "VALID") {
+              confMsg += "Voltage:\n⚡ " + String(nodes[srcIdx].voltage, 1) + " V\n\n";
+              confMsg += "Sensor:\n✅ VALID\n\n";
+            } else if (nodes[srcIdx].voltageState == "NO_SIGNAL") {
+              confMsg += "Voltage:\n⚠️ NO SIGNAL (0.0 V)\n\n";
+              confMsg += "Sensor:\n❌ ZMPT101B SIGNAL NOT DETECTED\n\n";
+            } else if (nodes[srcIdx].voltageState == "DISCONNECTED") {
+              confMsg += "Voltage:\n⚠️ NO SENSOR\n\n";
+              confMsg += "Sensor:\n❌ DISCONNECTED\n\n";
+            } else if (nodes[srcIdx].voltageState == "OUT_OF_RANGE") {
+              confMsg += "Voltage:\n⚠️ " + String(nodes[srcIdx].voltage, 1) + " V\n\n";
+              confMsg += "Sensor:\n❌ OUT OF RANGE\n\n";
+            } else {
+              confMsg += "Voltage:\n⚡ " + String(nodes[srcIdx].voltage, 1) + " V\n\n";
+              confMsg += "Sensor:\n✅ VALID\n\n";
+            }
+
+            if (nodes[srcIdx].current > 0 || lightSt == "ON") {
+                confMsg += "Current:\n🔌 " + String(nodes[srcIdx].current, 2) + " A\n\n";
+            } else {
+                confMsg += "Current:\n🔌 0.00 A\n\n";
+            }
+            
+            confMsg += "RSSI:\n" + String(rssi) + " dBm\n\n"
+                       "Route:\nGateway → " + pkt.src + "\n\n"
+                       "ACK:\n✅ Confirmed\n"
+                       "━━━━━━━━━━━━━━━━━━━━";
             bot.sendMessage(cmdQueue[i].chatId, confMsg, "Markdown");
           }
           break;
@@ -817,15 +883,8 @@ void processIncomingLoRa() {
       }
     }
   }
-  // ── 3. DIAGNOSTIC LINK TEST ACK ──
   else if (pkt.type == "LINK_ACK") {
     int srcIdx = findNodeIndex(pkt.src);
-    if (srcIdx >= 0) {
-      nodes[srcIdx].online = true;
-      nodes[srcIdx].lastSeen = millis();
-      nodes[srcIdx].rssi = rssi;
-      nodes[srcIdx].snr  = snr;
-    }
 
     for (int i = 0; i < MAX_CMD_QUEUE; i++) {
       if (cmdQueue[i].active && (cmdQueue[i].seq == pkt.seq || cmdQueue[i].cmdString.startsWith("PING"))) {
@@ -845,22 +904,63 @@ void processIncomingLoRa() {
       }
     }
   }
-  // ── 4. STATUS TELEMETRY ──
+  // ── 4. HEARTBEAT PACKET ──
+  else if (pkt.type == "HEARTBEAT") {
+    int idx = findNodeIndex(pkt.src);
+    if (idx < 0) idx = addOrUpdateNode(pkt.src, pkt.src, "STREET", rssi, snr);
+
+    if (idx >= 0) {
+      nodes[idx].lastHeartbeat = millis();
+      int pV = pkt.data.indexOf("V=");
+      if (pV >= 0) {
+        int endV = pkt.data.indexOf('|', pV);
+        nodes[idx].voltage = pkt.data.substring(pV + 2, endV > 0 ? endV : pkt.data.length()).toFloat();
+        nodes[idx].voltageUpdatedAt = millis();
+      }
+      int pVs = pkt.data.indexOf("VS=");
+      if (pVs >= 0) {
+        int endVs = pkt.data.indexOf('|', pVs);
+        nodes[idx].voltageState = pkt.data.substring(pVs + 3, endVs > 0 ? endVs : pkt.data.length());
+      }
+      int pA = pkt.data.indexOf("A=");
+      if (pA >= 0) {
+        int endA = pkt.data.indexOf('|', pA);
+        nodes[idx].current = pkt.data.substring(pA + 2, endA > 0 ? endA : pkt.data.length()).toFloat();
+      }
+      int pU = pkt.data.indexOf("UPTIME=");
+      if (pU >= 0) {
+        int endU = pkt.data.indexOf('|', pU);
+        nodes[idx].uptimeSec = pkt.data.substring(pU + 7, endU > 0 ? endU : pkt.data.length()).toInt();
+      }
+      int pL = pkt.data.indexOf("LIGHT=");
+      if (pL >= 0) {
+        int endL = pkt.data.indexOf('|', pL);
+        nodes[idx].lightState = pkt.data.substring(pL + 6, endL > 0 ? endL : pkt.data.length());
+      }
+    }
+  }
+  // ── 5. STATUS PACKET ──
   else if (pkt.type == "STATUS") {
     int idx = findNodeIndex(pkt.src);
     if (idx < 0) idx = addOrUpdateNode(pkt.src, pkt.src, "STREET", rssi, snr);
 
     if (idx >= 0) {
-      nodes[idx].online = true;
-      nodes[idx].wasOnline = true;
-      nodes[idx].lastSeen = millis();
-      nodes[idx].rssi = rssi;
-      nodes[idx].snr  = snr;
-
       int pV = pkt.data.indexOf("V=");
-      if (pV >= 0) nodes[idx].voltage = pkt.data.substring(pV + 2, pkt.data.indexOf('|', pV)).toFloat();
+      if (pV >= 0) {
+        int endV = pkt.data.indexOf('|', pV);
+        nodes[idx].voltage = pkt.data.substring(pV + 2, endV > 0 ? endV : pkt.data.length()).toFloat();
+        nodes[idx].voltageUpdatedAt = millis();
+      }
+      int pVs = pkt.data.indexOf("VS=");
+      if (pVs >= 0) {
+        int endVs = pkt.data.indexOf('|', pVs);
+        nodes[idx].voltageState = pkt.data.substring(pVs + 3, endVs > 0 ? endVs : pkt.data.length());
+      }
       int pA = pkt.data.indexOf("A=");
-      if (pA >= 0) nodes[idx].current = pkt.data.substring(pA + 2, pkt.data.indexOf('|', pA)).toFloat();
+      if (pA >= 0) {
+        int endA = pkt.data.indexOf('|', pA);
+        nodes[idx].current = pkt.data.substring(pA + 2, endA > 0 ? endA : pkt.data.length()).toFloat();
+      }
       int pP = pkt.data.indexOf("P=");
       if (pP >= 0) nodes[idx].power = pkt.data.substring(pP + 2, pkt.data.indexOf('|', pP)).toFloat();
       int pK = pkt.data.indexOf("KWH=");
@@ -962,7 +1062,19 @@ String buildNeighboursMessage(UserSession &sess) {
     int end = min(start + POLES_PER_PAGE, nodeCount);
     for (int i = start; i < end; i++) {
       msg += "📍 *" + nodes[i].name + "* (`" + nodes[i].logicalId + "`)\n";
-      msg += "   RSSI: `" + String(nodes[i].rssi) + " dBm` | " + (nodes[i].online ? "🟢" : "🔴") + "\n";
+      msg += "   " + (nodes[i].onlineState == "ONLINE" ? String("🟢") : (nodes[i].onlineState == "DEGRADED" ? String("🟡") : String("🔴"))) + " | 💡 " + 
+             nodes[i].lightState + " | RSSI: `" + String(nodes[i].rssi) + " dBm`\n";
+      if (nodes[i].voltageUpdatedAt == 0) {
+        msg += "   ⚡ `No Data`\n";
+      } else if (nodes[i].voltageState == "DISCONNECTED") {
+        msg += "   ⚡ `❌ NO SENSOR`\n";
+      } else if (nodes[i].voltageState == "NO_SIGNAL") {
+        msg += "   ⚡ `⚠️ NO SIGNAL (0.0 V)`\n";
+      } else if (nodes[i].voltageState == "OUT_OF_RANGE") {
+        msg += "   ⚡ `⚠️ " + String(nodes[i].voltage, 1) + " V (OUT OF RANGE)`\n";
+      } else {
+        msg += "   ⚡ `⚡ " + String(nodes[i].voltage, 1) + " V`\n";
+      }
     }
     msg += "\nPage " + String((start / POLES_PER_PAGE) + 1) + " of " + String(((nodeCount - 1) / POLES_PER_PAGE) + 1);
   }
@@ -998,10 +1110,38 @@ String buildPoleCtrlMessage(UserSession &sess) {
   msg += "🆔 *ID:* `" + nodes[idx].logicalId + "`\n";
   msg += "📍 *Name:* *" + nodes[idx].name + "*\n";
   msg += "🏢 *Loc:* `" + nodes[idx].location + "`\n";
-  msg += "🟢 *Status:* " + String(nodes[idx].online ? "ONLINE" : "OFFLINE") + "\n";
+  String statusIcon = nodes[idx].onlineState == "ONLINE" ? "🟢" : (nodes[idx].onlineState == "DEGRADED" ? "🟡" : "🔴");
+  msg += statusIcon + " *Status:* " + nodes[idx].onlineState + "\n";
   msg += "📶 *RSSI:* `" + String(nodes[idx].rssi) + " dBm`\n";
   msg += "🗺️ *Next Hop:* `" + nodes[idx].primaryNextHop + "`\n";
   msg += "💡 *Relay:* *" + nodes[idx].lightState + "*\n";
+
+  unsigned long age = (millis() - nodes[idx].voltageUpdatedAt);
+  if (nodes[idx].voltageUpdatedAt == 0) {
+    msg += "⚡ *Voltage:* `⚠️ No Data`\n";
+    msg += "🔍 *Sensor:* `⚠️ Awaiting Telemetry`\n";
+  } else if (age > 180000UL) {
+    msg += "⚡ *Voltage:* `" + String(nodes[idx].voltage, 1) + " V (STALE)`\n";
+    msg += "🔍 *Sensor:* `⚠️ STALE (Last Update: " + String(age / 1000) + "s ago)`\n";
+  } else if (nodes[idx].voltageState == "VALID") {
+    msg += "⚡ *Voltage:* `⚡ " + String(nodes[idx].voltage, 1) + " V`\n";
+    msg += "🔍 *Sensor:* `✅ VALID`\n";
+  } else if (nodes[idx].voltageState == "NO_SIGNAL") {
+    msg += "⚡ *Voltage:* `⚠️ NO SIGNAL (0.0 V)`\n";
+    msg += "🔍 *Sensor:* `❌ ZMPT101B SIGNAL NOT DETECTED`\n";
+  } else if (nodes[idx].voltageState == "DISCONNECTED") {
+    msg += "⚡ *Voltage:* `⚠️ NO SENSOR`\n";
+    msg += "🔍 *Sensor:* `❌ DISCONNECTED`\n";
+  } else if (nodes[idx].voltageState == "OUT_OF_RANGE") {
+    msg += "⚡ *Voltage:* `⚠️ " + String(nodes[idx].voltage, 1) + " V`\n";
+    msg += "🔍 *Sensor:* `❌ OUT OF RANGE`\n";
+  } else {
+    msg += "⚡ *Voltage:* `⚡ " + String(nodes[idx].voltage, 1) + " V`\n";
+    msg += "🔍 *Sensor:* `✅ VALID`\n";
+  }
+
+  msg += "🔌 *Current:* `" + String(nodes[idx].current > 0 ? nodes[idx].current : 0.00, 2) + " A`\n";
+  
   return msg;
 }
 
@@ -1433,8 +1573,8 @@ void checkWiFiAndTelegram() {
 void checkNodeTimeouts() {
   unsigned long now = millis();
   for (int i = 0; i < nodeCount; i++) {
-    if (nodes[i].online && (now - nodes[i].lastSeen >= NODE_OFFLINE_TIMEOUT_MS)) {
-      nodes[i].online = false;
+    if (nodes[i].onlineState != "OFFLINE" && (now - nodes[i].lastSeen >= NODE_OFFLINE_TIMEOUT_MS)) {
+      nodes[i].onlineState = "OFFLINE";
       Serial.printf("[GW][DB] ⚠️ Node %s went OFFLINE (last seen %lu ms ago)\n",
                     nodes[i].logicalId.c_str(), now - nodes[i].lastSeen);
       
@@ -1445,16 +1585,18 @@ void checkNodeTimeouts() {
                        "🕒 *Time:* `" + getFormattedTime() + "`";
         bot.sendMessage(OWNER_CHAT, alert, "Markdown");
       }
+    } else if (nodes[i].onlineState == "ONLINE" && (now - nodes[i].lastSeen >= HEARTBEAT_INTERVAL_MS * 2)) {
+      nodes[i].onlineState = "DEGRADED";
+      Serial.printf("[GW][DB] 🟡 Node %s DEGRADED (missed heartbeats, last seen %lu ms ago)\n",
+                    nodes[i].logicalId.c_str(), now - nodes[i].lastSeen);
     }
   }
 }
 
 void processHeartbeatCycle() {
-  for (int i = 0; i < nodeCount; i++) {
-    if (nodes[i].registered && nodes[i].online) {
-      queueCommand("", nodes[i].logicalId, "GET_STATUS", PRIO_LOW);
-    }
-  }
+  // Deliberately left empty. 
+  // Gateway no longer polls using GET_STATUS. 
+  // Poles now autonomously push HEARTBEAT packets.
 }
 
 void processTimeSyncPush() {
@@ -1510,10 +1652,11 @@ void loadDatabaseFromNVS() {
     nodes[i].schedEnabled = prefs.getBool((String(pfx) + "se").c_str(), false);
     nodes[i].schedOnMin = prefs.getInt((String(pfx) + "so").c_str(), -1);
     nodes[i].schedOffMin = prefs.getInt((String(pfx) + "sf").c_str(), -1);
-    nodes[i].online     = false;
-    nodes[i].wasOnline  = false;
+    nodes[i].onlineState = "OFFLINE";
     nodes[i].lightState = "OFF";
     nodes[i].voltage    = 0.0f;
+    nodes[i].voltageState = "";
+    nodes[i].voltageUpdatedAt = 0;
     nodes[i].current    = 0.0f;
     nodes[i].power      = 0.0f;
     nodes[i].totalKwh   = 0.0f;
