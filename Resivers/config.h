@@ -61,13 +61,13 @@
 // ─────────────────────────────────────────────────────────────
 #define GATEWAY_ID       "GATEWAY"
 #define BROADCAST_ID     "BROADCAST"
-#define MAX_NODES        50       // Max registered nodes in Gateway database
-#define MAX_ROUTES       50       // Max routing table entries in Gateway
-#define MAX_GW_LINKS     100      // Max gateway topology link database
-#define MAX_PENDING_REG  5        // Max simultaneous pending registrations
-#define MAX_NEIGHBORS    10       // Max neighbor entries per Field Pole
-#define MAX_ROUTES_POLE  20       // Max routing table entries per Field Pole
-#define MAX_SEQ_CACHE    64       // Deduplication cache size
+#define MAX_NODES        20       // Max registered nodes in Gateway database (Optimized for ESP32 DRAM)
+#define MAX_ROUTES       20       // Max routing table entries in Gateway
+#define MAX_GW_LINKS     30       // Max gateway topology link database
+#define MAX_PENDING_REG  4        // Max simultaneous pending registrations
+#define MAX_NEIGHBORS    8        // Max neighbor entries per Field Pole
+#define MAX_ROUTES_POLE  15       // Max routing table entries per Field Pole
+#define MAX_SEQ_CACHE    32       // Deduplication cache size
 #define DEFAULT_TTL      6        // Maximum mesh hop limit
 
 // ─────────────────────────────────────────────────────────────
