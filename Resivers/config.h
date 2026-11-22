@@ -21,17 +21,12 @@
 #define FW_VERSION_INT   10
 
 // ─────────────────────────────────────────────────────────────
-//  TELEGRAM CREDENTIALS (MAIN GATEWAY ONLY)
+//  SECONDARY POLE SECURITY ISOLATION (PROMPT 21)
+//  Secondary Nodes operate strictly via LoRa 433 MHz RF.
+//  In accordance with the Principle of Least Privilege and Key Isolation,
+//  Cloud, Wi-Fi Station and Telegram credentials are NEVER stored on Field Nodes.
 // ─────────────────────────────────────────────────────────────
-#define BOT_TOKEN        "8823335578:AAHKZag8e0p2gspUtBhgnDk96qZiDRc7dr8"
-#define OWNER_CHAT       "5505296197"
-#define TELEGRAM_MAX_MESSAGE_SIZE 8192
-
-// ─────────────────────────────────────────────────────────────
-//  WiFi CREDENTIALS — MOBILE HOTSPOT / ACCESS POINT
-// ─────────────────────────────────────────────────────────────
-#define WIFI_DEF_SSID    "Saaj"
-#define WIFI_DEF_PASS    "Saaj_7550"
+#define POLE_LORA_ONLY_NODE 1
 
 // ─────────────────────────────────────────────────────────────
 //  LORA HARDWARE PIN ASSIGNMENTS (ESP32 VSPI)
@@ -47,28 +42,46 @@
 // ─────────────────────────────────────────────────────────────
 //  LORA RF CONFIGURATION (SX1278 @ 433 MHz)
 //  MUST MATCH IDENTICALLY ON GATEWAY AND ALL FIELD POLES
+//  INDIAN WPC G.S.R. 347(E) (2022) REGULATORY COMPLIANT:
+//  - Frequency band: 433.050 MHz to 434.790 MHz
+//  - Legal carrier frequency: 433.920 MHz (Center of license-exempt ISM window)
+//  - Max ERP: 10 mW (+10.0 dBm) -> Max conducted power +10 dBm into 2.15 dBi whip
 // ─────────────────────────────────────────────────────────────
-#define LORA_FREQ        433E6    // 433.0 MHz Carrier Frequency
-#define LORA_SF          10       // Spreading Factor 10 (High range, robust link)
-#define LORA_BW          125E3    // 125.0 kHz Signal Bandwidth
-#define LORA_CR          5        // Coding Rate 4/5 (CR=5 means 4/5)
-#define LORA_TXPOW       20       // TX Power 20 dBm (PA_BOOST)
-#define LORA_SYNC_WORD   0x12     // Private Mesh Sync Word
-#define LORA_CRC_ENABLED true     // Hardware CRC payload protection
+#define LORA_FREQ        433920000UL // 433.920 MHz Carrier Frequency (WPC Compliant)
+#define LORA_SF          10          // Spreading Factor 10 (High range, robust link)
+#define LORA_BW          125E3       // 125.0 kHz Signal Bandwidth
+#define LORA_CR          5           // Coding Rate 4/5 (CR=5 means 4/5)
+#define LORA_TXPOW       10          // TX Power 10 dBm conducted (+10 mW ERP WPC limit)
+#define LORA_SYNC_WORD   0x12        // Private Mesh Sync Word
+#define LORA_CRC_ENABLED true        // Hardware CRC payload protection
 
 // ─────────────────────────────────────────────────────────────
 //  MESH NETWORK IDENTIFIERS & LIMITS
 // ─────────────────────────────────────────────────────────────
 #define GATEWAY_ID       "GATEWAY"
 #define BROADCAST_ID     "BROADCAST"
-#define MAX_NODES        20       // Max registered nodes in Gateway database (Optimized for ESP32 DRAM)
-#define MAX_ROUTES       20       // Max routing table entries in Gateway
-#define MAX_GW_LINKS     30       // Max gateway topology link database
+#define MAX_NODES        50       // Max registered nodes in Gateway database (Supports up to 50 nodes)
+#define MAX_ROUTES       50       // Max routing table entries in Gateway
+#define MAX_GW_LINKS     60       // Max gateway topology link database
 #define MAX_PENDING_REG  4        // Max simultaneous pending registrations
-#define MAX_NEIGHBORS    8        // Max neighbor entries per Field Pole
-#define MAX_ROUTES_POLE  15       // Max routing table entries per Field Pole
+#define MAX_NEIGHBORS    12       // Max neighbor entries per Field Pole
+#define MAX_ROUTES_POLE  30       // Max routing table entries per Field Pole
 #define MAX_SEQ_CACHE    32       // Deduplication cache size
 #define DEFAULT_TTL      6        // Maximum mesh hop limit
+
+// ─────────────────────────────────────────────────────────────
+//  ROUTING PROTOCOL & DAG PARAMETERS (PROMPT 10)
+// ─────────────────────────────────────────────────────────────
+#define ROOT_RANK                  0        // Gateway is Root (Rank 0)
+#define INFINITY_RANK              255      // Orphan / unreachable rank
+#define MAX_PARENT_FAILURES        3        // Consecutive failed transmissions before switching parent
+#define PARENT_TIMEOUT_MS          90000UL  // 90s without hearing parent beacon
+#define ROUTE_HYSTERESIS_MARGIN    20       // Cost difference needed to switch primary parent
+#define ROUTE_STABILITY_TIME_MS    30000UL  // 30s stability requirement before switching back
+#define ORPHAN_RREQ_BASE_INTERVAL  3000UL   // Initial RREQ backoff (3s)
+#define ORPHAN_RREQ_MAX_INTERVAL   30000UL  // Maximum RREQ backoff (30s)
+#define ORPHAN_MAX_ATTEMPTS        5        // Max RREQ attempts before backing off
+#define MESH_NET_ID                "MSCB"   // Private Mesh Network Identifier
 
 // ─────────────────────────────────────────────────────────────
 //  TIMING INTERVALS (milliseconds)
@@ -114,12 +127,39 @@
 // Main Relay / Feeder 0 Output GPIO
 #define RELAY_PIN        26       // Main Street Light / Pole Relay (GPIO 26)
 
-// Analog Sensor Inputs (All on ADC1 — 100% WiFi / Radio Safe)
-#define CURRENT_PIN      39       // ACS712 analog input (ADC1_CH3 / GPIO39)
+// ─────────────────────────────────────────────────────────────
+//  EXTERNAL MULTI-CHANNEL 24-BIT ADC SUBSYSTEM (3x ADS131M08)
+//  21 Measurement Channels: 18 Feeder Currents + 3 Bus Voltages
+// ─────────────────────────────────────────────────────────────
+#define USE_EXTERNAL_ADS131M08      true     // Set true to enable 3x ADS131M08 metrology subsystem
+#define ADS131_MASTER_CLK_FREQ      8192000UL// 8.192 MHz Master TCXO Osc
+#define ADS131_SPI_SPEED            8000000UL// 8.0 MHz SPI Bus Clock (SPI Mode 1)
+
+// ADS131M08 Hardware Pin Assignments (Shared VSPI + Dedicated Control Lines)
+#define ADC_SCK_PIN                 18       // VSPI SCK (Shared with LoRa SX1278)
+#define ADC_MISO_PIN                19       // VSPI MISO (Shared with LoRa SX1278)
+#define ADC_MOSI_PIN                23       // VSPI MOSI (Shared with LoRa SX1278)
+#define ADC_CS1_PIN                 4        // ADC 1 Chip Select (/CS1, GPIO 4)
+#define ADC_CS2_PIN                 16       // ADC 2 Chip Select (/CS2, GPIO 16)
+#define ADC_CS3_PIN                 17       // ADC 3 Chip Select (/CS3, GPIO 17)
+#define ADC_SYNC_PIN                21       // Common Synchronization Pulse (/SYNC, GPIO 21)
+#define ADC_RESET_PIN               32       // Common Hardware Reset (/RESET, GPIO 32)
+#define ADC_DRDY_PIN                36       // Master Data Ready Interrupt (/DRDY, GPIO 36 / VP)
+
+// Metrology Sensor Scaling Factors
+#define CT_BURDEN_OHMS              12.0f    // 12.0 Ohm Burden Resistor (0.1%, 15 ppm/C)
+#define CT_TURNS_RATIO              1000.0f  // 1000:1 CT (e.g., ZMCT103C / DL-CT08CL5 / SCT-013)
+#define CT_CURRENT_SCALE_FACTOR     83.333f  // Primary Amperes per ADC Volt (1000 / 12)
+#define ZMPT_PRI_RESISTOR_OHMS      120000.0f// 120k Ohm Primary Limiting Resistor (2x 60k 1W)
+#define ZMPT_BURDEN_OHMS            300.0f   // 300.0 Ohm Secondary Burden Resistor (0.1%)
+#define ZMPT_VOLTAGE_SCALE_FACTOR   400.0f   // Primary VAC per ADC Volt (120000 / 300)
+
+// Legacy Fallback Analog Sensor Inputs (Used when USE_EXTERNAL_ADS131M08 is false)
+#define CURRENT_PIN      39       // Legacy single ACS712 analog input (ADC1_CH3 / GPIO39)
 #define VOLTAGE_PIN      34       // Legacy alias -> R Phase
-#define VOLTAGE_R_PIN    34       // R Phase ZMPT101B (ADC1_CH6 / GPIO34)
-#define VOLTAGE_Y_PIN    35       // Y Phase ZMPT101B (ADC1_CH7 / GPIO35)
-#define VOLTAGE_B_PIN    32       // B Phase ZMPT101B (ADC1_CH4 / GPIO32)
+#define VOLTAGE_R_PIN    34       // Legacy R Phase ZMPT101B (ADC1_CH6 / GPIO34)
+#define VOLTAGE_Y_PIN    35       // Legacy Y Phase ZMPT101B (ADC1_CH7 / GPIO35)
+#define VOLTAGE_B_PIN    32       // Legacy B Phase ZMPT101B (ADC1_CH4 / GPIO32)
 
 // ─────────────────────────────────────────────────────────────
 //  MULTI-FEEDER THREE-PHASE SYSTEM CONFIGURATION
@@ -137,12 +177,13 @@ static const uint8_t FEEDER_RELAY_PINS[MAX_FEEDERS] = {
 };
 
 // MCB Status Input GPIOs — R Phase (HIGH = Normal, LOW = Tripped, 0 = Disabled)
+// Remapped to input-only pins 34, 35, 39 and available pins to prevent ADC SPI conflict
 static const uint8_t FEEDER_MCB_R_PINS[MAX_FEEDERS] = {
     0,  // Feeder 0 MCB R (0 = disabled)
-    4,  // Feeder 1 MCB R (Internal PULLUP)
-    16, // Feeder 2 MCB R (Internal PULLUP)
-    17, // Feeder 3 MCB R (Internal PULLUP)
-    21, // Feeder 4 MCB R (Internal PULLUP)
+    34, // Feeder 1 MCB R (Input-only with external 10k PULLUP)
+    35, // Feeder 2 MCB R (Input-only with external 10k PULLUP)
+    39, // Feeder 3 MCB R (Input-only with external 10k PULLUP)
+    33, // Feeder 4 MCB R (Internal PULLUP)
     22  // Feeder 5 MCB R (Internal PULLUP)
 };
 
@@ -194,9 +235,29 @@ static const char* const FEEDER_DEFAULT_NAMES[MAX_FEEDERS] = {
 #define NVS_NS_GWLOG     "gwlog"    // Gateway audit log
 #define NVS_NS_EVENTS    "events"   // Offline event buffer
 #define NVS_NS_NBRS      "nbrs"     // Pole neighbors
+#define NVS_NS_REVOC     "revoc"    // Persistent Revocation Registry
+#define NVS_NS_DELTX     "deltx"    // Incomplete Deletion Transaction journal
 
 #define MAX_CMD_LOG_ENTRIES   20
 #define MAX_EVENT_LOG_ENTRIES 10
+#define MAX_REVOKED_NODES     50    // Max revoked nodes in persistent registry
+#define MAX_CURRENT_SENSORS_PER_POLE 18 // 6 Feeders x 3 Phases (R/Y/B)
+#define COMMON_VOLTAGE_SENSORS_PER_POLE 3 // 3 Common R/Y/B Voltage Sensors
+
+// ─────────────────────────────────────────────────────────────
+//  SECURITY & LIFECYCLE PARAMETERS (PROMPTS 12 & 21)
+// ─────────────────────────────────────────────────────────────
+#ifndef MESH_AUTH_KEY
+  #define MESH_AUTH_KEY                  "" // Provisioned during factory commissioning
+#endif
+
+#ifndef ADMIN_ROLE_ID
+  #define ADMIN_ROLE_ID                  ""
+#endif
+
+#define NVS_SCHEMA_VERSION             12
+#define REVOCATION_RETENTION_DAYS      365
+#define DELETE_CONFIRMATION_TIMEOUT_MS 60000UL // 60-second confirmation window
 
 // ─────────────────────────────────────────────────────────────
 //  PACKET PRIORITY LEVELS
@@ -214,6 +275,7 @@ struct ParsedPacket {
   String   src;
   String   dst;
   String   nextHop;
+  String   sender;
   int      ttl;
   uint16_t seq;
   String   data;

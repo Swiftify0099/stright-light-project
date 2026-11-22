@@ -11,14 +11,24 @@
 #include <Arduino.h>
 #include "config.h"
 #include "Types.h"
+#include "StorageTypes.h"
+#include "NodeStorage.h"
 #include "StorageManager.h"
+#include "CalibrationManager.h"
+#include "MultiADCManager.h"
 #include "VoltageSensor.h"
 #include "CurrentSensor.h"
 #include "FeederManager.h"
 #include "MeshManager.h"
 #include "LoRaManager.h"
 #include "CommandManager.h"
+#include "DiscoveryManager.h"
 #include "HeartbeatManager.h"
+#include "AuthSecurity.h"
+#include "MeasurementTelemetry.h"
+#include "MeasurementTests.h"
+#include "PoleConfigManager.h"
+#include "PoleFirmwareManager.h"
 
 // ─────────────────────────────────────────────────────────────
 //  COOPERATIVE SCHEDULING TIMERS
@@ -44,13 +54,21 @@ void setup() {
 
   // 1. Initialize Subsystems in Dependency Order
   storageMgr.init();
+  calibMgr.init();
+#if USE_EXTERNAL_ADS131M08
+  multiAdcMgr.init();
+#endif
   voltageSensor.init();
   currentSensor.init();
   feederMgr.init();
   meshMgr.init();
   loraMgr.init();
+  discoveryMgr.init(255);
   cmdMgr.init();
   heartbeatMgr.init();
+  telemetryScheduler.init();
+  poleConfigMgr.init();
+  poleFwMgr.init();
 
   // 2. Initialize Timestamps
   unsigned long now = millis();
@@ -64,8 +82,13 @@ void setup() {
 
   // 3. Initial Registration Probe if Unregistered
   if (!storageMgr.isRegistered()) {
-    cmdMgr.sendNewNode();
-    newNodeRetries++;
+    if (storageMgr.isRevoked()) {
+      Serial.printf("[POLE] ⛔ DEVICE IS PERMANENTLY REVOKED (Tx: %s). Registration probe suppressed. Re-commissioning required.\n",
+                    storageMgr.getRevocationTxId().c_str());
+    } else {
+      cmdMgr.sendNewNode();
+      newNodeRetries++;
+    }
   }
 }
 
@@ -77,6 +100,10 @@ void loop() {
 
   // 1. High Priority: LoRa Packet Processing & Mesh Routing
   loraMgr.processIncomingLoRa();
+
+  // 2. Automatic Node Discovery, Link Quality, Adaptive Beaconing & Duty-Cycle Tracking
+  discoveryMgr.update();
+  poleFwMgr.update();
 
   // 2. Fast Non-blocking Sensor & MCB Updating (Every 5s)
   if (now - tSensorRead >= SENSOR_INTERVAL_MS) {
@@ -98,12 +125,8 @@ void loop() {
   // 5. Autonomous Jittered Heartbeat Transmission
   heartbeatMgr.checkHeartbeatInterval();
 
-  // 6. Periodic Neighbor Discovery Beacon (Every 30s)
-  if (now - tBeacon >= BEACON_INTERVAL_MS) {
-    tBeacon = now;
-    meshMgr.expireNeighbors();
-    meshMgr.sendBeacon();
-  }
+  // 6. Mesh Subsystem Periodic Tasks (Beacons, Parent Health, Orphan Recovery)
+  meshMgr.processPeriodicTasks();
 
   // 7. Periodic Neighbor Health Report to Gateway (Every 60s)
   if (storageMgr.isRegistered() && (now - tNeighReport >= NEIGH_REPORT_INTERVAL_MS)) {
@@ -118,7 +141,7 @@ void loop() {
   }
 
   // 9. Unregistered Node Join Retries (Every 10s up to MAX_RETRIES)
-  if (!storageMgr.isRegistered() && (now - tNewNodeRetry >= NEW_NODE_RETRY_INTERVAL_MS)) {
+  if (!storageMgr.isRegistered() && !storageMgr.isRevoked() && (now - tNewNodeRetry >= NEW_NODE_RETRY_INTERVAL_MS)) {
     tNewNodeRetry = now;
     if (newNodeRetries < NEW_NODE_MAX_RETRIES) {
       cmdMgr.sendNewNode();
@@ -131,4 +154,7 @@ void loop() {
     tNvsFlush = now;
     storageMgr.savePoleStateToNVS();
   }
+
+  // 11. Staggered 21-Channel Metrology Telemetry Scheduler
+  telemetryScheduler.checkTelemetrySchedule();
 }

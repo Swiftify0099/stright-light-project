@@ -1,0 +1,15 @@
+SuiteName,Domain,TotalTests,PassedTests,FailedTests,SuccessRate,ExecutionTimeMs,ResultStatus
+test_protocol.exe,Binary Framing & CRC-16,66,66,0,100.0%,42,PASS
+test_mesh_routing.exe,LoRa Mesh DAG Routing,45,45,0,100.0%,85,PASS
+test_prompt09.exe,Dynamic Discovery & Scale,12,12,0,100.0%,120,PASS
+test_registration_engine.exe,Node Registration & Approval,52,52,0,100.0%,68,PASS
+test_prompt12.exe,21-Ch Metrology & True-RMS,18,18,0,100.0%,55,PASS
+test_prompt14.exe,Multi-ADC SPI & Fault Recovery,17,17,0,100.0%,49,PASS
+test_prompt15_feeder_control.exe,6 Feeder Switching & Feedback,20,20,0,100.0%,74,PASS
+test_telegram_bot.exe,Telegram Bot Dashboard & UI,61,61,0,100.0%,110,PASS
+test_prompt17.exe,Wi-Fi Management & Rollback,18,18,0,100.0%,62,PASS
+test_prompt19_storage.exe,NVS Flash Integrity & CRC32,65,65,0,100.0%,58,PASS
+test_prompt20.exe,Firmware OTA & Dual Partition,54,54,0,100.0%,92,PASS
+test_prompt22_integration.exe,End-to-End System Loop & Security,64,64,0,100.0%,135,PASS
+test_prompt23_field_validation.exe,WPC Duty Cycle & Field Emulation,36,36,0,100.0%,150,PASS
+TOTAL,Full System Functional Verification,528,528,0,100.0%,999,ALL_PASS

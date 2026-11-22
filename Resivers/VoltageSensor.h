@@ -1,6 +1,7 @@
 /*
  * =====================================================================
- *  VOLTAGESENSOR.H — MULTI-PHASE ZMPT101B VOLTAGE SENSING MODULE
+ *  VOLTAGESENSOR.H — THREE-PHASE HIGH PRECISION VOLTAGE METROLOGY
+ *  MSCB Smart Pole Automation System — Prompt 14 Architecture
  * =====================================================================
  */
 
@@ -9,6 +10,8 @@
 
 #include <Arduino.h>
 #include "config.h"
+#include "ADS131M08Driver.h"
+#include "PowerMeasurementEngine.h"
 
 class VoltageSensor {
 public:
@@ -27,17 +30,13 @@ public:
 
   bool   isVoltageValidR() const;
   bool   isVoltageValidY() const;
+  bool   isVoltageValidB() const;
+
+  float  getGridFrequency() const;
+  bool   isThreePhaseBalanced() const;
 
 private:
-  float  voltageR;
-  float  voltageY;
-  float  voltageB;
-
-  String voltageStateR;
-  String voltageStateY;
-  String voltageStateB;
-
-  void sampleChannel(uint8_t pin, float &outVoltage, String &outState);
+  unsigned long lastUpdateMs;
 };
 
 extern VoltageSensor voltageSensor;

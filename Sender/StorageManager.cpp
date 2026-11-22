@@ -6,6 +6,7 @@
 
 #include "StorageManager.h"
 #include "MeshManager.h"
+#include "CentralStorage.h"
 #include <time.h>
 
 StorageManager storageMgr;
@@ -13,6 +14,7 @@ StorageManager storageMgr;
 StorageManager::StorageManager() : gwLogHead(0), gwLogCount(0) {}
 
 void StorageManager::init() {
+  centralStorage.init();
   loadDatabaseFromNVS();
 }
 
@@ -46,6 +48,7 @@ void StorageManager::loadDatabaseFromNVS() {
         n->name = name;
         n->location = loc;
         n->registered = reg;
+        n->lifecycleState = reg ? POLE_STATE_ACTIVE : POLE_STATE_DE_REGISTERED;
         n->schedEnabled = schedEn;
         n->schedOnMin = schedOn;
         n->schedOffMin = schedOff;
@@ -61,6 +64,7 @@ void StorageManager::saveDatabaseToNVS() {
   prefs.begin(NVS_NS_MESH, false);
   int count = meshMgr.getNodeCount();
   prefs.putInt("count", count);
+  prefs.putInt("schema_ver", NVS_SCHEMA_VERSION);
   prefs.putInt("nextSLId", meshMgr.getNextStreetLightId());
   prefs.putInt("nextFId", meshMgr.getNextFarmerId());
 
@@ -102,6 +106,43 @@ void StorageManager::saveWiFiCredentials(const String &ssid, const String &pass)
   prefs.end();
 }
 
+void StorageManager::loadWiFiConfig(String &activeSsid, String &activePass, String &prevSsid, String &prevPass, uint8_t &commitState) {
+  prefs.begin(NVS_NS_WIFI, true);
+  activeSsid = prefs.getString("ssid", WIFI_DEF_SSID);
+  activePass = prefs.getString("pass", WIFI_DEF_PASS);
+  prevSsid   = prefs.getString("prev_ssid", WIFI_DEF_SSID);
+  prevPass   = prefs.getString("prev_pass", WIFI_DEF_PASS);
+  commitState = (uint8_t)prefs.getUChar("commit_state", NVS_WIFI_STABLE);
+  prefs.end();
+}
+
+void StorageManager::saveWiFiActive(const String &ssid, const String &pass) {
+  prefs.begin(NVS_NS_WIFI, false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+}
+
+void StorageManager::saveWiFiPrevious(const String &ssid, const String &pass) {
+  prefs.begin(NVS_NS_WIFI, false);
+  prefs.putString("prev_ssid", ssid);
+  prefs.putString("prev_pass", pass);
+  prefs.end();
+}
+
+void StorageManager::setWiFiCommitState(uint8_t state) {
+  prefs.begin(NVS_NS_WIFI, false);
+  prefs.putUChar("commit_state", state);
+  prefs.end();
+}
+
+uint8_t StorageManager::getWiFiCommitState() {
+  prefs.begin(NVS_NS_WIFI, true);
+  uint8_t state = prefs.getUChar("commit_state", NVS_WIFI_STABLE);
+  prefs.end();
+  return state;
+}
+
 void StorageManager::addGwLog(const char* action, const char* target, uint8_t res) {
   strncpy(gwLog[gwLogHead].action, action, 31);
   gwLog[gwLogHead].action[31] = '\0';
@@ -111,6 +152,9 @@ void StorageManager::addGwLog(const char* action, const char* target, uint8_t re
   gwLog[gwLogHead].result = res;
   gwLogHead = (gwLogHead + 1) % MAX_CMD_LOG_ENTRIES;
   if (gwLogCount < MAX_CMD_LOG_ENTRIES) gwLogCount++;
+
+  centralStorage.addAuditEvent(AUDIT_EVENT_CMD_EXEC_RESULT, RETENTION_CATEGORY_ADMIN_AUDIT,
+                               target, "GATEWAY_ADMIN", res, action);
 }
 
 GwLogEntry* StorageManager::getGwLog(int index) {

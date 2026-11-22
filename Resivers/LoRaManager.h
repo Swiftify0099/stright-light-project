@@ -1,6 +1,6 @@
 /*
  * =====================================================================
- *  LORAMANAGER.H — FIELD POLE LORA RADIO & PROTOCOL MANAGER
+ *  LORAMANAGER.H — FIELD POLE LORA RADIO & PROTOCOL MANAGER (V10)
  * =====================================================================
  */
 
@@ -18,12 +18,15 @@ public:
   LoRaManager();
   void init();
 
-  // Packet building & parsing
-  String buildPacket(const String &type, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data);
+  // Packet building & parsing (8-field mesh frame with 7-field fallback)
+  String buildPacket(const String &type, const String &src, const String &dst, const String &nextHop, const String &sender, int ttl, uint16_t seq, const String &data);
   bool   parsePacket(const String &raw, int rssi, int snr, ParsedPacket &out);
 
   // Mesh transmission
+  // For new locally-originated packets (src = myId, sender = myId)
   void   txMesh(const String &type, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data);
+  // For forwarded packets (preserves original src, updates sender = myId)
+  void   txMesh(const String &type, const String &src, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data);
 
   // Incoming LoRa packet processing
   void   processIncomingLoRa();

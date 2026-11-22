@@ -6,11 +6,16 @@
 
 #include "LoRaManager.h"
 #include "MeshManager.h"
+#include "DiscoveryManager.h"
 #include "TelegramManager.h"
 #include "TelegramMenus.h"
 #include "FeederManager.h"
 #include "ResetManager.h"
 #include "StorageManager.h"
+#include "RevocationManager.h"
+#include "AuthSecurity.h"
+#include "GwConfigManager.h"
+#include "ConfigDistribution.h"
 
 LoRaManager loraMgr;
 
@@ -58,8 +63,13 @@ String LoRaManager::getLastPacketInfo() const {
 }
 
 String LoRaManager::buildPacket(const String &type, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data) {
+  return buildPacket(type, String(GATEWAY_ID), dst, nextHop, String(GATEWAY_ID), ttl, seq, data);
+}
+
+String LoRaManager::buildPacket(const String &type, const String &src, const String &dst, const String &nextHop, const String &sender, int ttl, uint16_t seq, const String &data) {
   String nh = (nextHop.length() > 0) ? nextHop : BROADCAST_ID;
-  return type + "|" + String(GATEWAY_ID) + "|" + dst + "|" + nh + "|" + String(ttl) + "|" + String(seq) + "|" + data;
+  String snd = (sender.length() > 0) ? sender : src;
+  return type + "|" + src + "|" + dst + "|" + nh + "|" + snd + "|" + String(ttl) + "|" + String(seq) + "|" + data;
 }
 
 bool LoRaManager::parsePacket(const String &raw, int rssi, int snr, ParsedPacket &out) {
@@ -67,12 +77,12 @@ bool LoRaManager::parsePacket(const String &raw, int rssi, int snr, ParsedPacket
   out.rssi = rssi;
   out.snr  = snr;
 
-  String fields[7];
+  String fields[8];
   int fieldCount = 0;
   int start = 0;
   for (int i = 0; i <= (int)raw.length(); i++) {
     bool isEnd = (i == (int)raw.length());
-    bool isPipe = (!isEnd && raw[i] == '|' && fieldCount < 6);
+    bool isPipe = (!isEnd && raw[i] == '|' && fieldCount < 7);
     if (isEnd || isPipe) {
       fields[fieldCount++] = raw.substring(start, i);
       start = i + 1;
@@ -81,20 +91,48 @@ bool LoRaManager::parsePacket(const String &raw, int rssi, int snr, ParsedPacket
 
   if (fieldCount < 6) return false;
 
-  out.type    = fields[0];
-  out.src     = fields[1];
-  out.dst     = fields[2];
-  out.nextHop = fields[3];
-  out.ttl     = fields[4].toInt();
-  out.seq     = (uint16_t)fields[5].toInt();
-  out.data    = (fieldCount == 7) ? fields[6] : "";
+  if (fieldCount >= 8) {
+    out.type    = fields[0];
+    out.src     = fields[1];
+    out.dst     = fields[2];
+    out.nextHop = fields[3];
+    out.sender  = fields[4];
+    out.ttl     = fields[5].toInt();
+    out.seq     = (uint16_t)fields[6].toInt();
+    out.data    = fields[7];
+  } else if (fieldCount == 7) {
+    out.type    = fields[0];
+    out.src     = fields[1];
+    out.dst     = fields[2];
+    out.nextHop = fields[3];
+    out.sender  = fields[1];
+    out.ttl     = fields[4].toInt();
+    out.seq     = (uint16_t)fields[5].toInt();
+    out.data    = fields[6];
+  } else {
+    out.type    = fields[0];
+    out.src     = fields[1];
+    out.dst     = fields[2];
+    out.nextHop = fields[3];
+    out.sender  = fields[1];
+    out.ttl     = fields[4].toInt();
+    out.seq     = (uint16_t)fields[5].toInt();
+    out.data    = "";
+  }
   out.valid   = true;
   return true;
 }
 
 void LoRaManager::dispatchLoRaPacket(const String &type, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data) {
-  String packet = buildPacket(type, dst, nextHop, ttl, seq, data);
+  dispatchLoRaPacket(type, String(GATEWAY_ID), dst, nextHop, ttl, seq, data);
+}
+
+void LoRaManager::dispatchLoRaPacket(const String &type, const String &src, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data) {
+  String packet = buildPacket(type, src, dst, nextHop, String(GATEWAY_ID), ttl, seq, data);
   
+  // Track physical airtime against 1% duty cycle limit
+  discoveryMgr.recordAirtimeUsage(calculateLoRaAirtimeMs(packet.length()));
+
   LoRa.idle();
   LoRa.beginPacket();
   LoRa.print(packet);
@@ -102,10 +140,24 @@ void LoRaManager::dispatchLoRaPacket(const String &type, const String &dst, cons
   LoRa.receive();
   
   Serial.printf("[GW][LORA] TX: %s\n", packet.c_str());
-  lastLoRaPacketInfo = "TX " + type + " to " + dst + " (Seq " + String(seq) + ")";
+  lastLoRaPacketInfo = "TX " + type + " to " + dst + " via " + nextHop + " (Seq " + String(seq) + ")";
+}
+
+void LoRaManager::sendRootBeacon() {
+  dispatchLoRaPacket("BEACON", BROADCAST_ID, BROADCAST_ID, 1, getNextSeq(),
+                     "RANK=0|PARENT=NONE|COST=0|VER=1|CHILDREN=0");
+  Serial.println(F("[GW][MESH] Broadcast Root DAG Beacon (Rank 0, Cost 0)"));
 }
 
 void LoRaManager::queueCommand(const String &chatId, const String &nodeId, const String &cmd, uint8_t priority) {
+  if (revocationMgr.isRevoked(nodeId)) {
+    Serial.printf("[GW][CMD] ⛔ Refusing to queue command '%s' for permanently REVOKED node '%s'\n", cmd.c_str(), nodeId.c_str());
+    if (chatId.length() > 0 && tgMgr.isTelegramOnline()) {
+      tgMgr.sendMessage(chatId, "⛔ *Command Rejected:* Node `" + nodeId + "` has been permanently revoked and de-registered.", "Markdown");
+    }
+    return;
+  }
+
   uint16_t seq = getNextSeq();
   Serial.printf("[GW] Queueing command seq=%u for '%s' -> %s (Prio: %d)\n", seq, cmd.c_str(), nodeId.c_str(), priority);
 
@@ -187,8 +239,22 @@ void LoRaManager::processCommandQueue() {
                     cmdQueue[bestIdx].cmdString.c_str(), cmdQueue[bestIdx].targetNodeId.c_str(), cmdQueue[bestIdx].seq);
     }
 
+    String toSend = cmdQueue[bestIdx].cmdString;
+    if (!toSend.startsWith("CMD|")) {
+      String txId = authSec.generateTransactionId("CMD", cmdQueue[bestIdx].targetNodeId);
+      uint32_t expMs = millis() + 45000UL; // 45s command validity window
+      String authTag = authSec.signPayload(toSend, cmdQueue[bestIdx].seq, txId);
+      toSend = "CMD|NET=" + String(MESH_NET_ID) +
+               "|POLE=" + cmdQueue[bestIdx].targetNodeId +
+               "|ID=" + txId +
+               "|REQ=" + toSend +
+               "|AUTH=" + authTag +
+               "|EXP=" + String(expMs) +
+               "|SEQ=" + String(cmdQueue[bestIdx].seq);
+    }
+
     dispatchLoRaPacket("CMD", cmdQueue[bestIdx].targetNodeId, cmdQueue[bestIdx].nextHop,
-                       DEFAULT_TTL, cmdQueue[bestIdx].seq, cmdQueue[bestIdx].cmdString);
+                       DEFAULT_TTL, cmdQueue[bestIdx].seq, toSend);
   }
 }
 
@@ -220,10 +286,34 @@ void LoRaManager::processIncomingLoRa() {
   Serial.printf("[GW][LORA] RX Type: %s | Src: %s | Dst: %s | RSSI: %d dBm | Data: %s\n",
                 pkt.type.c_str(), pkt.src.c_str(), pkt.dst.c_str(), rssi, pkt.data.c_str());
 
+  discoveryMgr.onPacketReceived(pkt.src, rssi, snr);
+
+  // Handle discovery packets in gateway discovery engine
+  if (pkt.type == PKT_TYPE_DISC_BEACON || pkt.type == PKT_TYPE_NEIGH_ADV ||
+      pkt.type == PKT_TYPE_NEIGH_RSP || pkt.type == PKT_TYPE_LQ_REPORT) {
+    discoveryMgr.processDiscoveryPacket(pkt.type, pkt.src, pkt.dst, pkt.data, rssi, snr);
+    lastLoRaPacketInfo = "RX " + pkt.type + " from " + pkt.src + " (" + String(rssi) + "dBm)";
+    LoRa.receive();
+    return;
+  }
+
   lastLoRaPacketInfo = "RX " + pkt.type + " from " + pkt.src + " (" + String(rssi) + "dBm)";
 
-  // Update routing table from sender
-  meshMgr.updateRouteTable(pkt.src, pkt.src, 1, rssi);
+  // Persistent Revocation Protection (Prompt 12 Requirements 5, 6 & 13)
+  if (revocationMgr.isRevoked(pkt.src)) {
+    Serial.printf("[GW][SECURITY] ⛔ Blocked packet from REVOKED node: %s (Type: %s)\n", pkt.src.c_str(), pkt.type.c_str());
+    String txId = "REVOKED";
+    const RevocationRecord *rec = revocationMgr.getRevocationRecord(pkt.src);
+    if (rec) txId = String(rec->transactionId);
+    String sig = authSec.signPayload("REVOKED|" + txId, getNextSeq(), txId);
+    dispatchLoRaPacket("CMD", pkt.src, pkt.src, 1, getNextSeq(), "REVOKED|" + txId + "|" + sig);
+    LoRa.receive();
+    return;
+  }
+
+  // Reverse route learning: intermediate transmitter pkt.sender is the next-hop for downlink to pkt.src
+  int hopsTravelled = (pkt.ttl > 0 && pkt.ttl <= DEFAULT_TTL) ? (DEFAULT_TTL - pkt.ttl + 1) : 1;
+  meshMgr.updateRouteTable(pkt.src, pkt.sender, hopsTravelled, 0, rssi, snr);
 
   // CRITICAL REQUIREMENT 23: Gateway lastSeen must update from ANY valid packet from a node
   int updateIdx = meshMgr.findNodeIndex(pkt.src);
@@ -261,6 +351,15 @@ void LoRaManager::processIncomingLoRa() {
       hwId = (endHw > 0) ? pkt.data.substring(idxHw + 6, endHw) : pkt.data.substring(idxHw + 6);
     }
 
+    // Revocation Re-Join Protection (Requirement 6 & 13)
+    if (revocationMgr.isRevoked(hwId) || revocationMgr.isRevoked(pkt.src)) {
+      Serial.printf("[GW][SECURITY] ⛔ RE-JOIN REJECTED: Hardware ID %s is PERMANENTLY REVOKED.\n", hwId.c_str());
+      String sig = authSec.signPayload("REVOKED|REJOIN_BLOCKED", getNextSeq(), "REJOIN_BLOCKED");
+      dispatchLoRaPacket("CMD", pkt.src, pkt.src, 1, getNextSeq(), "REVOKED|REJOIN_BLOCKED|" + sig);
+      LoRa.receive();
+      return;
+    }
+
     int nodeIdx = meshMgr.findNodeIndex(hwId);
     if (nodeIdx >= 0 && meshMgr.getNode(nodeIdx)->registered) {
       NodeRecord *node = meshMgr.getNode(nodeIdx);
@@ -285,6 +384,20 @@ void LoRaManager::processIncomingLoRa() {
   // ── 2. NBHEALTHREPORT PACKET ──
   else if (pkt.type == "NBHEALTHREPORT") {
     meshMgr.onNeighborHealthReport(pkt.src, pkt.data, rssi);
+  }
+  // ── 2B. ROUTE_UPDATE PACKET (PROMPT 10) ──
+  else if (pkt.type == "ROUTE_UPDATE") {
+    meshMgr.onRouteUpdate(pkt.src, pkt.data, rssi, snr);
+  }
+  // ── 2C. ROUTE_RECOVERED PACKET (PROMPT 10) ──
+  else if (pkt.type == "ROUTE_RECOVERED") {
+    meshMgr.onRouteRecovered(pkt.src, pkt.data, rssi, snr);
+  }
+  // ── 2D. RREQ (ORPHAN ROUTE REQUEST) ──
+  else if (pkt.type == "RREQ") {
+    dispatchLoRaPacket("RREP", pkt.src, pkt.sender, 1, getNextSeq(), "RANK=0|PARENT=NONE|COST=0|CHILDREN=0");
+    Serial.printf("[GW][MESH] Replied RREP to orphan %s via %s (Rank 0, Cost 0)\n",
+                  pkt.src.c_str(), pkt.sender.c_str());
   }
   // ── 3. ACK PACKET ──
   else if (pkt.type == "ACK") {
@@ -388,6 +501,33 @@ void LoRaManager::processIncomingLoRa() {
           break;
         }
       }
+    }
+  }
+  // ── 3B. CONFIG_ACK PACKET (PROMPT 20) ──
+  else if (pkt.type == "CONFIG_ACK") {
+    Serial.printf("[GW][CONFIG] Received CONFIG_ACK seq=%u from %s: %s\n", pkt.seq, pkt.src.c_str(), pkt.data.c_str());
+    int pVer = pkt.data.indexOf("VER=");
+    int pHash = pkt.data.indexOf("HASH=");
+    int pStatus = pkt.data.indexOf("STATUS=");
+    int pTx = pkt.data.indexOf("TX=");
+
+    uint16_t ver = (pVer >= 0) ? (uint16_t)pkt.data.substring(pVer + 4, pkt.data.indexOf('|', pVer)).toInt() : 0;
+    uint32_t hash = (pHash >= 0) ? (uint32_t)strtoul(pkt.data.substring(pHash + 5, pkt.data.indexOf('|', pHash)).c_str(), nullptr, 10) : 0;
+    String status = (pStatus >= 0) ? pkt.data.substring(pStatus + 7, pkt.data.indexOf('|', pStatus)) : "UNKNOWN";
+    String txId = (pTx >= 0) ? pkt.data.substring(pTx + 3) : "";
+
+    gwConfigMgr.onConfigAck(pkt.src.c_str(), ver, hash, status.c_str(), txId.c_str(), "");
+    configDist.onNodeAck(pkt.src.c_str(), ver, (status == "APPLIED"), status.c_str());
+
+    if (tgMgr.isTelegramOnline()) {
+      String icon = (status == "APPLIED") ? "✅" : "⚠️";
+      String tgMsg = icon + " *Configuration Update Result*\n\n"
+                     "📍 *Node:* `" + pkt.src + "`\n"
+                     "🆔 *Tx ID:* `" + txId + "`\n"
+                     "📦 *Version:* `V" + String(ver) + "`\n"
+                     "🚦 *Status:* `" + status + "`\n"
+                     "🔑 *Hash:* `0x" + String(hash, HEX) + "`";
+      tgMgr.sendMessage(OWNER_CHAT, tgMsg, "Markdown");
     }
   }
   // ── 4. LINK_ACK PACKET ──
@@ -547,6 +687,10 @@ void LoRaManager::processIncomingLoRa() {
   // ── 7. FDR PACKET ──
   else if (pkt.type == "FDR") {
     feederMgr.processFeederTelemetry(pkt.src, pkt.data, rssi);
+  }
+  // ── 8. 21-CHANNEL METROLOGY PACKETS (PROMPT 14) ──
+  else if (pkt.type == "TEL_VOLT" || pkt.type == "TEL_FDR1" || pkt.type == "TEL_FDR2" || pkt.type == "TEL_ALERT") {
+    feederMgr.processMetrologyPacket(pkt.type, pkt.src, pkt.data, rssi);
   }
 
   LoRa.receive();

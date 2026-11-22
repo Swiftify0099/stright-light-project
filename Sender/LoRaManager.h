@@ -1,6 +1,6 @@
 /*
  * =====================================================================
- *  LORAMANAGER.H — GATEWAY LORA RADIO & PROTOCOL MANAGER
+ *  LORAMANAGER.H — GATEWAY LORA RADIO & PROTOCOL MANAGER (V10)
  * =====================================================================
  */
 
@@ -18,12 +18,15 @@ public:
   LoRaManager();
   void init();
 
-  // Packet builder & parser
+  // Packet builder & parser (8-field mesh frame with 7-field fallback)
   String buildPacket(const String &type, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data);
+  String buildPacket(const String &type, const String &src, const String &dst, const String &nextHop, const String &sender, int ttl, uint16_t seq, const String &data);
   bool   parsePacket(const String &raw, int rssi, int snr, ParsedPacket &out);
 
   // Transmission & Command Queue
   void   dispatchLoRaPacket(const String &type, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data);
+  void   dispatchLoRaPacket(const String &type, const String &src, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data);
+  void   sendRootBeacon();
   void   queueCommand(const String &chatId, const String &nodeId, const String &cmd, uint8_t priority = PRIO_MEDIUM);
   void   processCommandQueue();
 

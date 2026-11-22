@@ -23,6 +23,13 @@ public:
   void loadWiFiCredentials(String &ssid, String &pass);
   void saveWiFiCredentials(const String &ssid, const String &pass);
 
+  // Secure Wi-Fi Configuration Storage (Prompt 17)
+  void loadWiFiConfig(String &activeSsid, String &activePass, String &prevSsid, String &prevPass, uint8_t &commitState);
+  void saveWiFiActive(const String &ssid, const String &pass);
+  void saveWiFiPrevious(const String &ssid, const String &pass);
+  void setWiFiCommitState(uint8_t state);
+  uint8_t getWiFiCommitState();
+
   void addGwLog(const char* action, const char* target, uint8_t res);
   GwLogEntry* getGwLog(int index);
   uint8_t getGwLogCount() const;

@@ -36,6 +36,12 @@ public:
 
   void   setRegistration(const String &logicalId, const String &name, const String &type);
 
+  // Revocation management (Prompt 12)
+  bool   isRevoked() const;
+  String getRevocationTxId() const;
+  void   setRevoked(const String &txId, const String &reason);
+  void   clearRevocation();
+
 private:
   Preferences prefs;
   String hwNodeId;
@@ -44,6 +50,9 @@ private:
   String nodeType;
   String nodeLoc;
   bool   registered;
+  bool   revoked;
+  String revocationTxId;
+  String revocationReason;
   String prevRelayState;
 
   bool   schedEnabled;

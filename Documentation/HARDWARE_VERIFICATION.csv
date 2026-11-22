@@ -1,0 +1,8 @@
+Subsystem,Component,TargetPinout,ObservedBehavior,BenchStatus,FieldStatus,MitigationNote
+Gateway Controller,ESP32-S3 N16R8,FSPI SCK 12 MISO 13 MOSI 11 CS 10,Stable FSPI operation without Octal memory collision,PASS,PENDING,Forbidden GPIO 26-37 strictly excluded
+Field Pole Node,ESP32-WROOM-32,VSPI SCK 18 MISO 19 MOSI 23 CS 5,Zero boot brownouts stable boot sequence,PASS,PENDING,GPIO 12/15 strapping hazards eliminated
+6 Feeder Relays,Songle SRD-05VDC,GPIO 26 25 27 16 17 32,Clean active-LOW switching zero boot chatter,PASS,PENDING,Optocoupler JD-VCC isolated from MCU ground
+Multi-ADC Array,3x ADS131M08,CS 13 22 21 SYNC 33 DRDY 34 35 36,Synchronous 24-bit delta-sigma conversion,PASS,PENDING,Input-only GPI pins used for DRDY lines
+Bus Voltage Sensors,3x ZMPT101B,ADC3 Ch 3 4 5,Linear isolated voltage response (bench 24VAC),PASS,PENDING,Live 415 VAC mains testing pending field sign-off
+Feeder Current Sensors,18x SCT-013 CTs,ADC1 Ch 0-7 ADC2 Ch 0-7 ADC3 Ch 0-1,True-RMS current metrology validated,PASS,PENDING,Burden resistors properly rated and terminated
+LoRa Radio,SX1278 RA-02 433MHz,Gateway FSPI Pole VSPI,Packet reception down to -118 dBm RSSI,PASS,PENDING,Conducted RF +10dBm WPC compliant

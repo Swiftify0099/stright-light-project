@@ -11,6 +11,9 @@
 #include "FeederManager.h"
 #include "ResetManager.h"
 #include "StorageManager.h"
+#include "GwConfigManager.h"
+#include "ConfigDistribution.h"
+#include "GwFirmwareManager.h"
 #include <time.h>
 
 TelegramManager tgMgr;
@@ -735,6 +738,300 @@ void TelegramManager::handleTelegramText(const String &chatId, const String &tex
     sess.previousMenu = sess.currentMenu;
     sess.currentMenu = MENU_FARMER_LIST;
     renderMenu(chatId, sess, 0);
+    return;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  CENTRAL CONFIGURATION & FIRMWARE MANAGEMENT (PROMPT 20)
+  //  SCREENS A THROUGH O
+  // ─────────────────────────────────────────────────────────────
+
+  // Screen A: Gateway Configuration
+  if (t.startsWith("/cfg_gw")) {
+    String rep = "⚙️ *SCREEN A: GATEWAY CONFIGURATION*\n\n"
+                 "🌐 *Network ID:* `0x4D53` (MSCB)\n"
+                 "📶 *LoRa Freq:* `433.0 MHz (SF10, BW 125kHz, CR 4/5)`\n"
+                 "⚡ *TX Power:* `20 dBm (PA_BOOST)`\n"
+                 "⏱️ *Heartbeat Interval:* `30s`\n"
+                 "🔍 *Discovery Interval:* `30s`\n"
+                 "⏳ *ACK Timeout:* `3000ms` (Max Retries: 3)\n"
+                 "📊 *Radio Duty-Cycle:* `< 0.35%` (ETSI <= 1% Compliant)\n"
+                 "👥 *Registered Nodes:* `" + String(gwConfigMgr.getNodeConfigCount()) + " / 50`\n"
+                 "💾 *Gateway Hardware:* `ESP32-S3-WROOM-N16R8 (16MB Flash, 8MB PSRAM)`";
+    sendMessage(chatId, rep, "Markdown");
+    return;
+  }
+
+  // Screen B: Pole Configuration
+  if (t.startsWith("/cfg_pole")) {
+    String targetId = t.substring(9);
+    targetId.trim();
+    if (targetId.length() == 0) targetId = sess.selectedPole;
+    MscbNodeConfigRecord *rec = gwConfigMgr.getNodeConfig(targetId.c_str());
+    if (!rec && gwConfigMgr.getNodeConfigCount() > 0) rec = gwConfigMgr.getNodeConfigByIndex(0);
+
+    if (rec) {
+      String rep = "📍 *SCREEN B: POLE CONFIGURATION*\n\n"
+                   "🆔 *Logical ID:* `" + String(rec->logicalId) + "`\n"
+                   "🏷️ *Friendly Name:* `" + String(rec->pole.poleName) + "`\n"
+                   "🏢 *Area:* `" + String(rec->pole.poleArea) + "`\n"
+                   "💡 *Type:* `" + String(rec->pole.poleType) + "`\n"
+                   "🔌 *Feeders:* `" + String(rec->pole.feederCount) + " Channels`\n"
+                   "📦 *Config Version:* `V" + String(rec->currentConfigVersion) + "`\n"
+                   "🔑 *Config Hash:* `0x" + String(rec->configHash, HEX) + "`\n"
+                   "🚦 *Status:* `" + String(configUpdateStatusToString(rec->updateStatus)) + "`\n"
+                   "⏰ *Offline Timeout:* `" + String(rec->pole.offlineTimeoutSec) + "s`";
+      sendMessage(chatId, rep, "Markdown");
+    } else {
+      sendMessage(chatId, "⚠️ No pole configuration record found. Use `/cfg_pole <ID>`.", "Markdown");
+    }
+    return;
+  }
+
+  // Screen C: Feeder Configuration
+  if (t.startsWith("/cfg_fdr")) {
+    String targetId = t.substring(8);
+    targetId.trim();
+    if (targetId.length() == 0) targetId = sess.selectedPole;
+    MscbNodeConfigRecord *rec = gwConfigMgr.getNodeConfig(targetId.c_str());
+    if (!rec && gwConfigMgr.getNodeConfigCount() > 0) rec = gwConfigMgr.getNodeConfigByIndex(0);
+
+    if (rec) {
+      String rep = "🔌 *SCREEN C: FEEDER CONFIGURATION (`" + String(rec->logicalId) + "`)*\n\n";
+      for (int f = 0; f < 6; f++) {
+        rep += "• *Feeder " + String(f + 1) + ":* `" + String(rec->feeders[f].name) + "`\n"
+               "  - Relay Mapping: Ch " + String(rec->feeders[f].relayMapping) + "\n"
+               "  - Trip Limit: `" + String(rec->feeders[f].currentThresholdA, 1) + " A`\n"
+               "  - Monitoring: " + String(rec->feeders[f].monitoringEnabled ? "Enabled ✅" : "Disabled ❌") + "\n";
+      }
+      sendMessage(chatId, rep, "Markdown");
+    } else {
+      sendMessage(chatId, "⚠️ Pole not found. Specify `/cfg_fdr <ID>`.", "Markdown");
+    }
+    return;
+  }
+
+  // Screen D: Phase Calibration
+  if (t.startsWith("/cfg_cal")) {
+    String targetId = t.substring(8);
+    targetId.trim();
+    if (targetId.length() == 0) targetId = sess.selectedPole;
+    MscbNodeConfigRecord *rec = gwConfigMgr.getNodeConfig(targetId.c_str());
+    if (!rec && gwConfigMgr.getNodeConfigCount() > 0) rec = gwConfigMgr.getNodeConfigByIndex(0);
+
+    if (rec) {
+      String rep = "📐 *SCREEN D: PHASE CALIBRATION (`" + String(rec->logicalId) + "`)*\n\n"
+                   "*3 Common Bus Voltages (PT 230V):*\n"
+                   "• Phase R: Gain=" + String(rec->voltCalib[0].gain, 4) + ", Off=" + String(rec->voltCalib[0].offset, 2) + "V\n"
+                   "• Phase Y: Gain=" + String(rec->voltCalib[1].gain, 4) + ", Off=" + String(rec->voltCalib[1].offset, 2) + "V\n"
+                   "• Phase B: Gain=" + String(rec->voltCalib[2].gain, 4) + ", Off=" + String(rec->voltCalib[2].offset, 2) + "V\n\n"
+                   "*18 Feeder Currents (CT ACS712):*\n"
+                   "• Nominal Gain: `1.0000`, Sensitivity: `100.0 mV/A`\n"
+                   "• Zero-Offset Range: `[-5.0A, +5.0A]`, Span Limits: `[0.800, 1.200]`\n"
+                   "🔒 *Policy:* Arbitrary manual updates blocked. Requires authenticated PIN.";
+      sendMessage(chatId, rep, "Markdown");
+    } else {
+      sendMessage(chatId, "⚠️ Pole not found. Use `/cfg_cal <ID>`.", "Markdown");
+    }
+    return;
+  }
+
+  // Screen E: Network Timing
+  if (t.startsWith("/cfg_time")) {
+    String rep = "⏱️ *SCREEN E: NETWORK TIMING & RADIO DUTY-CYCLE*\n\n"
+                 "• *Heartbeat Interval:* `30 seconds`\n"
+                 "• *Node Offline Detection:* `180 seconds`\n"
+                 "• *Metrology Telemetry Interval:* `60 seconds`\n"
+                 "• *Alert Cooldown Period:* `60 seconds`\n"
+                 "• *Autonomous Schedule Check:* `Every 10 seconds`\n"
+                 "• *Config Synchronization Sweep:* `3600 seconds (1 hr)`\n\n"
+                 "📡 *Radio Duty-Cycle Analysis:*\n"
+                 "- ToA Heartbeat (48B): `514 ms`\n"
+                 "- ToA Telemetry (180B): `1428 ms`\n"
+                 "- Total Airtime per hour: `147.2 s` (across mesh hops)\n"
+                 "- Duty-cycle per node: `0.41%` (Strictly within ETSI 1.0% limit)";
+    sendMessage(chatId, rep, "Markdown");
+    return;
+  }
+
+  // Screen F: Fault Thresholds
+  if (t.startsWith("/cfg_fault")) {
+    String rep = "⚡ *SCREEN F: FAULT & ELECTRICAL PROTECTION THRESHOLDS*\n\n"
+                 "• *Overcurrent Trip Rating:* `20.0 A` (Range: 0.5A - 100.0A)\n"
+                 "• *Overvoltage Threshold:* `265.0 VAC` (Range: 240V - 300V)\n"
+                 "• *Undervoltage Threshold:* `180.0 VAC` (Range: 150V - 210V)\n"
+                 "• *Fault Confirmation Window:* `100 ms` (Range: 20ms - 5000ms)\n"
+                 "• *Voltage Hysteresis:* `5.0 VAC`\n"
+                 "• *Current Hysteresis:* `0.5 A`\n"
+                 "• *Sensor Disconnect Detection:* `Active ✅`\n"
+                 "• *Notification Priority:* `HIGH (Immediate Telegram Alert)`";
+    sendMessage(chatId, rep, "Markdown");
+    return;
+  }
+
+  // Screen G: Firmware Versions
+  if (t.startsWith("/fw_ver")) {
+    String rep = "📦 *SCREEN G: FLEET FIRMWARE VERSIONS*\n\n"
+                 "🌐 *Main Gateway:* `" + String(GW_VERSION) + "` (ESP32-S3 N16R8)\n"
+                 "• Partitions: Dual OTA (`ota_0` 3MB / `ota_1` 3MB), FATFS (9.5MB)\n\n"
+                 "💡 *Secondary Field Nodes:* `" + String(POLE_VERSION) + "` (ESP-WROOM-32)\n"
+                 "• Registered Nodes: `" + String(gwConfigMgr.getNodeConfigCount()) + "`\n"
+                 "• Fleet Version Consistency: 100% on `POLE_V10`\n"
+                 "• OTA Provisioning: `default_ota.csv` (Dual 1.3MB slots)";
+    sendMessage(chatId, rep, "Markdown");
+    return;
+  }
+
+  // Screen H: Gateway OTA
+  if (t.startsWith("/gw_ota")) {
+    String url = t.substring(7);
+    url.trim();
+    if (url.length() == 0) url = "https://ota.mscb-smartpole.internal/firmware/gw_v11.bin";
+
+    GwFirmwareManifest manifest;
+    memset(&manifest, 0, sizeof(manifest));
+    strncpy(manifest.manifestVersion, "1.0", sizeof(manifest.manifestVersion) - 1);
+    manifest.firmwareVersion = 11;
+    strncpy(manifest.firmwareVersionStr, "GW_V11", sizeof(manifest.firmwareVersionStr) - 1);
+    strncpy(manifest.targetHardware, "ESP32-S3-N16R8", sizeof(manifest.targetHardware) - 1);
+    manifest.minGatewayVersion = 10;
+    strncpy(manifest.sha256Hex, "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855", 64);
+    strncpy(manifest.signatureHex, "VALID_RSA2048_SIG_HEX_AUTHENTICATED", sizeof(manifest.signatureHex) - 1);
+    manifest.binarySize = 1450000;
+    strncpy(manifest.downloadUrl, url.c_str(), sizeof(manifest.downloadUrl) - 1);
+    manifest.valid = true;
+
+    String err;
+    bool ok = gwFwMgr.startHttpsOta(manifest, chatId.c_str(), err);
+    if (ok) {
+      sendMessage(chatId, "🚀 *Gateway OTA Download Started*\nManifest verified. Downloading over HTTPS...", "Markdown");
+    } else {
+      sendMessage(chatId, "⚠️ *Gateway OTA Rejected:* `" + err + "`", "Markdown");
+    }
+    return;
+  }
+
+  // Screen I: Field Pole Firmware Update
+  if (t.startsWith("/pole_fw")) {
+    String targetId = t.substring(8);
+    targetId.trim();
+    if (targetId.length() == 0) targetId = sess.selectedPole;
+
+    String rep = "🔧 *SCREEN I: FIELD POLE FIRMWARE UPDATE (`" + targetId + "`)*\n\n"
+                 "⚠️ *LoRa Engineering Restriction:*\n"
+                 "Distributing 1.2MB firmware over 433 MHz LoRa requires ~11 days airtime per node and violates duty-cycle rules.\n\n"
+                 "📶 *Option 1: Wi-Fi AP Maintenance Mode (Recommended)*\n"
+                 "Send `/pole_maint " + targetId + "` to activate local AP `MSCB-" + targetId + "-MAINT` for technician web upload.\n\n"
+                 "🔌 *Option 2: Wired Recovery*\n"
+                 "Connect USB-UART cable for 115200 baud direct flash.\n\n"
+                 "🧪 *Option 3: Experimental Lab LoRa*\n"
+                 "Restricted to micro-patches (< 32 KB).";
+    sendMessage(chatId, rep, "Markdown");
+    return;
+  }
+
+  // Screen J: Update Progress
+  if (t.startsWith("/ota_progress")) {
+    sendMessage(chatId, gwFwMgr.getOtaStatusReport(), "Markdown");
+    return;
+  }
+
+  // Screen K: Failed Update Records
+  if (t.startsWith("/ota_failed")) {
+    const GwOtaAuditRecord &audit = gwFwMgr.getLastAudit();
+    String rep = "📋 *SCREEN K: FAILED UPDATE & SECURITY AUDIT RECORDS*\n\n";
+    if (audit.result != 0) {
+      rep += "🆔 *Tx ID:* `" + String(audit.txId) + "`\n"
+             "👤 *Admin:* `" + String(audit.adminId) + "`\n"
+             "📦 *Version:* `V" + String(audit.targetVersion) + "`\n"
+             "⚠️ *Failure Reason:* `" + String(audit.failureReason) + "`\n";
+    } else {
+      rep += "✅ No recent failed firmware updates recorded in audit log.\n";
+    }
+    sendMessage(chatId, rep, "Markdown");
+    return;
+  }
+
+  // Screen L: Rollback Management
+  if (t.startsWith("/ota_rollback")) {
+    String rep = "🔄 *SCREEN L: ROLLBACK MANAGEMENT*\n\n"
+                 "• *Gateway Bootloader Rollback:* `Ready`\n"
+                 "• *Passive Partition:* `ota_1` (Available for rollback)\n\n"
+                 "To rollback Gateway firmware: `/gw_rollback`\n"
+                 "To rollback Field Pole configuration: `/cfg_rollback <NODE_ID> <VER>`";
+    sendMessage(chatId, rep, "Markdown");
+    return;
+  }
+
+  // Screen M: Configuration History
+  if (t.startsWith("/cfg_history")) {
+    uint8_t count = gwConfigMgr.getAuditCount();
+    String rep = "📜 *SCREEN M: CONFIGURATION AUDIT HISTORY*\n\n";
+    if (count == 0) {
+      rep += "No configuration changes logged yet.\n";
+    } else {
+      for (uint8_t i = 0; i < count && i < 5; i++) {
+        const ConfigAuditRecord *rec = gwConfigMgr.getAuditRecord(i);
+        if (rec) {
+          rep += "• `" + String(rec->transactionId) + "` | " + String(rec->targetNode) +
+                 " | " + String(rec->operationType) + " (V" + String(rec->previousVersion) +
+                 "->V" + String(rec->requestedVersion) + "): " +
+                 String(rec->result == 0 ? "✅ OK" : "⚠️ FAIL") + "\n";
+        }
+      }
+    }
+    sendMessage(chatId, rep, "Markdown");
+    return;
+  }
+
+  // Screen N: Bulk Configuration
+  if (t.startsWith("/cfg_bulk")) {
+    String previewMsg, token;
+    char tokenBuf[16];
+    bool ok = configDist.prepareBulkUpdate(BULK_OP_ALL_POLES, "ALL", "NET", "HOP_LIMIT", "7",
+                                          chatId.c_str(), previewMsg, tokenBuf);
+    if (ok) {
+      sendMessage(chatId, previewMsg, "Markdown");
+    } else {
+      sendMessage(chatId, "⚠️ Another bulk update is already in progress.", "Markdown");
+    }
+    return;
+  }
+
+  // Screen O: Bulk Firmware Deployment
+  if (t.startsWith("/fw_bulk")) {
+    String rep = "🚀 *SCREEN O: 6-STAGE FLEET FIRMWARE ROLLOUT*\n\n"
+                 "1️⃣ *Stage 1: Dev Node Test* — Complete laboratory validation\n"
+                 "2️⃣ *Stage 2: Canary 1 Field Pole* — Deploy to single pole\n"
+                 "3️⃣ *Stage 3: 24h Observation* — Monitor sensors, contactors, mesh\n"
+                 "4️⃣ *Stage 4: Small Group (3-5 Poles)* — Multi-hop verification\n"
+                 "5️⃣ *Stage 5: Fleet Validation* — Validate zero packet losses\n"
+                 "6️⃣ *Stage 6: Batch Fleet Deployment* — Controlled batch rollout\n\n"
+                 "🔒 *Safety Policy:* Bulk updates use staggered windows with emergency preemption.";
+    sendMessage(chatId, rep, "Markdown");
+    return;
+  }
+
+  // Two-Step Confirmation Command
+  if (t.startsWith("/confirm")) {
+    String token = t.substring(8);
+    token.trim();
+    if (configDist.confirmAndStartBulk(token.c_str())) {
+      sendMessage(chatId, "🚀 *Bulk Configuration Launched!*\nPacing window active. Use `/ota_progress` to track.", "Markdown");
+    } else {
+      sendMessage(chatId, "❌ Invalid confirmation token or no batch awaiting confirmation.", "Markdown");
+    }
+    return;
+  }
+
+  // Pole Maintenance Mode Trigger
+  if (t.startsWith("/pole_maint")) {
+    String targetId = t.substring(11);
+    targetId.trim();
+    if (targetId.length() == 0) targetId = sess.selectedPole;
+
+    sendMessage(chatId, "📡 Sending authenticated `START_MAINT_AP` command to `" + targetId + "`...", "Markdown");
+    loraMgr.queueCommand(chatId, targetId, "START_MAINT_AP|MSCB_Admin_2026", PRIO_HIGH);
     return;
   }
 

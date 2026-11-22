@@ -1,6 +1,7 @@
 /*
  * =====================================================================
- *  VOLTAGESENSOR.CPP — MULTI-PHASE ZMPT101B VOLTAGE SENSING MODULE
+ *  VOLTAGESENSOR.CPP — THREE-PHASE HIGH PRECISION VOLTAGE METROLOGY
+ *  MSCB Smart Pole Automation System — Prompt 14 Architecture
  * =====================================================================
  */
 
@@ -9,94 +10,91 @@
 
 VoltageSensor voltageSensor;
 
-VoltageSensor::VoltageSensor() :
-  voltageR(0.0f), voltageY(0.0f), voltageB(0.0f),
-  voltageStateR("NO_SIGNAL"), voltageStateY("NO_SIGNAL"), voltageStateB("NO_SIGNAL")
-{}
+VoltageSensor::VoltageSensor() : lastUpdateMs(0) {}
 
 void VoltageSensor::init() {
-  pinMode(VOLTAGE_R_PIN, INPUT);
-  pinMode(VOLTAGE_Y_PIN, INPUT);
-  pinMode(VOLTAGE_B_PIN, INPUT);
+  AdcPinConfig pins;
+  pins.csPins[0] = ADC_CS1_PIN;
+  pins.csPins[1] = ADC_CS2_PIN;
+  pins.csPins[2] = ADC_CS3_PIN;
+  pins.syncPin   = ADC_SYNC_PIN;
+  pins.drdyPin   = ADC_DRDY_PIN;
+  pins.sckPin    = ADC_SCK_PIN;
+  pins.misoPin   = ADC_MISO_PIN;
+  pins.mosiPin   = ADC_MOSI_PIN;
+  pins.spiSpeedHz = ADS131_SPI_SPEED;
 
-  analogReadResolution(12);
-  analogSetAttenuation(ADC_11db); // 0-3.3V range on ESP32 ADC1
+  adcDriver.init(pins);
+  metrologyEngine.init();
 
-  // Warm-up reading
+  // Initial update
   update();
-}
-
-void VoltageSensor::sampleChannel(uint8_t pin, float &outVoltage, String &outState) {
-  if (pin == 0) {
-    outVoltage = 0.0f;
-    outState = "DISCONNECTED";
-    return;
-  }
-
-  uint64_t sumVsq = 0;
-  uint32_t sumAdc = 0;
-  uint32_t minAdc = 4095;
-  uint32_t maxAdc = 0;
-  const int SAMPLES = 300; // 300 samples across ~30ms (1.5 to 2 AC cycles at 50Hz)
-  
-  for (int i = 0; i < SAMPLES; i++) {
-    uint32_t adc = analogRead(pin);
-    sumAdc += adc;
-    sumVsq += (uint64_t)(adc * adc);
-    if (adc < minAdc) minAdc = adc;
-    if (adc > maxAdc) maxAdc = adc;
-    delayMicroseconds(90);
-  }
-  
-  float meanAdc = (float)sumAdc / SAMPLES;
-  float meanVsq = (float)sumVsq / SAMPLES;
-  uint32_t p2p  = (maxAdc >= minAdc) ? (maxAdc - minAdc) : 0;
-  
-  // Statistical variance cleanly removes DC bias without hardcoded assumptions
-  float variance = meanVsq - (meanAdc * meanAdc);
-  if (variance < 0.0f) variance = 0.0f;
-  
-  float rawVrms = sqrt(variance) * (ADC_VREF / ADC_MAX);
-  float calculatedMainsV = rawVrms * ZMPT101B_CALIBRATION_FACTOR;
-  
-  // ── ZMPT101B State Classification ──
-  // 1. Physically floating / grounded rail
-  if (meanAdc < 80.0f || meanAdc > 4020.0f) {
-    outState = "DISCONNECTED";
-    outVoltage = 0.0f;
-  }
-  // 2. DC bias present but AC amplitude flat (Mains is OFF or 0V)
-  else if (p2p < 20 || calculatedMainsV < 25.0f) {
-    outState = "NO_SIGNAL";
-    outVoltage = 0.0f;
-  }
-  // 3. Valid dynamic measured AC mains voltage
-  else {
-    outState = "VALID";
-    outVoltage = calculatedMainsV;
-  }
+  Serial.println(F("[VOLT] High-Precision Three-Phase Voltage Metrology Subsystem Ready"));
 }
 
 void VoltageSensor::update() {
-  sampleChannel(VOLTAGE_R_PIN, voltageR, voltageStateR);
-  sampleChannel(VOLTAGE_Y_PIN, voltageY, voltageStateY);
-  sampleChannel(VOLTAGE_B_PIN, voltageB, voltageStateB);
+  AdcRawSampleFrame frame;
+  // Read synchronized frame across all 3 ADS131M08 chips
+  if (adcDriver.readSynchronizedFrame(frame)) {
+    metrologyEngine.processRawSample(frame);
+  }
+
+  // Periodic window computation
+  metrologyEngine.computeMetrologyWindow();
 
 #if DEBUG_ZMPT101B
   static unsigned long lastDiagPrint = 0;
   if (millis() - lastDiagPrint >= 5000) {
     lastDiagPrint = millis();
-    Serial.printf("[ZMPT101B] R: %.1fV (%s) | Y: %.1fV (%s) | B: %.1fV (%s)\n",
-                  voltageR, voltageStateR.c_str(),
-                  voltageY, voltageStateY.c_str(),
-                  voltageB, voltageStateB.c_str());
+    Serial.printf("[METROLOGY-VOLT] R: %.1fV (%s) | Y: %.1fV (%s) | B: %.1fV (%s) | Freq: %.2f Hz\n",
+                  getVoltageR(), getVoltageStateR().c_str(),
+                  getVoltageY(), getVoltageStateY().c_str(),
+                  getVoltageB(), getVoltageStateB().c_str(),
+                  getGridFrequency());
   }
 #endif
 }
 
-float  VoltageSensor::getVoltageR() const { return voltageR; }
-float  VoltageSensor::getVoltageY() const { return voltageY; }
-float  VoltageSensor::getVoltageB() const { return voltageB; }
-String VoltageSensor::getVoltageStateR() const { return voltageStateR; }
-String VoltageSensor::getVoltageStateY() const { return voltageStateY; }
-String VoltageSensor::getVoltageStateB() const { return voltageStateB; }
+float VoltageSensor::getVoltageR() const {
+  return metrologyEngine.getCommonVoltageR();
+}
+
+float VoltageSensor::getVoltageY() const {
+  return metrologyEngine.getCommonVoltageY();
+}
+
+float VoltageSensor::getVoltageB() const {
+  return metrologyEngine.getCommonVoltageB();
+}
+
+String VoltageSensor::getVoltageStateR() const {
+  return String(PowerMeasurementEngine::getValidityString(metrologyEngine.getVoltageState().stateR));
+}
+
+String VoltageSensor::getVoltageStateY() const {
+  return String(PowerMeasurementEngine::getValidityString(metrologyEngine.getVoltageState().stateY));
+}
+
+String VoltageSensor::getVoltageStateB() const {
+  return String(PowerMeasurementEngine::getValidityString(metrologyEngine.getVoltageState().stateB));
+}
+
+bool VoltageSensor::isVoltageValidR() const {
+  return (metrologyEngine.getVoltageState().stateR == MEAS_VALID);
+}
+
+bool VoltageSensor::isVoltageValidY() const {
+  return (metrologyEngine.getVoltageState().stateY == MEAS_VALID);
+}
+
+bool VoltageSensor::isVoltageValidB() const {
+  return (metrologyEngine.getVoltageState().stateB == MEAS_VALID);
+}
+
+float VoltageSensor::getGridFrequency() const {
+  return metrologyEngine.getGridFrequency();
+}
+
+bool VoltageSensor::isThreePhaseBalanced() const {
+  return metrologyEngine.getVoltageState().threePhaseSymmetric;
+}

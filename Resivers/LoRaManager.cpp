@@ -1,6 +1,6 @@
 /*
  * =====================================================================
- *  LORAMANAGER.CPP — FIELD POLE LORA RADIO & PROTOCOL MANAGER
+ *  LORAMANAGER.CPP — FIELD POLE LORA RADIO & PROTOCOL MANAGER (V10)
  * =====================================================================
  */
 
@@ -47,10 +47,10 @@ uint16_t LoRaManager::nextSeq() {
   return nodeMasterSeq;
 }
 
-String LoRaManager::buildPacket(const String &type, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data) {
-  String mySrc = storageMgr.getNodeId().length() > 0 ? storageMgr.getNodeId() : storageMgr.getHwNodeId();
+String LoRaManager::buildPacket(const String &type, const String &src, const String &dst, const String &nextHop, const String &sender, int ttl, uint16_t seq, const String &data) {
   String nh = (nextHop.length() > 0) ? nextHop : BROADCAST_ID;
-  return type + "|" + mySrc + "|" + dst + "|" + nh + "|" + String(ttl) + "|" + String(seq) + "|" + data;
+  String snd = (sender.length() > 0) ? sender : src;
+  return type + "|" + src + "|" + dst + "|" + nh + "|" + snd + "|" + String(ttl) + "|" + String(seq) + "|" + data;
 }
 
 bool LoRaManager::parsePacket(const String &raw, int rssi, int snr, ParsedPacket &out) {
@@ -58,12 +58,12 @@ bool LoRaManager::parsePacket(const String &raw, int rssi, int snr, ParsedPacket
   out.rssi = rssi;
   out.snr  = snr;
 
-  String fields[7];
+  String fields[8];
   int fieldCount = 0;
   int start = 0;
   for (int i = 0; i <= (int)raw.length(); i++) {
     bool isEnd = (i == (int)raw.length());
-    bool isPipe = (!isEnd && raw[i] == '|' && fieldCount < 6);
+    bool isPipe = (!isEnd && raw[i] == '|' && fieldCount < 7);
     if (isEnd || isPipe) {
       fields[fieldCount++] = raw.substring(start, i);
       start = i + 1;
@@ -72,19 +72,50 @@ bool LoRaManager::parsePacket(const String &raw, int rssi, int snr, ParsedPacket
 
   if (fieldCount < 6) return false;
 
-  out.type    = fields[0];
-  out.src     = fields[1];
-  out.dst     = fields[2];
-  out.nextHop = fields[3];
-  out.ttl     = fields[4].toInt();
-  out.seq     = (uint16_t)fields[5].toInt();
-  out.data    = (fieldCount == 7) ? fields[6] : "";
-  out.valid   = true;
+  // Check 8-field mesh frame vs 7-field legacy frame
+  if (fieldCount >= 8) {
+    out.type    = fields[0];
+    out.src     = fields[1];
+    out.dst     = fields[2];
+    out.nextHop = fields[3];
+    out.sender  = fields[4];
+    out.ttl     = fields[5].toInt();
+    out.seq     = (uint16_t)fields[6].toInt();
+    out.data    = fields[7];
+  } else if (fieldCount == 7) {
+    out.type    = fields[0];
+    out.src     = fields[1];
+    out.dst     = fields[2];
+    out.nextHop = fields[3];
+    out.sender  = fields[1]; // In 7-field, sender defaults to src
+    out.ttl     = fields[4].toInt();
+    out.seq     = (uint16_t)fields[5].toInt();
+    out.data    = fields[6];
+  } else {
+    out.type    = fields[0];
+    out.src     = fields[1];
+    out.dst     = fields[2];
+    out.nextHop = fields[3];
+    out.sender  = fields[1];
+    out.ttl     = fields[4].toInt();
+    out.seq     = (uint16_t)fields[5].toInt();
+    out.data    = "";
+  }
+
+  out.valid = true;
   return true;
 }
 
+// Locally originated transmission
 void LoRaManager::txMesh(const String &type, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data) {
-  String packet = buildPacket(type, dst, nextHop, ttl, seq, data);
+  String mySrc = storageMgr.getNodeId().length() > 0 ? storageMgr.getNodeId() : storageMgr.getHwNodeId();
+  txMesh(type, mySrc, dst, nextHop, ttl, seq, data);
+}
+
+// Forwarded or explicit source transmission
+void LoRaManager::txMesh(const String &type, const String &src, const String &dst, const String &nextHop, int ttl, uint16_t seq, const String &data) {
+  String mySender = storageMgr.getNodeId().length() > 0 ? storageMgr.getNodeId() : storageMgr.getHwNodeId();
+  String packet = buildPacket(type, src, dst, nextHop, mySender, ttl, seq, data);
 
   LoRa.idle();
   LoRa.beginPacket();
@@ -116,29 +147,11 @@ void LoRaManager::processIncomingLoRa() {
     return;
   }
 
-  Serial.printf("[POLE] RX Type: %s | Src: %s | Dst: %s | NextHop: %s | Seq: %u | RSSI: %d dBm | Data: %s\n",
-                pkt.type.c_str(), pkt.src.c_str(), pkt.dst.c_str(), pkt.nextHop.c_str(), pkt.seq, rssi, pkt.data.c_str());
+  Serial.printf("[POLE] RX Type: %s | Src: %s | Sender: %s | Dst: %s | NextHop: %s | TTL: %d | Seq: %u | RSSI: %d dBm\n",
+                pkt.type.c_str(), pkt.src.c_str(), pkt.sender.c_str(), pkt.dst.c_str(), pkt.nextHop.c_str(), pkt.ttl, pkt.seq, rssi);
 
-  meshMgr.addOrUpdateNeighbor(pkt.src, rssi, snr);
-  meshMgr.addOrUpdateRoute(pkt.src, pkt.src, 1, rssi);
-
-  String myHw  = storageMgr.getHwNodeId();
-  String myLog = storageMgr.getNodeId();
-
-  // Determine if this packet is intended for this node
-  bool isForMe = false;
-  if (pkt.dst == BROADCAST_ID || pkt.dst == "ALL") {
-    isForMe = true;
-  } else if (myLog.length() > 0 && (pkt.dst == myLog || pkt.dst.equalsIgnoreCase(myLog))) {
-    isForMe = true;
-  } else if (myHw.length() > 0 && (pkt.dst == myHw || pkt.dst.equalsIgnoreCase(myHw))) {
-    isForMe = true;
-  } else if (pkt.type == "CMD" && (myLog.length() == 0 || !storageMgr.isRegistered())) {
-    // If not yet registered or logical ID empty, accept commands targeted by HW ID or registration commands
-    if (pkt.dst == myHw || pkt.data.startsWith("REGISTERED") || pkt.dst.startsWith("SL-") || pkt.dst.startsWith("FR-") || pkt.dst.startsWith("P")) {
-      isForMe = true;
-    }
-  }
+  // Update physical link neighbor table using the immediate transmitter
+  meshMgr.addOrUpdateNeighbor(pkt.sender, rssi, snr);
 
   // Deduplication check
   bool isDuplicate = false;
@@ -153,12 +166,72 @@ void LoRaManager::processIncomingLoRa() {
     seqCache[seqHead].src = pkt.src;
     seqCache[seqHead].seq = pkt.seq;
     seqHead = (seqHead + 1) % MAX_SEQ_CACHE;
-  } else if (!isForMe) {
+  }
+
+  // ── ROUTING CONTROL PACKETS (Handled before destination filtering) ──
+  if (pkt.type == "BEACON") {
+    meshMgr.onBeaconReceived(pkt.sender, pkt.data, rssi, snr);
+    LoRa.receive();
+    return;
+  }
+  else if (pkt.type == "RREQ") {
+    // If not orphaned, reply with our route parameters
+    meshMgr.sendRouteReply(pkt.src);
+    LoRa.receive();
+    return;
+  }
+  else if (pkt.type == "RREP") {
+    String myHw = storageMgr.getHwNodeId();
+    String myLog = storageMgr.getNodeId();
+    if (pkt.dst == myLog || pkt.dst == myHw) {
+      uint8_t r = INFINITY_RANK;
+      uint16_t c = 9999;
+      String p = "";
+      int ir = pkt.data.indexOf("RANK=");
+      if (ir >= 0) {
+        int er = pkt.data.indexOf('|', ir);
+        r = (uint8_t)pkt.data.substring(ir + 5, er > 0 ? er : pkt.data.length()).toInt();
+      }
+      int ic = pkt.data.indexOf("COST=");
+      if (ic >= 0) {
+        int ec = pkt.data.indexOf('|', ic);
+        c = (uint16_t)pkt.data.substring(ic + 5, ec > 0 ? ec : pkt.data.length()).toInt();
+      }
+      int ip = pkt.data.indexOf("PARENT=");
+      if (ip >= 0) {
+        int ep = pkt.data.indexOf('|', ip);
+        p = pkt.data.substring(ip + 7, ep > 0 ? ep : pkt.data.length());
+      }
+      meshMgr.onRouteReply(pkt.src, r, c, p, rssi, snr);
+    }
     LoRa.receive();
     return;
   }
 
-  // Process commands intended for this node
+  // If duplicate packet and not for route control, drop it now (prevents forwarding flood)
+  if (isDuplicate) {
+    LoRa.receive();
+    return;
+  }
+
+  String myHw  = storageMgr.getHwNodeId();
+  String myLog = storageMgr.getNodeId();
+
+  // Determine if this packet is intended for this node
+  bool isForMe = false;
+  if (pkt.dst == BROADCAST_ID || pkt.dst == "ALL") {
+    isForMe = true;
+  } else if (myLog.length() > 0 && (pkt.dst == myLog || pkt.dst.equalsIgnoreCase(myLog))) {
+    isForMe = true;
+  } else if (myHw.length() > 0 && (pkt.dst == myHw || pkt.dst.equalsIgnoreCase(myHw))) {
+    isForMe = true;
+  } else if (pkt.type == "CMD" && (myLog.length() == 0 || !storageMgr.isRegistered())) {
+    if (pkt.dst == myHw || pkt.data.startsWith("REGISTERED") || pkt.dst.startsWith("SL-") || pkt.dst.startsWith("FR-")) {
+      isForMe = true;
+    }
+  }
+
+  // ── 1. DESTINATION PROCESSING (PACKET FOR THIS NODE) ──
   if (isForMe) {
     if (pkt.type == "CMD") {
       cmdMgr.processCommand(pkt.data, pkt.src, pkt.seq, rssi, snr);
@@ -167,20 +240,28 @@ void LoRaManager::processIncomingLoRa() {
       meshMgr.startNeighborHealthCheck(pkt.src, pkt.data);
     }
     else if (pkt.type == "NB_PING") {
-      txMesh("NB_PONG", pkt.src, pkt.src, 1, nextSeq(), pkt.data);
+      txMesh("NB_PONG", pkt.src, pkt.sender, 1, nextSeq(), pkt.data);
     }
     else if (pkt.type == "NB_PONG") {
       meshMgr.onNeighborPong(pkt.src);
     }
-  }
-  // Controlled Mesh Forwarding: ONLY forward if explicitly addressed as the intermediate router
-  else if (pkt.ttl > 1 && pkt.src != myLog && pkt.src != myHw) {
-    if ((myLog.length() > 0 && pkt.nextHop == myLog) || (myHw.length() > 0 && pkt.nextHop == myHw)) {
-      String forwardNextHop = meshMgr.findNextHop(pkt.dst);
-      Serial.printf("[POLE][MESH] Forwarding for %s via %s (TTL: %d)\n",
-                    pkt.dst.c_str(), forwardNextHop.c_str(), pkt.ttl - 1);
-      txMesh(pkt.type, pkt.dst, forwardNextHop, pkt.ttl - 1, pkt.seq, pkt.data);
+    else if (pkt.type == "ACK") {
+      meshMgr.recordTxResult(pkt.sender, true);
     }
+  }
+
+  // ── 2. MULTI-HOP FORWARDING ENGINE ──
+  String forwardNextHop;
+  if (!isForMe && meshMgr.shouldForward(pkt, forwardNextHop)) {
+    // Reverse route learning: intermediate node learns downstream path to pkt.src
+    int hopsTravelled = DEFAULT_TTL - pkt.ttl + 1;
+    meshMgr.addOrUpdateRoute(pkt.src, pkt.sender, hopsTravelled, 0, rssi, snr);
+
+    meshMgr.recordForwardedPacket();
+    Serial.printf("[POLE][MESH] ⏩ Forwarding %s for %s via %s (TTL: %d -> %d)\n",
+                  pkt.type.c_str(), pkt.dst.c_str(), forwardNextHop.c_str(), pkt.ttl, pkt.ttl - 1);
+
+    txMesh(pkt.type, pkt.src, pkt.dst, forwardNextHop, pkt.ttl - 1, pkt.seq, pkt.data);
   }
 
   LoRa.receive();

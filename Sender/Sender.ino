@@ -15,10 +15,23 @@
 #include "FeederManager.h"
 #include "ResetManager.h"
 #include "LoRaManager.h"
-#include "TelegramMenus.h"
-#include "TelegramManager.h"
+#include "DiscoveryManager.h"
+#include "GwTelegram.h"
+#include "WiFiConfigManager.h"
+#include "TelegramMenuManager.h"
+#include "TelegramCallbackManager.h"
+#include "TelegramSessionManager.h"
+#include "TelegramNotificationManager.h"
 #include "HeartbeatManager.h"
 #include "StorageManager.h"
+#include "CentralStorage.h"
+#include "GwRegistry.h"
+#include "AlertManager.h"
+#include "GwConfigManager.h"
+#include "ConfigDistribution.h"
+#include "GwFirmwareManager.h"
+#include "RevocationManager.h"
+#include "AuthSecurity.h"
 #include <time.h>
 
 // ─────────────────────────────────────────────────────────────
@@ -31,6 +44,8 @@ static unsigned long tNodeTimeout   = 0;
 static unsigned long tNvsFlush      = 0;
 static unsigned long tNtpResync     = 0;
 static unsigned long tTimeSync      = 0;
+static unsigned long tRootBeacon    = 0;
+static unsigned long tRouteExpire   = 0;
 
 void processTimeSyncPush() {
   time_t raw = time(nullptr);
@@ -50,12 +65,22 @@ void setup() {
   Serial.println(F("=================================================="));
 
   // 1. Initialize Subsystems
+  authSec.init();
+  centralStorage.init();
+  gwRegistry.init();
+  gwConfigMgr.init();
+  configDist.init();
+  gwFwMgr.init();
+  alertMgr.init();
+  revocationMgr.init();
   meshMgr.init();
   feederMgr.init();
   storageMgr.init();
   resetMgr.init();
   heartbeatMgr.init();
+  discoveryMgr.init();
   loraMgr.init();
+  wifiCfgMgr.init();
   tgMgr.init();
 
   // 2. Initialize Scheduler Timestamps
@@ -67,6 +92,8 @@ void setup() {
   tNvsFlush      = now;
   tNtpResync     = now;
   tTimeSync      = now;
+  tRootBeacon    = now;
+  tRouteExpire   = now;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -78,7 +105,15 @@ void loop() {
   // 1. High Priority: LoRa Radio Reception (Never blocked)
   loraMgr.processIncomingLoRa();
 
-  // 2. Outgoing Command Queue Processing (Every 50ms)
+  // 2. Gateway Root Discovery & Link Quality Processing
+  discoveryMgr.update();
+
+  // 3. Central Alert Processing & Config Distribution Updates
+  alertMgr.update();
+  configDist.update();
+  gwConfigMgr.checkTimeouts(now);
+
+  // 4. Outgoing Command Queue Processing (Every 50ms)
   if (now - tQueueProcess >= 50) {
     tQueueProcess = now;
     loraMgr.processCommandQueue();
@@ -96,10 +131,13 @@ void loop() {
     }
   }
 
-  // 5. WiFi & Telegram Watchdog
+  // 5. WiFi & Telegram Watchdog & Non-blocking Config Manager
+  wifiCfgMgr.update();
+  wifiCfgMgr.processSerialCommands();
   tgMgr.checkWiFiAndTelegram();
 
   // 6. Node Health & Timeout Transitions (Every 10s)
+  revocationMgr.checkTimeout();
   if (now - tNodeTimeout >= 10000) {
     tNodeTimeout = now;
     heartbeatMgr.checkNodeTimeouts();
@@ -121,5 +159,17 @@ void loop() {
   if (now - tNtpResync >= NTP_SYNC_INTERVAL_MS) {
     tNtpResync = now;
     tgMgr.checkNtpSync();
+  }
+
+  // 10. Gateway Root DAG Beacon Broadcast (Every 30s)
+  if (now - tRootBeacon >= BEACON_INTERVAL_MS) {
+    tRootBeacon = now;
+    loraMgr.sendRootBeacon();
+  }
+
+  // 11. Mesh Route Expiration Sweep (Every 60s)
+  if (now - tRouteExpire >= 60000UL) {
+    tRouteExpire = now;
+    meshMgr.expireRoutes();
   }
 }

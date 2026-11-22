@@ -1,6 +1,7 @@
 /*
  * =====================================================================
  *  COMMANDMANAGER.H — FIELD POLE COMMAND PROCESSOR & ACK DISPATCHER
+ *  MSCB Smart Pole Automation System — Prompt 15 Architecture
  * =====================================================================
  */
 
@@ -18,6 +19,8 @@ public:
 
   void processCommand(const String &cmd, const String &from, uint16_t seq, int rssi, int snr);
   void sendAck(const String &to, const String &nextHop, uint16_t seq, const String &cmd, const String &status, const String &state);
+  void sendDetailedAck(const String &to, const String &nextHop, uint16_t seq, const String &cmd,
+                       const String &status, uint8_t feederIndex, const CommandTransaction &tx);
   void sendStatus(const String &replyTo, uint16_t seq);
   void sendNewNode();
 
@@ -38,6 +41,8 @@ private:
   bool          hasTimeSync;
   int           lastSchedChecked;
   int           newNodeRetries;
+
+  bool parseParameter(const String &src, const String &key, String &val);
 };
 
 extern CommandManager cmdMgr;

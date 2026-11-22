@@ -1,0 +1,21 @@
+Created At: 2026-11-22T01:51:58+05:30
+Completed At: 2026-11-22T01:51:58+05:30
+Created At: 2026-11-22T01:51:58+05:30
+Completed At: 2026-11-22T01:51:58+05:30
+Showing lines 45-60 of 290
+45: #define LORA_MOSI        23  // VSPI MOSI
+46: 
+47: // ─────────────────────────────────────────────────────────────
+48: //  LORA RF CONFIGURATION (SX1278 @ 433 MHz)
+49: //  MUST MATCH IDENTICALLY ON GATEWAY AND ALL FIELD POLES
+50: // ─────────────────────────────────────────────────────────────
+51: #define LORA_FREQ        433E6    // 433.0 MHz Carrier Frequency
+52: #define LORA_SF          10       // Spreading Factor 10 (High range, robust link)
+53: #define LORA_BW          125E3    // 125.0 kHz Signal Bandwidth
+54: #define LORA_CR          5        // Coding Rate 4/5 (CR=5 means 4/5)
+55: #define LORA_TXPOW       20       // TX Power 20 dBm (PA_BOOST)
+56: #define LORA_SYNC_WORD   0x12     // Private Mesh Sync Word
+57: #define LORA_CRC_ENABLED true     // Hardware CRC payload protection
+58: 
+59: // ─────────────────────────────────────────────────────────────
+60: //  MESH NETWORK IDENTIFIERS & LIMITS

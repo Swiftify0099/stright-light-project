@@ -27,6 +27,7 @@ void HeartbeatManager::sendHeartbeat() {
   voltageSensor.update();
   float vR = voltageSensor.getVoltageR();
   float vY = voltageSensor.getVoltageY();
+  float vB = voltageSensor.getVoltageB();
   String vsR = voltageSensor.getVoltageStateR();
   
   currentSensor.update(vR, feederMgr.isMainRelayOn());
@@ -37,12 +38,14 @@ void HeartbeatManager::sendHeartbeat() {
   // Main telemetry
   String data = "LIGHT=" + lgt + 
                 "|V=" + String(vR, 1) + 
+                "|VY=" + String(vY, 1) + 
+                "|VB=" + String(vB, 1) + 
                 "|VS=" + vsR + 
                 "|A=" + String(a, 2) + 
                 "|UPTIME=" + String(up);
 
   // Multi-feeder telemetry
-  String fdrData = feederMgr.buildFeederTelemetryString(vR, vY);
+  String fdrData = feederMgr.buildFeederTelemetryString(vR, vY, vB);
   if (fdrData.length() > 0) {
     data += "|" + fdrData;
   }
