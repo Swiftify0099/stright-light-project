@@ -26,7 +26,7 @@
 #include "GwWiFiManager.h"
 #include "GwTelegramBot.h"
 #include "GwFirmwareManager.h"
-#include "CommandSecurity.h"
+#include <CommandSecurity.h>
 
 // =====================================================================
 //  GLOBAL STATE & TIMING VARIABLES

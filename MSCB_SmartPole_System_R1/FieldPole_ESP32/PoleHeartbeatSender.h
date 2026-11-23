@@ -22,7 +22,13 @@
 #include "PoleMeshRouter.h"
 #include "PoleActuators.h"
 #include "PoleMetrology.h"
-#include "../MSCBShared/Protocol.h"
+#if __has_include("../MSCBShared/Protocol.h")
+  #include "../MSCBShared/Protocol.h"
+#elif __has_include(<Protocol.h>)
+  #include <Protocol.h>
+#else
+  #include "Protocol.h"
+#endif
 
 class PoleHeartbeatSender {
 public:

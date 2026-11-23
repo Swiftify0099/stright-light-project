@@ -27,7 +27,7 @@
 #include "PoleHeartbeatSender.h"
 #include "PoleFeederManager.h"
 #include "PoleFirmwareManager.h"
-#include "CommandSecurity.h"
+#include <CommandSecurity.h>
 
 // =====================================================================
 //  GLOBAL STATE & TIMING VARIABLES

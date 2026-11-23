@@ -27,9 +27,19 @@
 #include "GwConfig.h"
 #include "GwRadioDriver.h"
 #include "GwNodeRegistry.h"
-#include "../MSCBShared/Protocol.h"
-#include "../MSCBShared/NetworkTypes.h"
-#include "../MSCBShared/CommandSecurity.h"
+#if __has_include("../MSCBShared/CommandSecurity.h")
+  #include "../MSCBShared/Protocol.h"
+  #include "../MSCBShared/NetworkTypes.h"
+  #include "../MSCBShared/CommandSecurity.h"
+#elif __has_include(<CommandSecurity.h>)
+  #include <Protocol.h>
+  #include <NetworkTypes.h>
+  #include <CommandSecurity.h>
+#else
+  #include "Protocol.h"
+  #include "NetworkTypes.h"
+  #include "CommandSecurity.h"
+#endif
 
 #define GW_MESH_MAX_HOPS             MSCB_DEFAULT_MAX_HOPS // 6
 #define GW_DUP_CACHE_SIZE            32

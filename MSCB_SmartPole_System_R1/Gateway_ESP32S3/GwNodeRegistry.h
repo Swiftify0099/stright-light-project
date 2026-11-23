@@ -25,8 +25,16 @@
 #endif
 
 #include "GwConfig.h"
-#include "../MSCBShared/StorageTypes.h"
-#include "../MSCBShared/Protocol.h"
+#if __has_include("../MSCBShared/StorageTypes.h")
+  #include "../MSCBShared/StorageTypes.h"
+  #include "../MSCBShared/Protocol.h"
+#elif __has_include(<StorageTypes.h>)
+  #include <StorageTypes.h>
+  #include <Protocol.h>
+#else
+  #include "StorageTypes.h"
+  #include "Protocol.h"
+#endif
 
 #define GW_MAX_PENDING_REGISTRATIONS 16
 #define GW_POLE_ID_START             0x0002 // Pole 2 (Gateway is 0x0001)

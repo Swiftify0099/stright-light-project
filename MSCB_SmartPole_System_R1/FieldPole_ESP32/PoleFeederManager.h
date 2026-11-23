@@ -32,9 +32,19 @@
 #include "PoleActuators.h"
 #include "PoleStorageManager.h"
 #include "PoleMeshRouter.h"
-#include "../MSCBShared/Protocol.h"
-#include "../MSCBShared/NetworkTypes.h"
-#include "../MSCBShared/CommandSecurity.h"
+#if __has_include("../MSCBShared/CommandSecurity.h")
+  #include "../MSCBShared/Protocol.h"
+  #include "../MSCBShared/NetworkTypes.h"
+  #include "../MSCBShared/CommandSecurity.h"
+#elif __has_include(<CommandSecurity.h>)
+  #include <Protocol.h>
+  #include <NetworkTypes.h>
+  #include <CommandSecurity.h>
+#else
+  #include "Protocol.h"
+  #include "NetworkTypes.h"
+  #include "CommandSecurity.h"
+#endif
 
 class PoleFeederManager {
 public:

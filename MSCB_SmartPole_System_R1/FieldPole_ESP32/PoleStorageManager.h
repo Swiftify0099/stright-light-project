@@ -25,7 +25,13 @@
 #endif
 
 #include "PoleConfig.h"
-#include "../MSCBShared/StorageTypes.h"
+#if __has_include("../MSCBShared/StorageTypes.h")
+  #include "../MSCBShared/StorageTypes.h"
+#elif __has_include(<StorageTypes.h>)
+  #include <StorageTypes.h>
+#else
+  #include "StorageTypes.h"
+#endif
 
 class PoleStorageManager {
 public:

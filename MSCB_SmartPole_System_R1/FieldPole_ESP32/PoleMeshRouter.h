@@ -29,8 +29,16 @@
 #include "PoleBoardPins.h"
 #include "PoleRadioDriver.h"
 #include "PoleStorageManager.h"
-#include "../MSCBShared/Protocol.h"
-#include "../MSCBShared/NetworkTypes.h"
+#if __has_include("../MSCBShared/Protocol.h")
+  #include "../MSCBShared/Protocol.h"
+  #include "../MSCBShared/NetworkTypes.h"
+#elif __has_include(<Protocol.h>)
+  #include <Protocol.h>
+  #include <NetworkTypes.h>
+#else
+  #include "Protocol.h"
+  #include "NetworkTypes.h"
+#endif
 
 #define MESH_MAX_NEIGHBORS           12
 #define MESH_DUP_CACHE_SIZE          32

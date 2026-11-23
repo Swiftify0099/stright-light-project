@@ -21,11 +21,15 @@
   #include "../MSCBShared/NetworkTypes.h"
   #include "../MSCBShared/Protocol.h"
   #include "../MSCBShared/StorageTypes.h"
+  #include "../MSCBShared/CommandSecurity.h"
+  #include "../MSCBShared/ReplayProtection.h"
 #elif __has_include(<BuildConfig.h>)
   #include <BuildConfig.h>
   #include <NetworkTypes.h>
   #include <Protocol.h>
   #include <StorageTypes.h>
+  #include <CommandSecurity.h>
+  #include <ReplayProtection.h>
 #else
   #error "MSCBShared headers not found! Ensure MSCBShared directory is adjacent to sketch or installed in Arduino/libraries."
 #endif
