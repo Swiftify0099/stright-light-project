@@ -34,25 +34,6 @@
   #include "Protocol.h"
 #endif
 
-enum NodeRegClientState : uint8_t {
-  REG_CLIENT_UNREGISTERED = 0,
-  REG_CLIENT_REQUEST_SENT = 1,
-  REG_CLIENT_PENDING      = 2,
-  REG_CLIENT_REGISTERED   = 3,
-  REG_CLIENT_REJECTED     = 4
-};
-
-inline const char* regClientStateToString(NodeRegClientState st) {
-  switch (st) {
-    case REG_CLIENT_UNREGISTERED: return "UNREGISTERED";
-    case REG_CLIENT_REQUEST_SENT: return "JOIN_REQUEST_SENT";
-    case REG_CLIENT_PENDING:      return "PENDING_ADMIN_APPROVAL";
-    case REG_CLIENT_REGISTERED:   return "REGISTERED_ACTIVE";
-    case REG_CLIENT_REJECTED:     return "REJECTED_UNAUTHORIZED";
-    default:                      return "UNKNOWN";
-  }
-}
-
 class PoleRegistrationClient {
 public:
   PoleRegistrationClient();
@@ -65,6 +46,10 @@ public:
 
   NodeRegClientState getState() const { return state; }
   const uint8_t* getMacAddress() const { return myMac; }
+  void setMacAddress(const uint8_t mac[6]) { memcpy(myMac, mac, 6); }
+  bool isRegistered() const { return (state == REG_CLIENT_REGISTERED); }
+  bool isRevoked() const { return (state == REG_CLIENT_REVOKED_LOCKED); }
+  uint16_t getAssignedId() const { return poleStorage.getAssignedPoleId(); }
 
 private:
   void readHardwareMac();

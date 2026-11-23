@@ -38,12 +38,15 @@ enum PacketType : uint8_t {
   PKT_TELEMETRY_FEEDER_DETAIL  = 0x11, // Extended 18-channel current measurement stream
   PKT_ALERT_OVERCURRENT        = 0x12, // Automatic trip alert from pole to gateway
   PKT_ALERT_VOLTAGE_FAULT      = 0x13, // Phase loss, under-voltage, over-voltage alert
+  PKT_ALERT_REVOKED_REAPPEAR   = 0x14, // Dedicated Revoked Pole Reappearance Alert
 
   // Command & Actuation
   PKT_CMD_FEEDER_SWITCH        = 0x20, // Gateway commands feeder relay ON/OFF
   PKT_CMD_FEEDER_ACK           = 0x21, // Pole acknowledges execution or rejection
   PKT_CMD_EMERGENCY_SHUTDOWN   = 0x22, // Global or individual emergency shutdown
   PKT_CMD_TIME_SYNC            = 0x23, // NTP epoch broadcast from gateway
+  PKT_CMD_REVOKE_POLE          = 0x24, // Gateway sends authenticated revocation command to Pole
+  PKT_CMD_REVOKE_ACK           = 0x25, // Pole acknowledges receipt of revocation command
 
   // Diagnostic & Maintenance
   PKT_DIAG_PING                = 0x30, // Link-budget round-trip measurement
@@ -117,11 +120,43 @@ struct PktHeartbeatPingPayload {
   float    totalCurrentA;        // aggregate current
 };
 
+enum HeartbeatAckStatus : uint8_t {
+  HB_ACK_OK                   = 0,
+  HB_ACK_CONFIG_OUTDATED      = 1,
+  HB_ACK_RE_REGISTER_REQUIRED = 2,
+  HB_ACK_REVOKED_LOCKED       = 3,
+  HB_ACK_UNKNOWN_NODE         = 4
+};
+
 struct PktHeartbeatAckPayload {
   uint16_t poleId;
   uint32_t gatewayTimeEpoch;
   uint16_t configVersion;
-  uint8_t  ackStatus;            // 0 = OK, 1 = CONFIG_OUTDATED, 2 = RE_REGISTER_REQUIRED
+  uint8_t  ackStatus;            // HeartbeatAckStatus
+};
+
+struct PktRevokeCmdPayload {
+  uint8_t  macAddress[6];
+  uint16_t targetPoleId;
+  char     txId[16];
+  char     reason[32];
+  uint32_t timestamp;
+  uint8_t  authTag[16];
+};
+
+struct PktRevokeAckPayload {
+  uint8_t  macAddress[6];
+  uint16_t poleId;
+  char     txId[16];
+  uint8_t  status; // 0 = SUCCESS_LOCKED, 1 = FAILED
+  uint32_t timestamp;
+};
+
+struct PktRevokedReappearPayload {
+  uint8_t  macAddress[6];
+  uint16_t previousPoleId;
+  uint32_t uptimeSec;
+  uint32_t timestamp;
 };
 
 struct PktFeederCmdPayload {

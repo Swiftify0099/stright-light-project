@@ -148,7 +148,54 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           PktHeartbeatPingPayload hb;
           memcpy(&hb, frame.payload, sizeof(PktHeartbeatPingPayload));
 
-          // Update registry node state
+          // Check if pole is actively registered
+          RegisteredPole* p = gwRegistry.findPoleById(hb.poleId);
+          if (p == nullptr) {
+            // Check if pole was revoked
+            const PermanentRevocationRecord* rev = gwRegistry.findRevokedByPoleId(hb.poleId);
+            if (rev != nullptr) {
+              // Trigger security alert for revoked pole trying to send heartbeat
+              uint8_t revMac[6] = {0};
+              if (strlen(rev->hwId) >= 12) {
+                for (int i = 0; i < 6; i++) {
+                  char byteStr[3] = { rev->hwId[i*2], rev->hwId[i*2 + 1], '\0' };
+                  revMac[i] = (uint8_t)strtoul(byteStr, NULL, 16);
+                }
+              }
+              gwRegistry.setReappearedRevokedAlert(revMac, rev->logicalId, hb.poleId);
+              Serial.printf("[SECURITY] 🚨 Heartbeat from REVOKED pole 0x%04X rejected!\n", hb.poleId);
+            } else {
+              Serial.printf("[MESH] Heartbeat from unregistered pole 0x%04X rejected.\n", hb.poleId);
+            }
+
+            // Send Heartbeat ACK instructing pole to lock or re-register
+            MeshWireFrame ackFrame;
+            memset(&ackFrame, 0, sizeof(MeshWireFrame));
+            ackFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+            ackFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+            ackFrame.header.version = MSCB_PROTOCOL_VERSION;
+            ackFrame.header.type = PKT_HEARTBEAT_ACK;
+            ackFrame.header.priority = PRIO_CRITICAL;
+            ackFrame.header.hopCount = 0;
+            ackFrame.header.maxHops = GW_MESH_MAX_HOPS;
+            ackFrame.header.seqNumber = seqCounter++;
+            ackFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
+            ackFrame.header.dstAddress = hb.poleId;
+            ackFrame.header.nextHop = frame.header.srcAddress;
+
+            PktHeartbeatAckPayload ack;
+            ack.poleId = hb.poleId;
+            ack.gatewayTimeEpoch = millis() / 1000;
+            ack.configVersion = 0;
+            ack.ackStatus = (rev != nullptr) ? HB_ACK_REVOKED_LOCKED : HB_ACK_RE_REGISTER_REQUIRED;
+
+            ackFrame.header.payloadLen = sizeof(PktHeartbeatAckPayload);
+            memcpy(ackFrame.payload, &ack, sizeof(PktHeartbeatAckPayload));
+            gwRadio.sendPacket(ackFrame);
+            break;
+          }
+
+          // Active registered pole: Update node telemetry
           gwRegistry.updateNodeTelemetry(hb.poleId, hb.primaryParent, hb.backupParent,
                                          hb.rank, hb.feederStateMask, hb.auxFeedbackMask, hb.mcbStatusMask,
                                          hb.busVoltageV, hb.totalCurrentA, rssi, snr);
@@ -172,11 +219,65 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           ack.poleId = hb.poleId;
           ack.gatewayTimeEpoch = millis() / 1000;
           ack.configVersion = 1;
-          ack.ackStatus = 0;
+          ack.ackStatus = HB_ACK_OK;
 
           ackFrame.header.payloadLen = sizeof(PktHeartbeatAckPayload);
           memcpy(ackFrame.payload, &ack, sizeof(PktHeartbeatAckPayload));
           gwRadio.sendPacket(ackFrame);
+        }
+        break;
+      }
+
+      case PKT_ALERT_REVOKED_REAPPEAR: {
+        if (frame.header.payloadLen >= sizeof(PktRevokedReappearPayload)) {
+          PktRevokedReappearPayload alert;
+          memcpy(&alert, frame.payload, sizeof(PktRevokedReappearPayload));
+
+          const PermanentRevocationRecord* rev = gwRegistry.findRevokedByMac(alert.macAddress);
+          const char* prevId = rev ? rev->logicalId : "UNKNOWN";
+          gwRegistry.setReappearedRevokedAlert(alert.macAddress, prevId, alert.previousPoleId);
+
+          Serial.printf("[SECURITY] 🚨 PKT_ALERT_REVOKED_REAPPEAR from MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+                        alert.macAddress[0], alert.macAddress[1], alert.macAddress[2],
+                        alert.macAddress[3], alert.macAddress[4], alert.macAddress[5]);
+
+          // Reply with PKT_REGISTER_RESPONSE telling it is REJECTED_REVOKED
+          MeshWireFrame respFrame;
+          memset(&respFrame, 0, sizeof(MeshWireFrame));
+          respFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+          respFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+          respFrame.header.version = MSCB_PROTOCOL_VERSION;
+          respFrame.header.type = PKT_REGISTER_RESPONSE;
+          respFrame.header.priority = PRIO_CRITICAL;
+          respFrame.header.hopCount = 0;
+          respFrame.header.maxHops = GW_MESH_MAX_HOPS;
+          respFrame.header.seqNumber = seqCounter++;
+          respFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
+          respFrame.header.dstAddress = MSCB_BROADCAST_NODE_ID;
+          respFrame.header.nextHop = frame.header.srcAddress;
+
+          PktRegisterResponsePayload resp;
+          memset(&resp, 0, sizeof(resp));
+          memcpy(resp.macAddress, alert.macAddress, 6);
+          resp.status = REG_RESP_REJECTED_REVOKED;
+          resp.assignedPoleId = 0;
+          resp.assignedParent = 0;
+          resp.heartbeatIntervalSec = 0;
+          resp.networkKeyEpoch = 0;
+
+          respFrame.header.payloadLen = sizeof(PktRegisterResponsePayload);
+          memcpy(respFrame.payload, &resp, sizeof(PktRegisterResponsePayload));
+          gwRadio.sendPacket(respFrame);
+        }
+        break;
+      }
+
+      case PKT_CMD_REVOKE_ACK: {
+        if (frame.header.payloadLen >= sizeof(PktRevokeAckPayload)) {
+          PktRevokeAckPayload ack;
+          memcpy(&ack, frame.payload, sizeof(PktRevokeAckPayload));
+          Serial.printf("[MESH] Pole 0x%04X confirmed revocation ACK (status=%u)\n",
+                        ack.poleId, ack.status);
         }
         break;
       }
@@ -298,4 +399,17 @@ void GwMeshCoordinator::resetFeederAckTracking() {
   feederAckPending = false;
   pendingAckSeq = 0;
   lastAckState = 0;
+}
+
+bool GwMeshCoordinator::sendRevokeCommand(uint16_t poleId, const uint8_t mac[6], uint32_t transactionId, const char* reason) {
+  PktRevokeCmdPayload cmd;
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.targetPoleId = poleId;
+  if (mac) memcpy(cmd.macAddress, mac, 6);
+  snprintf(cmd.txId, sizeof(cmd.txId), "TX_%08X", transactionId);
+  if (reason) strncpy(cmd.reason, reason, sizeof(cmd.reason) - 1);
+  cmd.timestamp = millis() / 1000;
+  memset(cmd.authTag, 0, sizeof(cmd.authTag));
+
+  return sendDownlinkPacket(poleId, PKT_CMD_REVOKE_POLE, (const uint8_t*)&cmd, sizeof(PktRevokeCmdPayload), PRIO_CRITICAL);
 }

@@ -60,6 +60,7 @@ public:
   // Downlink Transmission
   bool sendDownlinkPacket(uint16_t targetPoleId, uint8_t packetType, const uint8_t *payload, uint16_t payloadLen, uint8_t priority = PRIO_NORMAL);
   bool sendFeederCommand(uint16_t poleId, uint8_t feederId, uint8_t action, uint8_t groupMask, uint32_t &outSeqNumber);
+  bool sendRevokeCommand(uint16_t poleId, const uint8_t mac[6], uint32_t transactionId, const char* reason);
 
   // Packet Processing
   bool processIncomingWireFrame(const MeshWireFrame &frame, int16_t rssi, int8_t snr);

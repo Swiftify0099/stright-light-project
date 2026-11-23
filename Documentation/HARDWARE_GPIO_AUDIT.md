@@ -137,32 +137,38 @@ It is **physically impossible** for an ESP32-WROOM-32 to monitor 6 independent M
 
 ### 4.2 Field Pole Node: Classic ESP32 ESP-WROOM-32 (30/38 Pin DevKit)
 
-| Pin Name | GPIO | Native Peripheral | I/O Direction | Strapping / Reset Role | Verification Status | Physical Hardware Connected |
-| :--- | :---: | :--- | :---: | :--- | :---: | :--- |
-| `POLE_LORA_SCK` | **18** | VSPI SCK | OUTPUT | Normal GPIO (Shared SPI) | **VERIFIED SAFE** | SX1278 + 3x ADS131M08 SPI Clock |
-| `POLE_LORA_MISO`| **19** | VSPI MISO | INPUT | Normal GPIO (Shared SPI) | **VERIFIED SAFE** | SX1278 + 3x ADS131M08 SPI MISO |
-| `POLE_LORA_MOSI`| **23** | VSPI MOSI | OUTPUT | Normal GPIO (Shared SPI) | **VERIFIED SAFE** | SX1278 + 3x ADS131M08 SPI MOSI |
-| `POLE_LORA_NSS` | **5** | VSPI CS0 | OUTPUT | Glitches clock pulse at boot | **VERIFIED SAFE** | SX1278 CS (External 10k pull-up) |
-| `POLE_LORA_RST` | **14** | General GPIO | OUTPUT | Safe output | **VERIFIED SAFE** | SX1278 Hardware Reset |
-| `POLE_LORA_DIO0`| **4** | General GPIO / IRQ | INPUT | Safe general input | **VERIFIED SAFE** | SX1278 Packet Ready Interrupt |
-| `POLE_RELAY_F0` | **26** | DAC2 / RTC_IO7 | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 1 Contactor Driver |
-| `POLE_RELAY_F1` | **25** | DAC1 / RTC_IO6 | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 2 Contactor Driver |
-| `POLE_RELAY_F2` | **27** | General GPIO | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 3 Contactor Driver |
-| `POLE_RELAY_F3` | **16** | UART2 RX / GPIO | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 4 Contactor Driver (Replaced 12) |
-| `POLE_RELAY_F4` | **17** | UART2 TX / GPIO | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 5 Contactor Driver (Replaced 15) |
-| `POLE_RELAY_F5` | **32** | RTC_IO9 | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 6 Contactor Driver |
-| `POLE_ADC1_CS` | **13** | General GPIO | OUTPUT | Safe output | **VERIFIED SAFE** | ADS131M08 #1 Chip Select (Active LOW) |
-| `POLE_ADC2_CS` | **22** | I2C SCL / GPIO | OUTPUT | Safe output | **VERIFIED SAFE** | ADS131M08 #2 Chip Select (Active LOW) |
-| `POLE_ADC3_CS` | **21** | I2C SDA / GPIO | OUTPUT | Safe output | **VERIFIED SAFE** | ADS131M08 #3 Chip Select (Active LOW) |
-| `POLE_ADC_SYNC` | **33** | RTC_IO8 | OUTPUT | Safe output | **VERIFIED SAFE** | Common ADS131M08 /SYNC Pulse |
-| `POLE_ADC1_DRDY`| **34** | GPI (Input-Only) | INPUT | Input-Only (No pullup/pulldown)| **VERIFIED SAFE** | ADS131M08 #1 Data Ready (/DRDY) |
-| `POLE_ADC2_DRDY`| **35** | GPI (Input-Only) | INPUT | Input-Only (No pullup/pulldown)| **VERIFIED SAFE** | ADS131M08 #2 Data Ready (/DRDY) |
-| `POLE_ADC3_DRDY`| **36** | GPI / SENSOR_VP | INPUT | Input-Only (No pullup/pulldown)| **VERIFIED SAFE** | ADS131M08 #3 Data Ready (/DRDY) |
-| `POLE_STATUS_LED`| **2** | Strapping / LED | OUTPUT | Boot mode strapping pin | **RESTRICTED** | Onboard Blue LED (Active HIGH) |
-| `SPARE_INPUT` | **39** | GPI / SENSOR_VN | INPUT | Input-Only (No pullup/pulldown)| **UNCOMMITTED** | Available auxiliary analog/digital input |
-| `UART0_TXD` | **1** | UART0 TXD | OUTPUT | Boot log output | **RESERVED** | CP2102 / CH340 USB-UART bridge |
-| `UART0_RXD` | **3** | UART0 RXD | INPUT | Firmware upload | **RESERVED** | CP2102 / CH340 USB-UART bridge |
-| **FLASH BUS** | **6–11**| SPI Flash Bus | - | Dedicated Flash Memory | **FORBIDDEN** | Bonded to 4MB SPI Flash (DO NOT TOUCH)|
+> [!NOTE]
+> **Physical Pin 24 Identification**:
+> On the 30-pin ESP32 development board, physical board position 24 is board label **D26**, which routes to silicon **GPIO 26**.
+> Firmware Feeder 1 is assigned to GPIO 26 (`POLE_RELAY_F0_PIN = 26`), matching physical pin 24.
+> Silicon GPIO 24 is an internal SPI flash memory pin and is strictly forbidden.
+
+| Pin Name | Physical Header Pin | Board Label | GPIO | Native Peripheral | I/O Direction | Strapping / Reset Role | Verification Status | Physical Hardware Connected |
+| :--- | :---: | :---: | :---: | :--- | :---: | :--- | :---: | :--- |
+| `POLE_LORA_SCK` | 15 | **D18** | **18** | VSPI SCK | OUTPUT | Normal GPIO (Shared SPI) | **VERIFIED SAFE** | SX1278 + 3x ADS131M08 SPI Clock |
+| `POLE_LORA_MISO`| 14 | **D19** | **19** | VSPI MISO | INPUT | Normal GPIO (Shared SPI) | **VERIFIED SAFE** | SX1278 + 3x ADS131M08 SPI MISO |
+| `POLE_LORA_MOSI`| 19 | **D23** | **23** | VSPI MOSI | OUTPUT | Normal GPIO (Shared SPI) | **VERIFIED SAFE** | SX1278 + 3x ADS131M08 SPI MOSI |
+| `POLE_LORA_NSS` | 16 | **D5** | **5** | VSPI CS0 | OUTPUT | Glitches clock pulse at boot | **VERIFIED SAFE** | SX1278 CS (External 10k pull-up) |
+| `POLE_LORA_RST` | 13 | **D14** | **14** | General GPIO | OUTPUT | Safe output | **VERIFIED SAFE** | SX1278 Hardware Reset |
+| `POLE_LORA_DIO0`| 11 | **D4** | **4** | General GPIO / IRQ | INPUT | Safe general input | **VERIFIED SAFE** | SX1278 Packet Ready Interrupt |
+| `POLE_RELAY_F0` | **24** | **D26** | **26** | DAC2 / RTC_IO7 | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 1 Contactor Driver (Physical Pin 24) |
+| `POLE_RELAY_F1` | **23** | **D25** | **25** | DAC1 / RTC_IO6 | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 2 Contactor Driver (Physical Pin 23) |
+| `POLE_RELAY_F2` | **25** | **D27** | **27** | General GPIO | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 3 Contactor Driver (Physical Pin 25) |
+| `POLE_RELAY_F3` | **6** | **RX2** | **16** | UART2 RX / GPIO | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 4 Contactor Driver (Physical Pin 6) |
+| `POLE_RELAY_F4` | **7** | **TX2** | **17** | UART2 TX / GPIO | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 5 Contactor Driver (Physical Pin 7) |
+| `POLE_RELAY_F5` | **21** | **D32** | **32** | RTC_IO9 | OUTPUT | Safe non-strapping | **VERIFIED SAFE** | Feeder 6 Contactor Driver (Physical Pin 21) |
+| `POLE_ADC1_CS` | 12 | **D13** | **13** | General GPIO | OUTPUT | Safe output | **VERIFIED SAFE** | ADS131M08 #1 Chip Select (Active LOW) |
+| `POLE_ADC2_CS` | 27 | **D22** | **22** | I2C SCL / GPIO | OUTPUT | Safe output | **VERIFIED SAFE** | ADS131M08 #2 Chip Select (Active LOW) |
+| `POLE_ADC3_CS` | 26 | **D21** | **21** | I2C SDA / GPIO | OUTPUT | Safe output | **VERIFIED SAFE** | ADS131M08 #3 Chip Select (Active LOW) |
+| `POLE_ADC_SYNC` | 22 | **D33** | **33** | RTC_IO8 | OUTPUT | Safe output | **VERIFIED SAFE** | Common ADS131M08 /SYNC Pulse |
+| `POLE_ADC1_DRDY`| 5 | **D34** | **34** | GPI (Input-Only) | INPUT | Input-Only (No pullup/pulldown)| **VERIFIED SAFE** | ADS131M08 #1 Data Ready (/DRDY) |
+| `POLE_ADC2_DRDY`| 4 | **D35** | **35** | GPI (Input-Only) | INPUT | Input-Only (No pullup/pulldown)| **VERIFIED SAFE** | ADS131M08 #2 Data Ready (/DRDY) |
+| `POLE_ADC3_DRDY`| 3 | **VP** | **36** | GPI / SENSOR_VP | INPUT | Input-Only (No pullup/pulldown)| **VERIFIED SAFE** | ADS131M08 #3 Data Ready (/DRDY) |
+| `POLE_STATUS_LED`| 10 | **D2** | **2** | Strapping / LED | OUTPUT | Boot mode strapping pin | **RESTRICTED** | Onboard Blue LED (Active HIGH) |
+| `SPARE_INPUT` | 28 | **VN** | **39** | GPI / SENSOR_VN | INPUT | Input-Only (No pullup/pulldown)| **UNCOMMITTED** | Available auxiliary analog/digital input |
+| `UART0_TXD` | 1 | **TX0** | **1** | UART0 TXD | OUTPUT | Boot log output | **RESERVED** | CP2102 / CH340 USB-UART bridge |
+| `UART0_RXD` | 2 | **RX0** | **3** | UART0 RXD | INPUT | Firmware upload | **RESERVED** | CP2102 / CH340 USB-UART bridge |
+| **FLASH BUS** | - | - | **6–11**| SPI Flash Bus | - | Dedicated Flash Memory | **FORBIDDEN** | Bonded to 4MB SPI Flash (DO NOT TOUCH)|
 
 ---
 

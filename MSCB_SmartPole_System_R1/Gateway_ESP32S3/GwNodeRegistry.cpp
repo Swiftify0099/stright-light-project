@@ -10,12 +10,43 @@
 
 GwNodeRegistry gwRegistry;
 
+static inline uint32_t calculateRegistryCrc(uint8_t activeCnt, const RegisteredPole* pPoles,
+                                           uint8_t revokedCnt, const PermanentRevocationRecord* pRevoked,
+                                           uint8_t pendingCnt, const PendingRegistration* pPending) {
+  uint32_t crc = 0xFFFFFFFFUL;
+  auto updateCrc = [&crc](const uint8_t* data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+      crc ^= data[i];
+      for (uint8_t j = 0; j < 8; j++) {
+        if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320UL;
+        else crc >>= 1;
+      }
+    }
+  };
+
+  updateCrc(&activeCnt, sizeof(activeCnt));
+  if (activeCnt > 0 && pPoles) {
+    updateCrc((const uint8_t*)pPoles, activeCnt * sizeof(RegisteredPole));
+  }
+  updateCrc(&revokedCnt, sizeof(revokedCnt));
+  if (revokedCnt > 0 && pRevoked) {
+    updateCrc((const uint8_t*)pRevoked, revokedCnt * sizeof(PermanentRevocationRecord));
+  }
+  updateCrc(&pendingCnt, sizeof(pendingCnt));
+  if (pendingCnt > 0 && pPending) {
+    updateCrc((const uint8_t*)pPending, pendingCnt * sizeof(PendingRegistration));
+  }
+  return ~crc;
+}
+
 GwNodeRegistry::GwNodeRegistry() :
-  activeCount(0), pendingCount(0), revokedCount(0)
+  activeCount(0), pendingCount(0), revokedCount(0),
+  reappearedAlertPending(false)
 {
   memset(poles, 0, sizeof(poles));
   memset(pending, 0, sizeof(pending));
   memset(revoked, 0, sizeof(revoked));
+  memset(reappearedAlertBuf, 0, sizeof(reappearedAlertBuf));
 }
 
 bool GwNodeRegistry::begin() {
@@ -34,6 +65,51 @@ bool GwNodeRegistry::isMacRevoked(const uint8_t mac[6]) const {
     }
   }
   return false;
+}
+
+const PermanentRevocationRecord* GwNodeRegistry::findRevokedByMac(const uint8_t mac[6]) const {
+  if (!mac) return NULL;
+  char macHex[13];
+  snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+  for (uint8_t i = 0; i < revokedCount; i++) {
+    if (strncmp(revoked[i].hwId, macHex, 12) == 0) {
+      return &revoked[i];
+    }
+  }
+  return NULL;
+}
+
+const PermanentRevocationRecord* GwNodeRegistry::findRevokedByPoleId(uint16_t poleId) const {
+  char pidStr[16];
+  snprintf(pidStr, sizeof(pidStr), "POLE_%02d", poleId);
+  for (uint8_t i = 0; i < revokedCount; i++) {
+    if (strcmp(revoked[i].logicalId, pidStr) == 0) {
+      return &revoked[i];
+    }
+  }
+  return NULL;
+}
+
+const PermanentRevocationRecord* GwNodeRegistry::getRevokedByIndex(uint8_t index) const {
+  if (index >= revokedCount) return NULL;
+  return &revoked[index];
+}
+
+void GwNodeRegistry::setReappearedRevokedAlert(const uint8_t mac[6], const char* prevLogicalId, uint16_t prevPoleId) {
+  reappearedAlertPending = true;
+  snprintf(reappearedAlertBuf, sizeof(reappearedAlertBuf),
+           "🚨 *REVOKED DEVICE REAPPEARED*\n"
+           "MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
+           "Previous ID: %s (0x%04X)\n"
+           "Status: PERMANENTLY REVOKED (Relays locked OFF)\n"
+           "Action: Device rejected from network.\n"
+           "To re-authorize: /restore_%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           prevLogicalId ? prevLogicalId : "UNKNOWN",
+           prevPoleId,
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 RegisteredPole* GwNodeRegistry::findPoleById(uint16_t poleId) {
@@ -102,6 +178,11 @@ uint8_t GwNodeRegistry::handleJoinRequest(const PktRegisterRequestPayload &req,
 
   // 1. Check Permanent Revocation Blacklist
   if (isMacRevoked(req.macAddress)) {
+    const PermanentRevocationRecord* rev = findRevokedByMac(req.macAddress);
+    setReappearedRevokedAlert(req.macAddress, rev ? rev->logicalId : "UNKNOWN", 0);
+    Serial.printf("[SECURITY] 🚨 Blocked JOIN_REQ from Revoked Pole MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  req.macAddress[0], req.macAddress[1], req.macAddress[2],
+                  req.macAddress[3], req.macAddress[4], req.macAddress[5]);
     outResp.status = REG_RESP_REJECTED_REVOKED;
     return REG_RESP_REJECTED_REVOKED;
   }
@@ -148,6 +229,11 @@ uint8_t GwNodeRegistry::handleJoinRequest(const PktRegisterRequestPayload &req,
     p.snr = snr;
     p.requestTimestamp = millis() / 1000;
     p.notifiedAdmin = false;
+    saveRegistry(); // Persist pending queue across reboots
+  } else {
+    // Pending queue is full: return capacity rejection
+    outResp.status = REG_RESP_REJECTED_CAPACITY;
+    return REG_RESP_REJECTED_CAPACITY;
   }
 
   outResp.status = REG_RESP_PENDING_APPROVAL;
@@ -161,6 +247,14 @@ bool GwNodeRegistry::approvePending(const uint8_t mac[6], uint16_t &outAssignedI
 
   uint16_t newId = allocateNextPoleId();
   if (newId == 0xFFFF) return false;
+
+  // Staged backup for rollback
+  RegisteredPole polesBackup[GW_MAX_MANAGED_POLES];
+  uint8_t activeCountBackup = activeCount;
+  PendingRegistration pendingBackup[GW_MAX_PENDING_REGISTRATIONS];
+  uint8_t pendingCountBackup = pendingCount;
+  memcpy(polesBackup, poles, sizeof(poles));
+  memcpy(pendingBackup, pending, sizeof(pending));
 
   RegisteredPole &newPole = poles[activeCount++];
   memcpy(newPole.mac, mac, 6);
@@ -190,7 +284,14 @@ bool GwNodeRegistry::approvePending(const uint8_t mac[6], uint16_t &outAssignedI
   }
   pendingCount--;
 
-  saveRegistry();
+  if (!saveRegistry()) {
+    // Rollback on write failure
+    memcpy(poles, polesBackup, sizeof(poles));
+    activeCount = activeCountBackup;
+    memcpy(pending, pendingBackup, sizeof(pending));
+    pendingCount = pendingCountBackup;
+    return false;
+  }
   return true;
 }
 
@@ -203,34 +304,61 @@ bool GwNodeRegistry::rejectPending(const uint8_t mac[6]) {
     pending[i] = pending[i + 1];
   }
   pendingCount--;
+  saveRegistry();
   return true;
 }
 
-bool GwNodeRegistry::deleteAndRevokePole(uint16_t poleId, const char* adminId, const char* reason) {
+PoleDeleteResult GwNodeRegistry::deleteAndRevokePoleEx(uint16_t poleId, const char* adminId, const char* reason) {
   int targetIdx = -1;
   for (uint8_t i = 0; i < activeCount; i++) {
-    if (poles[i].poleId == poleId) {
+    if (poles[i].poleId == poleId && poles[i].status == POLE_STATUS_ACTIVE) {
       targetIdx = i;
       break;
     }
   }
-  if (targetIdx < 0) return false;
+  if (targetIdx < 0) return DELETE_ERR_POLE_NOT_FOUND;
 
-  // 1. Add hardware identity to permanent revocation list
-  if (revokedCount < MSCB_MAX_REVOCATION_RECORDS) {
-    PermanentRevocationRecord &r = revoked[revokedCount++];
-    char macHex[13];
-    snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
-             poles[targetIdx].mac[0], poles[targetIdx].mac[1], poles[targetIdx].mac[2],
-             poles[targetIdx].mac[3], poles[targetIdx].mac[4], poles[targetIdx].mac[5]);
-    strncpy(r.hwId, macHex, sizeof(r.hwId) - 1);
-    strncpy(r.logicalId, poles[targetIdx].stringId, sizeof(r.logicalId) - 1);
-    strncpy(r.reason, reason ? reason : "ADMIN_REVOKED", sizeof(r.reason) - 1);
-    strncpy(r.adminId, adminId ? adminId : "TELEGRAM_ADMIN", sizeof(r.adminId) - 1);
-    r.timestamp = millis() / 1000;
+  // Verify whether MAC is already revoked
+  if (isMacRevoked(poles[targetIdx].mac)) {
+    return DELETE_ERR_ALREADY_REVOKED;
   }
 
-  // 2. Remove from active poles array
+  // Verify revocation capacity
+  if (revokedCount >= MSCB_MAX_REVOCATION_RECORDS) {
+    Serial.println(F("[REGISTRY] ❌ Revocation list full! Rejecting pole deletion safely."));
+    return DELETE_ERR_REVOCATION_FULL;
+  }
+
+  // Backup state for rollback
+  RegisteredPole polesBackup[GW_MAX_MANAGED_POLES];
+  uint8_t activeCountBackup = activeCount;
+  PermanentRevocationRecord revokedBackup[MSCB_MAX_REVOCATION_RECORDS];
+  uint8_t revokedCountBackup = revokedCount;
+  PendingRegistration pendingBackup[GW_MAX_PENDING_REGISTRATIONS];
+  uint8_t pendingCountBackup = pendingCount;
+  memcpy(polesBackup, poles, sizeof(poles));
+  memcpy(revokedBackup, revoked, sizeof(revoked));
+  memcpy(pendingBackup, pending, sizeof(pending));
+
+  // 1. Stage permanent revocation record with integrity CRC
+  PermanentRevocationRecord &r = revoked[revokedCount++];
+  char macHex[13];
+  snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
+           poles[targetIdx].mac[0], poles[targetIdx].mac[1], poles[targetIdx].mac[2],
+           poles[targetIdx].mac[3], poles[targetIdx].mac[4], poles[targetIdx].mac[5]);
+  strncpy(r.hwId, macHex, sizeof(r.hwId) - 1);
+  r.hwId[sizeof(r.hwId) - 1] = '\0';
+  strncpy(r.logicalId, poles[targetIdx].stringId, sizeof(r.logicalId) - 1);
+  r.logicalId[sizeof(r.logicalId) - 1] = '\0';
+  snprintf(r.txId, sizeof(r.txId), "TX_REV_%04X_%lu", poleId, (unsigned long)(millis() / 1000));
+  strncpy(r.reason, reason ? reason : "ADMIN_REVOKED", sizeof(r.reason) - 1);
+  r.reason[sizeof(r.reason) - 1] = '\0';
+  strncpy(r.adminId, adminId ? adminId : "TELEGRAM_ADMIN", sizeof(r.adminId) - 1);
+  r.adminId[sizeof(r.adminId) - 1] = '\0';
+  r.timestamp = millis() / 1000;
+  r.crc32 = calculateRevocationCrc(r);
+
+  // 2. Stage removal from active poles array
   for (uint8_t i = targetIdx; i < activeCount - 1; i++) {
     poles[i] = poles[i + 1];
   }
@@ -247,7 +375,64 @@ bool GwNodeRegistry::deleteAndRevokePole(uint16_t poleId, const char* adminId, c
     }
   }
 
-  saveRegistry();
+  // 4. Atomic Two-Phase Commit Persistence
+  if (!saveRegistry()) {
+    Serial.println(F("[REGISTRY] ❌ saveRegistry() failed! Rolling back delete transaction."));
+    // ROLLBACK!
+    memcpy(poles, polesBackup, sizeof(poles));
+    activeCount = activeCountBackup;
+    memcpy(revoked, revokedBackup, sizeof(revoked));
+    revokedCount = revokedCountBackup;
+    memcpy(pending, pendingBackup, sizeof(pending));
+    pendingCount = pendingCountBackup;
+    return DELETE_ERR_REGISTRY_SAVE_FAILED;
+  }
+
+  Serial.printf("[REGISTRY] ✅ Pole 0x%04X (MAC %s) revoked and deleted successfully.\n", poleId, macHex);
+  return DELETE_SUCCESS;
+}
+
+bool GwNodeRegistry::deleteAndRevokePole(uint16_t poleId, const char* adminId, const char* reason) {
+  return (deleteAndRevokePoleEx(poleId, adminId, reason) == DELETE_SUCCESS);
+}
+
+bool GwNodeRegistry::unrevokePole(const uint8_t mac[6], const char* adminId, const char* reason) {
+  if (!mac) return false;
+  (void)adminId;
+  (void)reason;
+  char macHex[13];
+  snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+  int targetIdx = -1;
+  for (uint8_t i = 0; i < revokedCount; i++) {
+    if (strncmp(revoked[i].hwId, macHex, 12) == 0) {
+      targetIdx = i;
+      break;
+    }
+  }
+  if (targetIdx < 0) return false;
+
+  // Backup for rollback
+  PermanentRevocationRecord revokedBackup[MSCB_MAX_REVOCATION_RECORDS];
+  uint8_t revokedCountBackup = revokedCount;
+  memcpy(revokedBackup, revoked, sizeof(revoked));
+
+  // Remove entry from revoked list
+  for (uint8_t i = targetIdx; i < revokedCount - 1; i++) {
+    revoked[i] = revoked[i + 1];
+  }
+  revokedCount--;
+
+  if (!saveRegistry()) {
+    // Rollback
+    memcpy(revoked, revokedBackup, sizeof(revoked));
+    revokedCount = revokedCountBackup;
+    return false;
+  }
+
+  Serial.printf("[REGISTRY] ✅ MAC %s successfully un-revoked / re-authorized by %s.\n",
+                macHex, adminId ? adminId : "ADMIN");
   return true;
 }
 
@@ -272,16 +457,45 @@ void GwNodeRegistry::updateNodeTelemetry(uint16_t poleId, uint16_t priParent, ui
 
 bool GwNodeRegistry::saveRegistry() {
 #if defined(ARDUINO)
-  prefs.begin("mscb_reg", false);
-  prefs.putUChar("active_cnt", activeCount);
-  prefs.putUChar("revoked_cnt", revokedCount);
+  if (!prefs.begin("mscb_reg", false)) {
+    Serial.println(F("[REGISTRY] ❌ Preferences.begin('mscb_reg', false) FAILED!"));
+    return false;
+  }
+
+  uint8_t schemaVer = MSCB_CURRENT_REG_SCHEMA; // V2
+  if (prefs.putUChar("schema_ver", schemaVer) != sizeof(schemaVer)) { prefs.end(); return false; }
+  if (prefs.putUChar("active_cnt", activeCount) != sizeof(activeCount)) { prefs.end(); return false; }
+  if (prefs.putUChar("revoked_cnt", revokedCount) != sizeof(revokedCount)) { prefs.end(); return false; }
+  if (prefs.putUChar("pending_cnt", pendingCount) != sizeof(pendingCount)) { prefs.end(); return false; }
 
   if (activeCount > 0) {
-    prefs.putBytes("poles", poles, activeCount * sizeof(RegisteredPole));
+    size_t expected = activeCount * sizeof(RegisteredPole);
+    if (prefs.putBytes("poles", poles, expected) != expected) {
+      prefs.end();
+      return false;
+    }
   }
   if (revokedCount > 0) {
-    prefs.putBytes("revoked", revoked, revokedCount * sizeof(PermanentRevocationRecord));
+    size_t expected = revokedCount * sizeof(PermanentRevocationRecord);
+    if (prefs.putBytes("revoked", revoked, expected) != expected) {
+      prefs.end();
+      return false;
+    }
   }
+  if (pendingCount > 0) {
+    size_t expected = pendingCount * sizeof(PendingRegistration);
+    if (prefs.putBytes("pending", pending, expected) != expected) {
+      prefs.end();
+      return false;
+    }
+  }
+
+  uint32_t crc = calculateRegistryCrc(activeCount, poles, revokedCount, revoked, pendingCount, pending);
+  if (prefs.putUInt("reg_crc", crc) != sizeof(crc)) {
+    prefs.end();
+    return false;
+  }
+
   prefs.end();
 #endif
   return true;
@@ -289,19 +503,54 @@ bool GwNodeRegistry::saveRegistry() {
 
 bool GwNodeRegistry::loadRegistry() {
 #if defined(ARDUINO)
-  prefs.begin("mscb_reg", true);
+  if (!prefs.begin("mscb_reg", true)) {
+    return false;
+  }
+
+  uint8_t schemaVer = prefs.getUChar("schema_ver", MSCB_REG_SCHEMA_V1);
   activeCount = prefs.getUChar("active_cnt", 0);
   revokedCount = prefs.getUChar("revoked_cnt", 0);
+  pendingCount = (schemaVer >= MSCB_REG_SCHEMA_V2) ? prefs.getUChar("pending_cnt", 0) : 0;
 
   if (activeCount > GW_MAX_MANAGED_POLES) activeCount = 0;
   if (revokedCount > MSCB_MAX_REVOCATION_RECORDS) revokedCount = 0;
+  if (pendingCount > GW_MAX_PENDING_REGISTRATIONS) pendingCount = 0;
 
   if (activeCount > 0) {
-    prefs.getBytes("poles", poles, activeCount * sizeof(RegisteredPole));
+    size_t expected = activeCount * sizeof(RegisteredPole);
+    size_t read = prefs.getBytes("poles", poles, expected);
+    if (read != expected) {
+      activeCount = 0;
+    }
   }
   if (revokedCount > 0) {
-    prefs.getBytes("revoked", revoked, revokedCount * sizeof(PermanentRevocationRecord));
+    size_t expected = revokedCount * sizeof(PermanentRevocationRecord);
+    size_t read = prefs.getBytes("revoked", revoked, expected);
+    if (read != expected) {
+      revokedCount = 0;
+    }
   }
+  if (pendingCount > 0) {
+    size_t expected = pendingCount * sizeof(PendingRegistration);
+    size_t read = prefs.getBytes("pending", pending, expected);
+    if (read != expected) {
+      pendingCount = 0;
+    }
+  }
+
+  if (schemaVer >= MSCB_REG_SCHEMA_V2) {
+    uint32_t storedCrc = prefs.getUInt("reg_crc", 0);
+    uint32_t computedCrc = calculateRegistryCrc(activeCount, poles, revokedCount, revoked, pendingCount, pending);
+    if (storedCrc != computedCrc) {
+      Serial.printf("[REGISTRY] ⚠️ Registry CRC mismatch! Stored: 0x%08X, Computed: 0x%08X\n", storedCrc, computedCrc);
+      activeCount = 0;
+      revokedCount = 0;
+      pendingCount = 0;
+      prefs.end();
+      return false;
+    }
+  }
+
   prefs.end();
 #endif
   return true;

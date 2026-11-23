@@ -39,6 +39,10 @@
 #define GW_MAX_PENDING_REGISTRATIONS 16
 #define GW_POLE_ID_START             0x0002 // Pole 2 (Gateway is 0x0001)
 
+#define MSCB_REG_SCHEMA_V1           1
+#define MSCB_REG_SCHEMA_V2           2
+#define MSCB_CURRENT_REG_SCHEMA      MSCB_REG_SCHEMA_V2
+
 enum PoleRegistrationStatus : uint8_t {
   POLE_STATUS_EMPTY    = 0,
   POLE_STATUS_PENDING  = 1,
@@ -46,6 +50,29 @@ enum PoleRegistrationStatus : uint8_t {
   POLE_STATUS_REJECTED = 3,
   POLE_STATUS_REVOKED  = 4
 };
+
+enum PoleDeleteResult : uint8_t {
+  DELETE_SUCCESS                    = 0,
+  DELETE_ERR_POLE_NOT_FOUND         = 1,
+  DELETE_ERR_REVOCATION_FULL        = 2,
+  DELETE_ERR_REVOCATION_SAVE_FAILED = 3,
+  DELETE_ERR_REGISTRY_SAVE_FAILED   = 4,
+  DELETE_ERR_ROLLED_BACK            = 5,
+  DELETE_ERR_ALREADY_REVOKED        = 6
+};
+
+inline const char* poleDeleteResultToString(PoleDeleteResult res) {
+  switch (res) {
+    case DELETE_SUCCESS: return "SUCCESS";
+    case DELETE_ERR_POLE_NOT_FOUND: return "POLE_NOT_FOUND";
+    case DELETE_ERR_REVOCATION_FULL: return "REVOCATION_CAPACITY_FULL";
+    case DELETE_ERR_REVOCATION_SAVE_FAILED: return "REVOCATION_STORAGE_FAILED";
+    case DELETE_ERR_REGISTRY_SAVE_FAILED: return "ACTIVE_REGISTRY_WRITE_FAILED";
+    case DELETE_ERR_ROLLED_BACK: return "DELETE_TRANSACTION_ROLLED_BACK";
+    case DELETE_ERR_ALREADY_REVOKED: return "POLE_REVOKED";
+    default: return "UNKNOWN_ERROR";
+  }
+}
 
 struct RegisteredPole {
   uint8_t  mac[6];
@@ -94,8 +121,10 @@ public:
   bool rejectPending(const uint8_t mac[6]);
 
   // Node Deletion & Permanent Revocation
+  PoleDeleteResult deleteAndRevokePoleEx(uint16_t poleId, const char* adminId, const char* reason);
   bool deleteAndRevokePole(uint16_t poleId, const char* adminId, const char* reason);
   bool isMacRevoked(const uint8_t mac[6]) const;
+  bool unrevokePole(const uint8_t mac[6], const char* adminId, const char* reason);
 
   // Query API
   RegisteredPole* findPoleById(uint16_t poleId);
@@ -106,6 +135,15 @@ public:
   uint8_t getPendingCount() const { return pendingCount; }
   uint8_t getRevokedCount() const { return revokedCount; }
   const PendingRegistration* getPendingByIndex(uint8_t index) const;
+  const PermanentRevocationRecord* getRevokedByIndex(uint8_t index) const;
+  const PermanentRevocationRecord* findRevokedByMac(const uint8_t mac[6]) const;
+  const PermanentRevocationRecord* findRevokedByPoleId(uint16_t poleId) const;
+
+  // Reappearance Alert Management
+  bool hasReappearedRevokedAlert() const { return reappearedAlertPending; }
+  const char* getReappearedRevokedAlertText() const { return reappearedAlertBuf; }
+  void clearReappearedRevokedAlert() { reappearedAlertPending = false; reappearedAlertBuf[0] = '\0'; }
+  void setReappearedRevokedAlert(const uint8_t mac[6], const char* prevLogicalId, uint16_t prevPoleId);
 
   // Heartbeat & Telemetry update
   void updateNodeTelemetry(uint16_t poleId, uint16_t priParent, uint16_t bkpParent,
@@ -127,6 +165,9 @@ private:
   RegisteredPole      poles[GW_MAX_MANAGED_POLES];
   PendingRegistration pending[GW_MAX_PENDING_REGISTRATIONS];
   PermanentRevocationRecord revoked[MSCB_MAX_REVOCATION_RECORDS];
+
+  bool                reappearedAlertPending;
+  char                reappearedAlertBuf[256];
 
 #if defined(ARDUINO)
   Preferences         prefs;

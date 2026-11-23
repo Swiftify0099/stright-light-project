@@ -139,29 +139,37 @@ flowchart TD
 
 ### 2.2 Authoritative Field Pole Pin Mapping (ESP32-WROOM-32)
 
-| Pin Name | GPIO | Direction | Function / Peripheral | Strapping / Reset Role | Status | Hardware Connected |
-| :--- | :---: | :---: | :--- | :--- | :---: | :--- |
-| `LORA_SCK` | **18** | OUTPUT | VSPI Clock | Normal | **VERIFIED SAFE** | SX1278 LoRa SCK |
-| `LORA_MISO`| **19** | INPUT | VSPI MISO | Normal | **VERIFIED SAFE** | SX1278 LoRa MISO |
-| `LORA_MOSI`| **23** | OUTPUT | VSPI MOSI | Normal | **VERIFIED SAFE** | SX1278 LoRa MOSI |
-| `LORA_NSS` | **5** | OUTPUT | VSPI CS0 | Clock pulse @ reset | **VERIFIED SAFE** | SX1278 CS (Requires external 10k pull-up) |
-| `LORA_RST` | **14** | OUTPUT | General GPIO | Normal | **VERIFIED SAFE** | SX1278 Hardware Reset |
-| `LORA_DIO0`| **4** | INPUT | External IRQ | Safe General Input | **VERIFIED SAFE** | SX1278 Packet Ready Interrupt |
-| `RELAY_F1` | **26** | OUTPUT | DAC2 / RTC_IO7 | Safe Output | **VERIFIED SAFE** | Feeder 1 Contactor Driver |
-| `RELAY_F2` | **25** | OUTPUT | DAC1 / RTC_IO6 | Safe Output | **VERIFIED SAFE** | Feeder 2 Contactor Driver |
-| `RELAY_F3` | **27** | OUTPUT | General GPIO | Safe Output | **VERIFIED SAFE** | Feeder 3 Contactor Driver |
-| `RELAY_F4` | **16** | OUTPUT | UART2 RX / GPIO | Safe Output | **VERIFIED SAFE** | Feeder 4 Contactor Driver (Replaced GPIO 12) |
-| `RELAY_F5` | **17** | OUTPUT | UART2 TX / GPIO | Safe Output | **VERIFIED SAFE** | Feeder 5 Contactor Driver (Replaced GPIO 15) |
-| `RELAY_F6` | **32** | OUTPUT | RTC_IO9 | Safe Output | **VERIFIED SAFE** | Feeder 6 Contactor Driver |
-| `ADC1_CS` | **13** | OUTPUT | General GPIO | Safe Output | **VERIFIED SAFE** | ADS131M08 #1 Chip Select (Active LOW) |
-| `ADC2_CS` | **22** | OUTPUT | I2C SCL / GPIO | Safe Output | **VERIFIED SAFE** | ADS131M08 #2 Chip Select (Active LOW) |
-| `ADC3_CS` | **21** | OUTPUT | I2C SDA / GPIO | Safe Output | **VERIFIED SAFE** | ADS131M08 #3 Chip Select (Active LOW) |
-| `ADC_SYNC` | **33** | OUTPUT | General GPIO | Safe Output | **VERIFIED SAFE** | Common ADS131M08 Hardware /SYNC Pulse |
-| `ADC1_DRDY`| **34** | INPUT | Input-Only (GPI) | No internal pull-up | **VERIFIED SAFE** | ADS131M08 #1 Data Ready (/DRDY) |
-| `ADC2_DRDY`| **35** | INPUT | Input-Only (GPI) | No internal pull-up | **VERIFIED SAFE** | ADS131M08 #2 Data Ready (/DRDY) |
-| `ADC3_DRDY`| **36** | INPUT | Sensor_VP (GPI) | No internal pull-up | **VERIFIED SAFE** | ADS131M08 #3 Data Ready (/DRDY) |
-| `STATUS_LED`| **2** | OUTPUT | Strapping Pin | Download mode pin | **RESTRICTED** | Onboard Blue Diagnostic LED |
-| **FLASH BUS**| **6–11**| - | **SPI FLASH BUS** | **Dedicated Flash** | **FORBIDDEN** | **Internally Bonded to Flash Memory!** |
+> [!IMPORTANT]
+> **PHYSICAL PIN 24 vs GPIO 24 SILICON BOUNDARY**:
+> On standard 30-pin ESP32-WROOM-32 development boards, the right-side physical pin number 24 is labeled **D26** which connects to silicon **GPIO 26**.
+> **Physical pin 24 does NOT correspond to GPIO 24.**
+> In ESP32 silicon, GPIO 24 is an internal SPI flash memory signal (bonded internally to flash). Using GPIO 24 in software causes immediate SPI flash corruption and crash loops.
+> In this R2 firmware release, Feeder 1 is assigned to **GPIO 26**, exactly matching physical board header pin 24 (`POLE_PIN_FEEDER1_PHYSICAL == 24`, `POLE_PIN_FEEDER1_RELAY == 26`).
+> **Zero Hardware Rewiring Required**: Physical wiring to board pin 24 (D26) is preserved 100%.
+
+| Feeder / Signal | Physical Board Pin | Board Label | GPIO | Direction | Function / Peripheral | Status | Hardware Description |
+| :--- | :---: | :---: | :---: | :---: | :--- | :---: | :--- |
+| `LORA_SCK` | 15 | **D18** | **18** | OUTPUT | VSPI Clock | **VERIFIED SAFE** | SX1278 LoRa SCK |
+| `LORA_MISO`| 14 | **D19** | **19** | INPUT | VSPI MISO | **VERIFIED SAFE** | SX1278 LoRa MISO |
+| `LORA_MOSI`| 19 | **D23** | **23** | OUTPUT | VSPI MOSI | **VERIFIED SAFE** | SX1278 LoRa MOSI |
+| `LORA_NSS` | 16 | **D5** | **5** | OUTPUT | VSPI CS0 (10k pullup) | **VERIFIED SAFE** | SX1278 CS (Active LOW) |
+| `LORA_RST` | 13 | **D14** | **14** | OUTPUT | General GPIO | **VERIFIED SAFE** | SX1278 Hardware Reset |
+| `LORA_DIO0`| 11 | **D4** | **4** | INPUT | External IRQ | **VERIFIED SAFE** | SX1278 Packet Ready Interrupt |
+| `RELAY_F1` | **24** | **D26** | **26** | OUTPUT | DAC2 / RTC_IO7 | **VERIFIED SAFE** | Feeder 1 Contactor Driver (Physical Pin 24) |
+| `RELAY_F2` | **23** | **D25** | **25** | OUTPUT | DAC1 / RTC_IO6 | **VERIFIED SAFE** | Feeder 2 Contactor Driver (Physical Pin 23) |
+| `RELAY_F3` | **25** | **D27** | **27** | OUTPUT | General GPIO | **VERIFIED SAFE** | Feeder 3 Contactor Driver (Physical Pin 25) |
+| `RELAY_F4` | **6** | **RX2** | **16** | OUTPUT | UART2 RX / GPIO | **VERIFIED SAFE** | Feeder 4 Contactor Driver (Physical Pin 6) |
+| `RELAY_F5` | **7** | **TX2** | **17** | OUTPUT | UART2 TX / GPIO | **VERIFIED SAFE** | Feeder 5 Contactor Driver (Physical Pin 7) |
+| `RELAY_F6` | **21** | **D32** | **32** | OUTPUT | RTC_IO9 | **VERIFIED SAFE** | Feeder 6 Contactor Driver (Physical Pin 21) |
+| `ADC1_CS` | 12 | **D13** | **13** | OUTPUT | General GPIO | **VERIFIED SAFE** | ADS131M08 #1 Chip Select (via 74HC139 /1Y0) |
+| `ADC2_CS` | 27 | **D22** | **22** | OUTPUT | I2C SCL / GPIO | **VERIFIED SAFE** | ADS131M08 #2 Chip Select (via 74HC139 /1Y1) |
+| `ADC3_CS` | 26 | **D21** | **21** | OUTPUT | I2C SDA / GPIO | **VERIFIED SAFE** | ADS131M08 #3 Chip Select (via 74HC139 /1Y2) |
+| `ADC_SYNC` | 22 | **D33** | **33** | OUTPUT | General GPIO | **VERIFIED SAFE** | Common ADS131M08 Hardware /SYNC Pulse |
+| `ADC1_DRDY`| 5 | **D34** | **34** | INPUT | Input-Only (GPI) | **VERIFIED SAFE** | ADS131M08 #1 Data Ready (/DRDY) |
+| `ADC2_DRDY`| 4 | **D35** | **35** | INPUT | Input-Only (GPI) | **VERIFIED SAFE** | ADS131M08 #2 Data Ready (/DRDY) |
+| `ADC3_DRDY`| 3 | **VP** | **36** | INPUT | Sensor_VP (GPI) | **VERIFIED SAFE** | ADS131M08 #3 Data Ready (/DRDY) |
+| `STATUS_LED`| 10 | **D2** | **2** | OUTPUT | Strapping Pin | **RESTRICTED** | Onboard Blue Diagnostic LED |
+| **FLASH BUS**| - | - | **6–11**| - | **SPI FLASH BUS** | **FORBIDDEN** | **Internally Bonded to Flash Memory!** |
 
 ---
 
@@ -314,30 +322,35 @@ In early legacy prototype code (`PS/Sender` and `PS/Resivers`), severe silicon s
                    ADS131M08 AINxP / AINxN
 ```
 
-### 4.5 Optocoupler-Isolated Relay Driver & Contactor Interface Diagram
+### 4.5 Optocoupler-Isolated 6-Feeder Relay Driver & Contactor Interface Diagram
 
 ```
-   ESP32-WROOM-32              PC817 Optocoupler Board         Power Contactor & Coil
-  ┌──────────────┐            ┌──────────────────────┐        ┌──────────────────────┐
-  │ GPIO 26 (F1) ├───────────►│ IN1 (Active LOW)     │        │                      │
-  │              │            │  │                   │        │                      │
-  │ +3.3V Logic  ├───────────►│ VCC (Anode Supply)   │        │                      │
-  │              │            │                      │        │                      │
-  │ Logic GND    │ [ISOLATED] │ JD-VCC (External 5V) │───────►│ Relay Coil Terminal  │
-  └──────────────┘            │ Relay Driver Trans.  │        │ (1N4007 Flyback)     │
-                              │ Coil Ground (GND2)   │◄───────┤                      │
-                              └──────────────────────┘        ├──────────────────────┤
-                                                              │ 3-Pole 415V Contacts │
-                                                              │ L1, L2, L3 Switched  │
-                                                              ├──────────────────────┤
-                                                              │ NO Auxiliary Contact │
-                                                              │ (Contactor Feedback) │
-                                                              └──────────┬───────────┘
-                                                                         │
-                                                                         ▼
-                                                              ESP32 Feedback Input
-                                                              (Debounced 250ms)
+   ESP32-WROOM-32 (30-Pin DevKit)        6-Channel PC817 Optocoupler Board         6x 3-Pole 25A Power Contactors
+  ┌──────────────────────────────┐     ┌───────────────────────────────────┐     ┌───────────────────────────────────┐
+  │ Physical 24 (D26 / GPIO 26)  ├────►│ IN1 (Active LOW, 4.7k Pull-up)    ├────►│ Feeder 1 3-Phase Contactor Coil   │
+  │ Physical 23 (D25 / GPIO 25)  ├────►│ IN2 (Active LOW, 4.7k Pull-up)    ├────►│ Feeder 2 3-Phase Contactor Coil   │
+  │ Physical 25 (D27 / GPIO 27)  ├────►│ IN3 (Active LOW, 4.7k Pull-up)    ├────►│ Feeder 3 3-Phase Contactor Coil   │
+  │ Physical  6 (RX2 / GPIO 16)  ├────►│ IN4 (Active LOW, 4.7k Pull-up)    ├────►│ Feeder 4 3-Phase Contactor Coil   │
+  │ Physical  7 (TX2 / GPIO 17)  ├────►│ IN5 (Active LOW, 4.7k Pull-up)    ├────►│ Feeder 5 3-Phase Contactor Coil   │
+  │ Physical 21 (D32 / GPIO 32)  ├────►│ IN6 (Active LOW, 4.7k Pull-up)    ├────►│ Feeder 6 3-Phase Contactor Coil   │
+  │                              │     │                                   │     │                                   │
+  │ +3.3V Logic Supply (VCC)     ├────►│ VCC (Opto Anode Logic Rail)       │     │                                   │
+  │ Logic GND (Isolated)         │     │ [GALVANIC ISOLATION BARRIER]      │     │                                   │
+  └──────────────────────────────┘     │ JD-VCC (External 5V SMPS2 Supply) ├────►│ Common Coil High Side Rail (+5V) │
+                                       │ Driver Transistor (ULN2803/MOSFET)│     │ 1N4007 Flyback Diodes Across Coils│
+                                       │ Coil Ground (GND2 - Isolated)     │◄────┤ Common Coil Low Side Rail (GND2)  │
+                                       └───────────────────────────────────┘     ├───────────────────────────────────┤
+                                                                                 │ 6x 3-Pole 415V Switched Feeders   │
+                                                                                 │ Feeder 1..6 (Phases R, Y, B)      │
+                                                                                 └───────────────────────────────────┘
 ```
+
+> [!NOTE]
+> **Six Independent Contactor Channels**:
+> The system controls 6 distinct feeder outputs independently. The single generic RELAY connector block in legacy schematic drawings has been explicitly mapped to 6 individual control signals (IN1 through IN6). Each channel is driven via an optocoupler with active-LOW logic:
+> - **Logic HIGH (3.3V)**: Opto LED OFF $\rightarrow$ Contactor de-energized (**OFF**). Safe state upon boot.
+> - **Logic LOW (0V)**: Opto LED ON $\rightarrow$ Driver transistor conducts $\rightarrow$ Contactor energized (**ON**).
+> - **JD-VCC Jumper MUST be removed** to ensure full galvanic isolation between MCU 3.3V logic and 5V relay coils.
 
 ---
 

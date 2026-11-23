@@ -57,7 +57,10 @@ public:
   bool processCommandPayload(const PktFeederCmdPayload &cmd);
 
   // Bench Test Mode
-  void setBenchTestMode(bool enabled) { benchTestMode = enabled; }
+  void setBenchTestMode(bool enabled) { 
+    benchTestMode = enabled; 
+    poleActuators.setBenchTestOverride(enabled);
+  }
   bool isBenchTestMode() const { return benchTestMode; }
 
   // Hardware Auxiliary Feedback Interrogation

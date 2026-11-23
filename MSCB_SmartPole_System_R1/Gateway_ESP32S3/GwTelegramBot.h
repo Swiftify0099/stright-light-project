@@ -86,6 +86,9 @@ private:
   void cmdAll(int64_t chatId, uint16_t poleId, uint8_t action);
   void cmdDeletePrompt(int64_t chatId, uint16_t poleId);
   void cmdDeleteConfirm(int64_t chatId, uint16_t poleId);
+  void cmdRevoked(int64_t chatId);
+  void cmdRestorePrompt(int64_t chatId, const uint8_t mac[6]);
+  void cmdRestoreConfirm(int64_t chatId, const uint8_t mac[6]);
   void cmdConfig(int64_t chatId, const char* args);
   void cmdWifi(int64_t chatId, const char* args);
   void cmdOta(int64_t chatId);

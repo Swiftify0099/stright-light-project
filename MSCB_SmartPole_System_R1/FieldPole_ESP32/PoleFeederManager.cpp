@@ -99,6 +99,11 @@ FeederCommandAckState PoleFeederManager::executeFeederSwitch(uint8_t feederId1Ba
   }
   uint8_t chIdx = feederId1Based - 1;
 
+  // 0. Permanent Revocation Lock: switching strictly prohibited when revoked
+  if (poleStorage.isRevokedLocked()) {
+    return FEEDER_ACK_REJECTED_LOCKED;
+  }
+
   // 1. Safety Interlock: MSCB_RELAYS_LOCKED_DISABLED
   if (poleActuators.areRelaysLockedDisabled() && !benchTestMode) {
     return FEEDER_ACK_REJECTED_LOCKED;

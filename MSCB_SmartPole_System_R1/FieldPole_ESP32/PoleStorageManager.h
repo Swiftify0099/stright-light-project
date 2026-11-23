@@ -40,7 +40,11 @@ public:
   bool begin();
 
   // Registration & Identity
-  bool isRegistered() const { return registered; }
+  bool isRegistered() const { return (registered && !isRevoked && regState == REG_CLIENT_REGISTERED); }
+  bool isRevokedLocked() const { return (isRevoked || regState == REG_CLIENT_REVOKED_LOCKED); }
+  NodeRegClientState getRegState() const { return regState; }
+  void setRegistrationState(NodeRegClientState st);
+  void setRevokedLocked(const char* reason = "GATEWAY_REVOKED");
   uint16_t getAssignedPoleId() const { return assignedPoleId; }
   const char* getStringId() const { return stringId; }
   void saveRegistration(uint16_t poleId, const char* name, uint16_t primaryParent);
@@ -66,13 +70,16 @@ public:
   void logFault(uint8_t faultCode, uint8_t feederId, float val, const char* desc);
 
 private:
-  bool     registered;
-  uint16_t assignedPoleId;
-  char     stringId[16];
-  uint16_t primaryParent;
-  uint16_t backupParent;
-  uint8_t  networkRank;
-  uint16_t heartbeatIntervalSec;
+  bool               registered;
+  bool               isRevoked;
+  NodeRegClientState regState;
+  uint16_t           assignedPoleId;
+  char               stringId[16];
+  uint16_t           primaryParent;
+  uint16_t           backupParent;
+  uint8_t            networkRank;
+  uint16_t           heartbeatIntervalSec;
+  char               revocationReason[32];
 
   uint32_t switchCounts[6];
 

@@ -59,12 +59,42 @@
 // =====================================================================
 //  SIX FEEDER RELAY OUTPUT PINS (OPTO-ISOLATED, ACTIVE-LOW)
 // =====================================================================
-#define POLE_RELAY_F0_PIN       26  // Feeder 1 Relay (Safe DAC2)
-#define POLE_RELAY_F1_PIN       25  // Feeder 2 Relay (Safe DAC1)
-#define POLE_RELAY_F2_PIN       27  // Feeder 3 Relay (Safe Output)
-#define POLE_RELAY_F3_PIN       16  // Feeder 4 Relay (Safe Output on WROOM-32)
-#define POLE_RELAY_F4_PIN       17  // Feeder 5 Relay (Safe Output on WROOM-32)
-#define POLE_RELAY_F5_PIN       32  // Feeder 6 Relay (Safe Output)
+// Confirmed Hardware Schematic Mapping for 30-Pin ESP32-WROOM-32 DevKit:
+// Feeder 1: Physical Pin 24 | Board Label D26 | GPIO 26 (Safe DAC2)
+// Feeder 2: Physical Pin 23 | Board Label D25 | GPIO 25 (Safe DAC1)
+// Feeder 3: Physical Pin 25 | Board Label D27 | GPIO 27 (Safe Output)
+// Feeder 4: Physical Pin 6  | Board Label RX2 | GPIO 16 (Safe UART2 RX)
+// Feeder 5: Physical Pin 7  | Board Label TX2 | GPIO 17 (Safe UART2 TX)
+// Feeder 6: Physical Pin 21 | Board Label D32 | GPIO 32 (Safe Output)
+//
+// CRITICAL SILICON DISTINCTION:
+// Physical Header Position 24 on the ESP32 DevKit is Board Label D26 = GPIO 26.
+// Physical Pin 24 is NOT GPIO 24! GPIO 24 is an internal flash line and
+// MUST NEVER be used in firmware.
+
+#define POLE_RELAY_F0_PHYS_PIN  24  // Feeder 1 Physical Header Pin (Right side pin 24)
+#define POLE_RELAY_F0_LABEL     "D26"
+#define POLE_RELAY_F0_PIN       26  // Feeder 1 Relay (GPIO 26)
+
+#define POLE_RELAY_F1_PHYS_PIN  23  // Feeder 2 Physical Header Pin (Right side pin 23)
+#define POLE_RELAY_F1_LABEL     "D25"
+#define POLE_RELAY_F1_PIN       25  // Feeder 2 Relay (GPIO 25)
+
+#define POLE_RELAY_F2_PHYS_PIN  25  // Feeder 3 Physical Header Pin (Right side pin 25)
+#define POLE_RELAY_F2_LABEL     "D27"
+#define POLE_RELAY_F2_PIN       27  // Feeder 3 Relay (GPIO 27)
+
+#define POLE_RELAY_F3_PHYS_PIN  6   // Feeder 4 Physical Header Pin (Left side pin 6)
+#define POLE_RELAY_F3_LABEL     "RX2"
+#define POLE_RELAY_F3_PIN       16  // Feeder 4 Relay (GPIO 16)
+
+#define POLE_RELAY_F4_PHYS_PIN  7   // Feeder 5 Physical Header Pin (Left side pin 7)
+#define POLE_RELAY_F4_LABEL     "TX2"
+#define POLE_RELAY_F4_PIN       17  // Feeder 5 Relay (GPIO 17)
+
+#define POLE_RELAY_F5_PHYS_PIN  21  // Feeder 6 Physical Header Pin (Right side pin 21)
+#define POLE_RELAY_F5_LABEL     "D32"
+#define POLE_RELAY_F5_PIN       32  // Feeder 6 Relay (GPIO 32)
 
 static const uint8_t POLE_FEEDER_RELAY_PINS[6] = {
   POLE_RELAY_F0_PIN,
@@ -73,6 +103,24 @@ static const uint8_t POLE_FEEDER_RELAY_PINS[6] = {
   POLE_RELAY_F3_PIN,
   POLE_RELAY_F4_PIN,
   POLE_RELAY_F5_PIN
+};
+
+static const uint8_t POLE_FEEDER_RELAY_PHYS_PINS[6] = {
+  POLE_RELAY_F0_PHYS_PIN,
+  POLE_RELAY_F1_PHYS_PIN,
+  POLE_RELAY_F2_PHYS_PIN,
+  POLE_RELAY_F3_PHYS_PIN,
+  POLE_RELAY_F4_PHYS_PIN,
+  POLE_RELAY_F5_PHYS_PIN
+};
+
+static const char* const POLE_FEEDER_RELAY_LABELS[6] = {
+  POLE_RELAY_F0_LABEL,
+  POLE_RELAY_F1_LABEL,
+  POLE_RELAY_F2_LABEL,
+  POLE_RELAY_F3_LABEL,
+  POLE_RELAY_F4_LABEL,
+  POLE_RELAY_F5_LABEL
 };
 
 // =====================================================================
@@ -175,7 +223,7 @@ static inline void poleSelectSpiDevice(uint8_t dev) {
 // =====================================================================
 //  COMPILE-TIME HARDWARE CONFLICT AUDIT
 // =====================================================================
-#if defined(CONFIG_IDF_TARGET_ESP32)
+#if defined(CONFIG_IDF_TARGET_ESP32) || defined(ARDUINO) || defined(__cplusplus)
   #define IS_FLASH_PIN(p) ((p) >= 6 && (p) <= 11)
   static_assert(!IS_FLASH_PIN(POLE_SPI_SCK_PIN),        "POLE_SPI_SCK_PIN in forbidden Flash range 6-11!");
   static_assert(!IS_FLASH_PIN(POLE_SPI_MISO_PIN),       "POLE_SPI_MISO_PIN in forbidden Flash range 6-11!");
@@ -191,20 +239,71 @@ static inline void poleSelectSpiDevice(uint8_t dev) {
   static_assert(!IS_FLASH_PIN(POLE_RELAY_F4_PIN),       "POLE_RELAY_F4_PIN in forbidden Flash range 6-11!");
   static_assert(!IS_FLASH_PIN(POLE_RELAY_F5_PIN),       "POLE_RELAY_F5_PIN in forbidden Flash range 6-11!");
 
-  // GPIO 13 Conflict Elimination: Relay vs Decoder Enable
-  static_assert(POLE_RELAY_F0_PIN != 13, "Feeder 1 cannot be on GPIO 13 (Decoder Enable)!");
-  static_assert(POLE_RELAY_F1_PIN != 13, "Feeder 2 cannot be on GPIO 13 (Decoder Enable)!");
-  static_assert(POLE_RELAY_F2_PIN != 13, "Feeder 3 cannot be on GPIO 13 (Decoder Enable)!");
-  static_assert(POLE_RELAY_F3_PIN != 13, "Feeder 4 cannot be on GPIO 13 (Decoder Enable)!");
-  static_assert(POLE_RELAY_F4_PIN != 13, "Feeder 5 cannot be on GPIO 13 (Decoder Enable)!");
-  static_assert(POLE_RELAY_F5_PIN != 13, "Feeder 6 cannot be on GPIO 13 (Decoder Enable)!");
+  // 1. Critical Feeder 1 Pin Verification: Physical Pin 24 must be GPIO 26, NEVER GPIO 24!
+  static_assert(POLE_RELAY_F0_PIN == 26, "Feeder 1 MUST be assigned to GPIO 26!");
+  static_assert(POLE_RELAY_F0_PHYS_PIN == 24, "Feeder 1 physical board header position must be 24!");
+  static_assert(POLE_RELAY_F0_PIN != 24, "Feeder 1 MUST NOT be assigned to GPIO 24! Physical pin 24 is D26 = GPIO 26.");
+  static_assert(POLE_RELAY_F1_PIN != 24, "Feeder 2 cannot be on GPIO 24!");
+  static_assert(POLE_RELAY_F2_PIN != 24, "Feeder 3 cannot be on GPIO 24!");
+  static_assert(POLE_RELAY_F3_PIN != 24, "Feeder 4 cannot be on GPIO 24!");
+  static_assert(POLE_RELAY_F4_PIN != 24, "Feeder 5 cannot be on GPIO 24!");
+  static_assert(POLE_RELAY_F5_PIN != 24, "Feeder 6 cannot be on GPIO 24!");
 
-  // Strapping pin elimination verification
-  static_assert(POLE_DECODER_ENABLE_PIN != 12, "GPIO 12 flash voltage hazard!");
-  static_assert(POLE_DECODER_A0_PIN != 12,     "GPIO 12 flash voltage hazard!");
-  static_assert(POLE_DECODER_A1_PIN != 12,     "GPIO 12 flash voltage hazard!");
-  static_assert(POLE_RELAY_F3_PIN != 12,       "Feeder 4 cannot be on GPIO 12!");
-  static_assert(POLE_RELAY_F4_PIN != 15,       "Feeder 5 cannot be on GPIO 15!");
+  // 2. Relay GPIO Uniqueness Checks (Pairwise Conflict Elimination)
+  static_assert(POLE_RELAY_F0_PIN != POLE_RELAY_F1_PIN, "Relay F0 and F1 pin collision!");
+  static_assert(POLE_RELAY_F0_PIN != POLE_RELAY_F2_PIN, "Relay F0 and F2 pin collision!");
+  static_assert(POLE_RELAY_F0_PIN != POLE_RELAY_F3_PIN, "Relay F0 and F3 pin collision!");
+  static_assert(POLE_RELAY_F0_PIN != POLE_RELAY_F4_PIN, "Relay F0 and F4 pin collision!");
+  static_assert(POLE_RELAY_F0_PIN != POLE_RELAY_F5_PIN, "Relay F0 and F5 pin collision!");
+  static_assert(POLE_RELAY_F1_PIN != POLE_RELAY_F2_PIN, "Relay F1 and F2 pin collision!");
+  static_assert(POLE_RELAY_F1_PIN != POLE_RELAY_F3_PIN, "Relay F1 and F3 pin collision!");
+  static_assert(POLE_RELAY_F1_PIN != POLE_RELAY_F4_PIN, "Relay F1 and F4 pin collision!");
+  static_assert(POLE_RELAY_F1_PIN != POLE_RELAY_F5_PIN, "Relay F1 and F5 pin collision!");
+  static_assert(POLE_RELAY_F2_PIN != POLE_RELAY_F3_PIN, "Relay F2 and F3 pin collision!");
+  static_assert(POLE_RELAY_F2_PIN != POLE_RELAY_F4_PIN, "Relay F2 and F4 pin collision!");
+  static_assert(POLE_RELAY_F2_PIN != POLE_RELAY_F5_PIN, "Relay F2 and F5 pin collision!");
+  static_assert(POLE_RELAY_F3_PIN != POLE_RELAY_F4_PIN, "Relay F3 and F4 pin collision!");
+  static_assert(POLE_RELAY_F3_PIN != POLE_RELAY_F5_PIN, "Relay F3 and F5 pin collision!");
+  static_assert(POLE_RELAY_F4_PIN != POLE_RELAY_F5_PIN, "Relay F4 and F5 pin collision!");
+
+  // 3. Strapping Pin Elimination (GPIO 0, 2, 12, 15)
+  #define IS_STRAPPING_PIN(p) ((p) == 0 || (p) == 2 || (p) == 12 || (p) == 15)
+  static_assert(!IS_STRAPPING_PIN(POLE_RELAY_F0_PIN), "Relay F0 cannot use strapping pin!");
+  static_assert(!IS_STRAPPING_PIN(POLE_RELAY_F1_PIN), "Relay F1 cannot use strapping pin!");
+  static_assert(!IS_STRAPPING_PIN(POLE_RELAY_F2_PIN), "Relay F2 cannot use strapping pin!");
+  static_assert(!IS_STRAPPING_PIN(POLE_RELAY_F3_PIN), "Relay F3 cannot use strapping pin!");
+  static_assert(!IS_STRAPPING_PIN(POLE_RELAY_F4_PIN), "Relay F4 cannot use strapping pin!");
+  static_assert(!IS_STRAPPING_PIN(POLE_RELAY_F5_PIN), "Relay F5 cannot use strapping pin!");
+
+  // 4. Input-Only (GPI) Pin Elimination (GPIO 34, 35, 36, 39)
+  #define IS_GPI_INPUT_ONLY(p) ((p) == 34 || (p) == 35 || (p) == 36 || (p) == 39)
+  static_assert(!IS_GPI_INPUT_ONLY(POLE_RELAY_F0_PIN), "Relay F0 cannot use input-only pin!");
+  static_assert(!IS_GPI_INPUT_ONLY(POLE_RELAY_F1_PIN), "Relay F1 cannot use input-only pin!");
+  static_assert(!IS_GPI_INPUT_ONLY(POLE_RELAY_F2_PIN), "Relay F2 cannot use input-only pin!");
+  static_assert(!IS_GPI_INPUT_ONLY(POLE_RELAY_F3_PIN), "Relay F3 cannot use input-only pin!");
+  static_assert(!IS_GPI_INPUT_ONLY(POLE_RELAY_F4_PIN), "Relay F4 cannot use input-only pin!");
+  static_assert(!IS_GPI_INPUT_ONLY(POLE_RELAY_F5_PIN), "Relay F5 cannot use input-only pin!");
+
+  // 5. LoRa Radio Conflict Elimination
+  #define CONFLICTS_WITH_LORA(p) ((p) == POLE_LORA_SCK_PIN || (p) == POLE_LORA_MISO_PIN || \
+                                  (p) == POLE_LORA_MOSI_PIN || (p) == POLE_LORA_NSS_PIN || \
+                                  (p) == POLE_LORA_RST_PIN || (p) == POLE_LORA_DIO0_PIN)
+  static_assert(!CONFLICTS_WITH_LORA(POLE_RELAY_F0_PIN), "Relay F0 conflicts with LoRa pin!");
+  static_assert(!CONFLICTS_WITH_LORA(POLE_RELAY_F1_PIN), "Relay F1 conflicts with LoRa pin!");
+  static_assert(!CONFLICTS_WITH_LORA(POLE_RELAY_F2_PIN), "Relay F2 conflicts with LoRa pin!");
+  static_assert(!CONFLICTS_WITH_LORA(POLE_RELAY_F3_PIN), "Relay F3 conflicts with LoRa pin!");
+  static_assert(!CONFLICTS_WITH_LORA(POLE_RELAY_F4_PIN), "Relay F4 conflicts with LoRa pin!");
+  static_assert(!CONFLICTS_WITH_LORA(POLE_RELAY_F5_PIN), "Relay F5 conflicts with LoRa pin!");
+
+  // 6. 74HC139 Decoder & Metrology Sync Conflict Elimination
+  #define CONFLICTS_WITH_DECODER(p) ((p) == POLE_DECODER_ENABLE_PIN || (p) == POLE_DECODER_A0_PIN || \
+                                     (p) == POLE_DECODER_A1_PIN || (p) == POLE_ADC_SYNC_PIN)
+  static_assert(!CONFLICTS_WITH_DECODER(POLE_RELAY_F0_PIN), "Relay F0 conflicts with Decoder/ADC pin!");
+  static_assert(!CONFLICTS_WITH_DECODER(POLE_RELAY_F1_PIN), "Relay F1 conflicts with Decoder/ADC pin!");
+  static_assert(!CONFLICTS_WITH_DECODER(POLE_RELAY_F2_PIN), "Relay F2 conflicts with Decoder/ADC pin!");
+  static_assert(!CONFLICTS_WITH_DECODER(POLE_RELAY_F3_PIN), "Relay F3 conflicts with Decoder/ADC pin!");
+  static_assert(!CONFLICTS_WITH_DECODER(POLE_RELAY_F4_PIN), "Relay F4 conflicts with Decoder/ADC pin!");
+  static_assert(!CONFLICTS_WITH_DECODER(POLE_RELAY_F5_PIN), "Relay F5 conflicts with Decoder/ADC pin!");
 #endif
 
 #endif // POLE_BOARD_PINS_H

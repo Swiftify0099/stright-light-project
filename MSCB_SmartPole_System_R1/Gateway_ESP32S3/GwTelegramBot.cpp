@@ -15,6 +15,17 @@ GwTelegramBot gwTelegram;
 static const int64_t S_ADMIN_ALLOWLIST[] = MSCB_TELEGRAM_ADMIN_ALLOWLIST;
 static const size_t  S_ADMIN_COUNT = sizeof(S_ADMIN_ALLOWLIST) / sizeof(S_ADMIN_ALLOWLIST[0]);
 
+static bool parseMac12Hex(const char* hex, uint8_t mac[6]) {
+  if (!hex || strlen(hex) < 12) return false;
+  for (int i = 0; i < 6; i++) {
+    char byteStr[3] = { hex[i*2], hex[i*2 + 1], '\0' };
+    char* endptr = nullptr;
+    mac[i] = (uint8_t)strtoul(byteStr, &endptr, 16);
+    if (endptr == byteStr) return false;
+  }
+  return true;
+}
+
 GwTelegramBot::GwTelegramBot() :
 #if defined(ARDUINO)
   client(),
@@ -407,15 +418,111 @@ void GwTelegramBot::cmdDeleteConfirm(int64_t chatId, uint16_t poleId) {
   char adminStr[24];
   snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
 
-  bool ok = gwRegistry.deleteAndRevokePole(poleId, adminStr, "ADMIN_DELETED_VIA_TELEGRAM");
-  if (ok) {
-    char buf[192];
+  // Before deletion, lookup MAC so we can notify via LoRa if online
+  uint8_t targetMac[6] = {0};
+  RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  if (p) {
+    memcpy(targetMac, p->mac, 6);
+  }
+
+  uint32_t txId = (uint32_t)(millis() / 1000);
+  PoleDeleteResult res = gwRegistry.deleteAndRevokePoleEx(poleId, adminStr, "ADMIN_DELETED_VIA_TELEGRAM");
+
+  if (res == DELETE_SUCCESS) {
+    // Attempt LoRa downlink notification to pole to lock down its relays and state
+    gwMesh.sendRevokeCommand(poleId, targetMac, txId, "ADMIN_DELETED");
+
+    char buf[256];
     snprintf(buf, sizeof(buf),
-             "✅ Pole 0x%04X deleted from registry and permanently blacklisted in NVS.\nDownstream children migrated to Gateway.",
-             poleId);
+             "✅ *POLE DELETED & REVOKED*\n"
+             "Pole ID: `POLE-%04d (0x%04X)`\n"
+             "MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
+             "Tx ID: `0x%08X`\n"
+             "NVS Status: Permanently Revoked & Verified\n"
+             "Downstream children migrated to Gateway.",
+             poleId, poleId,
+             targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5],
+             txId);
     sendMessage(chatId, buf);
   } else {
-    sendMessage(chatId, "❌ Failed to delete pole (not found or error).");
+    const char* errStr = "Unknown error";
+    switch (res) {
+      case DELETE_ERR_POLE_NOT_FOUND: errStr = "Pole not found in active registry"; break;
+      case DELETE_ERR_ALREADY_REVOKED: errStr = "Pole MAC is already revoked in NVS"; break;
+      case DELETE_ERR_REVOCATION_FULL: errStr = "Revocation list is FULL (capacity limit reached). Active pole preserved!"; break;
+      case DELETE_ERR_REVOCATION_SAVE_FAILED: errStr = "NVS write error while saving revocation record. Transaction rolled back!"; break;
+      case DELETE_ERR_REGISTRY_SAVE_FAILED: errStr = "NVS write error while updating active registry. Transaction rolled back!"; break;
+      case DELETE_ERR_ROLLED_BACK: errStr = "Transaction failed and state rolled back safely."; break;
+      default: break;
+    }
+    char buf[256];
+    snprintf(buf, sizeof(buf), "❌ *DELETION FAILED*\nError: %s\nActive registry state was kept intact.", errStr);
+    sendMessage(chatId, buf);
+  }
+}
+
+void GwTelegramBot::cmdRevoked(int64_t chatId) {
+  uint16_t count = gwRegistry.getRevokedCount();
+  if (count == 0) {
+    sendMessage(chatId, "📋 *REVOCATION LIST*\nNo poles are currently revoked.");
+    return;
+  }
+
+  char buf[1024];
+  int offset = snprintf(buf, sizeof(buf), "🚫 *REVOKED POLES LIST (%u/%u)*\n━━━━━━━━━━━━━━━━━━━━━━\n",
+                        count, MSCB_MAX_REVOCATION_RECORDS);
+
+  for (uint16_t i = 0; i < count && offset < (int)sizeof(buf) - 150; i++) {
+    const PermanentRevocationRecord* r = gwRegistry.getRevokedByIndex(i);
+    if (r) {
+      offset += snprintf(buf + offset, sizeof(buf) - offset,
+                         "• MAC: `%s`\n  Former: `%s`\n  Reason: %s\n  Restore: `/restore_%s`\n\n",
+                         r->hwId, r->logicalId, r->reason, r->hwId);
+    }
+  }
+  sendMessage(chatId, buf);
+}
+
+void GwTelegramBot::cmdRestorePrompt(int64_t chatId, const uint8_t mac[6]) {
+  const PermanentRevocationRecord* r = gwRegistry.findRevokedByMac(mac);
+  if (!r) {
+    sendMessage(chatId, "❌ That MAC address is not in the revocation list.");
+    return;
+  }
+
+  char buf[350];
+  snprintf(buf, sizeof(buf),
+           "⚠️ *CONFIRM RE-AUTHORIZATION / RESTORE*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "MAC: `%s`\n"
+           "Former Pole: `%s`\n\n"
+           "This will remove the permanent blacklist for this hardware in NVS.\n"
+           "The pole will be allowed to request registration again.\n\n"
+           "To confirm, reply: `/confirm_restore_%s`",
+           r->hwId, r->logicalId, r->hwId);
+  sendMessage(chatId, buf);
+}
+
+void GwTelegramBot::cmdRestoreConfirm(int64_t chatId, const uint8_t mac[6]) {
+  char adminStr[24];
+  snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
+
+  char macHex[13];
+  snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+  bool ok = gwRegistry.unrevokePole(mac, adminStr, "ADMIN_UNREVOKED");
+  if (ok) {
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "✅ *POLE RE-AUTHORIZED / UN-REVOKED*\n"
+             "MAC: `%s`\n"
+             "Hardware blacklist cleared in NVS.\n"
+             "The pole may now request registration and will appear in Pending Approval.",
+             macHex);
+    sendMessage(chatId, buf);
+  } else {
+    sendMessage(chatId, "❌ Failed to un-revoke MAC (not found or NVS write failure).");
   }
 }
 
@@ -1015,6 +1122,7 @@ void GwTelegramBot::showSettingsMenu(int64_t chatId) {
   const char* kb =
     "["
     "[{\"text\":\"⏱️ HB: 10s\",\"callback_data\":\"CFG:HB:10\"},{\"text\":\"⏱️ HB: 30s\",\"callback_data\":\"CFG:HB:30\"},{\"text\":\"⏱️ HB: 60s\",\"callback_data\":\"CFG:HB:60\"}],"
+    "[{\"text\":\"🚫 Revocation List\",\"callback_data\":\"MENU:REVOKED\"}],"
     "[{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]"
     "]";
   sendMessageWithKeyboard(chatId, buf, kb);
@@ -1157,6 +1265,22 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
     uint16_t pid = (uint16_t)atoi(cmdText + 16);
     cmdDeleteConfirm(chatId, pid);
     showMainMenu(chatId);
+  } else if (strncmp(cmdText, "/revoked", 8) == 0) {
+    cmdRevoked(chatId);
+  } else if (strncmp(cmdText, "/restore_", 9) == 0) {
+    uint8_t mac[6];
+    if (parseMac12Hex(cmdText + 9, mac)) {
+      cmdRestorePrompt(chatId, mac);
+    } else {
+      sendMessage(chatId, "❌ Invalid MAC format. Expected 12 hex characters (e.g. /restore_A1B2C3D4E5F6)");
+    }
+  } else if (strncmp(cmdText, "/confirm_restore_", 17) == 0) {
+    uint8_t mac[6];
+    if (parseMac12Hex(cmdText + 17, mac)) {
+      cmdRestoreConfirm(chatId, mac);
+    } else {
+      sendMessage(chatId, "❌ Invalid MAC format.");
+    }
   } else if (strncmp(cmdText, "/config", 7) == 0) {
     cmdConfig(chatId, cmdText + 7);
   } else if (strncmp(cmdText, "/wifi", 5) == 0) {
@@ -1314,6 +1438,8 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
     showFirmwareOta(chatId);
   } else if (strcmp(callbackData, "MENU:ALARMS") == 0) {
     showAlarmLog(chatId);
+  } else if (strcmp(callbackData, "MENU:REVOKED") == 0) {
+    cmdRevoked(chatId);
   } else if (strcmp(callbackData, "MENU:CONFIG") == 0) {
     showSettingsMenu(chatId);
   } else if (strncmp(callbackData, "CFG:HB:", 7) == 0) {
@@ -1417,6 +1543,11 @@ void GwTelegramBot::service() {
   if (gwHeartbeat.hasPendingAlert()) {
     broadcastAdminAlert(gwHeartbeat.getNextAlertText());
     gwHeartbeat.clearPendingAlert();
+  }
+
+  if (gwRegistry.hasReappearedRevokedAlert()) {
+    broadcastAdminAlert(gwRegistry.getReappearedRevokedAlertText());
+    gwRegistry.clearReappearedRevokedAlert();
   }
 
   if (now - lastPollMs >= GW_TELEGRAM_POLL_INTERVAL_MS) {

@@ -5,6 +5,7 @@
  */
 
 #include "PoleRegistrationClient.h"
+#include "PoleActuators.h"
 #include <string.h>
 
 #if defined(ARDUINO) && defined(ESP32)
@@ -35,7 +36,15 @@ bool PoleRegistrationClient::begin() {
   readHardwareMac();
   sessionToken = (uint32_t)millis() + 0xA5A50000UL;
 
-  if (poleStorage.isRegistered()) {
+  if (poleStorage.isRevokedLocked()) {
+    state = REG_CLIENT_REVOKED_LOCKED;
+    Serial.println(F("[REG_CLIENT] ⛔ Node is in persistent REVOKED_LOCKED state. Relays locked OFF."));
+    poleActuators.emergencyShutdownAll("BOOT_REVOCATION_LOCK");
+    poleActuators.setRelaysLockedDisabled(true);
+  } else if (poleStorage.getRegState() == REG_CLIENT_REJECTED) {
+    state = REG_CLIENT_REJECTED;
+    Serial.println(F("[REG_CLIENT] ⚠️ Node is in persistent REJECTED state. Waiting for admin."));
+  } else if (poleStorage.isRegistered()) {
     state = REG_CLIENT_REGISTERED;
   } else {
     state = REG_CLIENT_UNREGISTERED;
@@ -44,7 +53,7 @@ bool PoleRegistrationClient::begin() {
 }
 
 void PoleRegistrationClient::triggerRegistrationRequest() {
-  if (state == REG_CLIENT_REGISTERED) return;
+  if (state == REG_CLIENT_REGISTERED || state == REG_CLIENT_REVOKED_LOCKED) return;
 
   PktRegisterRequestPayload req;
   memcpy(req.macAddress, myMac, 6);
@@ -78,13 +87,22 @@ bool PoleRegistrationClient::handleRegisterResponse(const PktRegisterResponsePay
       poleStorage.setHeartbeatIntervalSec(resp.heartbeatIntervalSec);
     }
     state = REG_CLIENT_REGISTERED;
+    poleStorage.setRegistrationState(REG_CLIENT_REGISTERED);
     return true;
   } else if (resp.status == REG_RESP_PENDING_APPROVAL) {
-    state = REG_CLIENT_PENDING;
+    state = REG_CLIENT_PENDING_APPROVAL;
+    poleStorage.setRegistrationState(REG_CLIENT_PENDING_APPROVAL);
     return true;
+  } else if (resp.status == REG_RESP_REJECTED_REVOKED) {
+    state = REG_CLIENT_REVOKED_LOCKED;
+    poleStorage.setRevokedLocked("GATEWAY_REVOCATION_RESPONSE");
+    poleActuators.emergencyShutdownAll("GATEWAY_REVOCATION_RESPONSE");
+    poleActuators.setRelaysLockedDisabled(true);
+    return false;
   } else {
     // REJECTED! Node cannot become active.
     state = REG_CLIENT_REJECTED;
+    poleStorage.setRegistrationState(REG_CLIENT_REJECTED);
     return false;
   }
 }
@@ -95,6 +113,21 @@ void PoleRegistrationClient::service() {
   }
 
   uint32_t now = millis();
+  if (state == REG_CLIENT_REVOKED_LOCKED) {
+    // Reappearance announce: send dedicated PKT_ALERT_REVOKED_REAPPEAR every 60s
+    if (now - lastRequestMs >= 60000UL) {
+      lastRequestMs = now;
+      PktRevokedReappearPayload alert;
+      memcpy(alert.macAddress, myMac, 6);
+      alert.previousPoleId = poleStorage.getAssignedPoleId();
+      alert.uptimeSec = now / 1000UL;
+      alert.timestamp = now;
+      poleMesh.sendUplinkPacket(PKT_ALERT_REVOKED_REAPPEAR, (const uint8_t*)&alert, sizeof(PktRevokedReappearPayload), PRIO_COMMAND);
+      Serial.println(F("[REG_CLIENT] 📢 Sent Revoked Pole Reappearance Alert to Gateway."));
+    }
+    return;
+  }
+
   if (now - lastRequestMs >= retryIntervalMs) {
     triggerRegistrationRequest();
   }

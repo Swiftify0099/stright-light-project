@@ -20,7 +20,7 @@ bool PoleHeartbeatSender::begin() {
 }
 
 void PoleHeartbeatSender::sendHeartbeat() {
-  if (!poleStorage.isRegistered()) return;
+  if (!poleStorage.isRegistered() || poleStorage.isRevokedLocked()) return;
 
   PktHeartbeatPingPayload hb;
   hb.poleId = poleStorage.getAssignedPoleId();

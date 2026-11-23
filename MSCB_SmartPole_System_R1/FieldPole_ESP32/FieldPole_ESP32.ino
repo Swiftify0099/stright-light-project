@@ -70,10 +70,12 @@ void printPoleDiagnosticBanner() {
   Serial.printf("    LoRa NSS / CS: GPIO %d (VSPI Native, 10k Pullup Required)\n", POLE_LORA_NSS_PIN);
   Serial.printf("    LoRa RESET   : GPIO %d (Active LOW)\n", POLE_LORA_RST_PIN);
   Serial.printf("    LoRa DIO0    : GPIO %d (Safe IRQ; Replaced GPIO 2)\n", POLE_LORA_DIO0_PIN);
-  Serial.println(F("  [6 Feeder Relays - Non-Strapping Safe Output Pins]:"));
+  Serial.println(F("  [6 Feeder Relays - Confirmed Schematic Pin Allocation]:"));
   for (uint8_t i = 0; i < 6; ++i) {
-    Serial.printf("    Feeder %d     : GPIO %d (State: LOCKED OFF)\n", i + 1, POLE_FEEDER_RELAY_PINS[i]);
+    Serial.printf("    Feeder %d     : Physical Pin %2d | Board Label %-4s | GPIO %2d (State: LOCKED OFF)\n",
+                  i + 1, POLE_FEEDER_RELAY_PHYS_PINS[i], POLE_FEEDER_RELAY_LABELS[i], POLE_FEEDER_RELAY_PINS[i]);
   }
+  Serial.println(F("    CRITICAL: Physical Pin 24 = Board Label D26 = GPIO 26. (GPIO 24 is NOT used!)"));
   Serial.println(F("  [Analog & Auxiliary Expansion - 74HC139 Decoder & MCP23S17]:"));
   Serial.printf("    Decoder /1E  : GPIO %d (Active LOW Enable)\n", POLE_DECODER_ENABLE_PIN);
   Serial.printf("    Decoder A0   : GPIO %d (Address Bit 0)\n", POLE_DECODER_A0_PIN);
@@ -107,8 +109,8 @@ void setup() {
     digitalWrite(POLE_FEEDER_RELAY_PINS[i], POLE_RELAY_OFF);
   }
 
-  // Initialize and audit relay actuators via driver
-  poleActuators.init(true);
+  // Initialize and audit relay actuators via driver (single source of truth: POLE_FEEDER_RELAY_PINS)
+  poleActuators.init();
   bool diagOk = poleActuators.validateStartupState();
 
   // De-select LoRa Chip Select
@@ -235,6 +237,29 @@ void loop() {
           }
           case PKT_CMD_EMERGENCY_SHUTDOWN: {
             poleFeederMgr.emergencyShutdownAll("EMERGENCY_LORA_PKT");
+            break;
+          }
+          case PKT_CMD_REVOKE_POLE: {
+            if (inFrame.header.payloadLen >= sizeof(PktRevokeCmdPayload)) {
+              PktRevokeCmdPayload rev;
+              memcpy(&rev, inFrame.payload, sizeof(PktRevokeCmdPayload));
+              if (rev.targetPoleId == poleStorage.getAssignedPoleId() ||
+                  memcmp(rev.macAddress, poleRegClient.getMacAddress(), 6) == 0) {
+                Serial.printf("[REVOCATION] ⛔ Received authenticated REVOCATION from Gateway! Reason: %s\n", rev.reason);
+                poleStorage.setRevokedLocked(rev.reason);
+                poleActuators.emergencyShutdownAll("GATEWAY_REVOCATION");
+                poleActuators.setRelaysLockedDisabled(true);
+
+                // Send REVOKE_ACK
+                PktRevokeAckPayload ack;
+                memcpy(ack.macAddress, poleRegClient.getMacAddress(), 6);
+                ack.poleId = poleStorage.getAssignedPoleId();
+                strncpy(ack.txId, rev.txId, sizeof(ack.txId) - 1);
+                ack.status = 0; // SUCCESS_LOCKED
+                ack.timestamp = millis();
+                poleMesh.sendUplinkPacket(PKT_CMD_REVOKE_ACK, (const uint8_t*)&ack, sizeof(PktRevokeAckPayload), PRIO_COMMAND);
+              }
+            }
             break;
           }
           default:

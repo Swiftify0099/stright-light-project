@@ -9,26 +9,6 @@
 
 PoleActuators poleActuators;
 
-// Default Safe Verified GPIO mapping (Free of strapping pins 12, 15, 0, 2)
-static const uint8_t SAFE_RELAY_PINS[NUM_FEEDER_ACTUATORS] = {
-    26, // Feeder 1 / Main Street Light Contactor Coil (DAC2)
-    25, // Feeder 2 Contactor Coil (DAC1)
-    27, // Feeder 3 Contactor Coil (General IO)
-    16, // Feeder 4 Contactor Coil (UART2 RX / General IO)
-    17, // Feeder 5 Contactor Coil (UART2 TX / General IO)
-    32  // Feeder 6 Contactor Coil (General IO)
-};
-
-// Legacy hardware mapping (Includes GPIO 13, 12, 15)
-static const uint8_t LEGACY_RELAY_PINS[NUM_FEEDER_ACTUATORS] = {
-    26, // Feeder 1
-    25, // Feeder 2
-    27, // Feeder 3
-    13, // Feeder 4
-    12, // Feeder 5 (MTDI Strapping Pin)
-    15  // Feeder 6 (MTDO Strapping Pin)
-};
-
 PoleActuators::PoleActuators() :
     driverState(ACTUATOR_STATE_UNINITIALIZED),
     activeLow(RELAY_ACTIVE_LOW),
@@ -39,7 +19,7 @@ PoleActuators::PoleActuators() :
     benchTestOverride(false)
 {
     for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
-        channels[i].pin = SAFE_RELAY_PINS[i];
+        channels[i].pin = POLE_FEEDER_RELAY_PINS[i];
         channels[i].commandedOn = false;
         channels[i].actualPinState = false;
         channels[i].fault = RELAY_FAULT_NONE;
@@ -84,18 +64,20 @@ bool PoleActuators::isGpio12Safe() const {
 }
 
 void PoleActuators::init(bool useSafeVerifiedPins) {
+    (void)useSafeVerifiedPins;
     Serial.println(F("[ACTUATOR] Initializing 6-Channel Feeder Relay Actuation Driver..."));
 
-    // 1. Establish pin mapping
-    if (useSafeVerifiedPins) {
-        configurePinMapping(SAFE_RELAY_PINS);
-        Serial.println(F("[ACTUATOR] Applied Verified Safe Pin Mapping (GPIOs: 26, 25, 27, 16, 17, 32)."));
-    } else {
-        configurePinMapping(POLE_FEEDER_RELAY_PINS);
-        Serial.printf("[ACTUATOR] Applied Configured Pin Mapping (GPIOs: %d, %d, %d, %d, %d, %d).\n",
-                      channels[0].pin, channels[1].pin, channels[2].pin,
-                      channels[3].pin, channels[4].pin, channels[5].pin);
+    // 1. Establish pin mapping from the single source of truth (PoleBoardPins.h)
+    configurePinMapping(POLE_FEEDER_RELAY_PINS);
+
+    Serial.println(F("[ACTUATOR] ──────────────────────────────────────────────────────────"));
+    Serial.println(F("[ACTUATOR] Single Source of Truth Relay Mapping (ESP32-WROOM-32):"));
+    for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
+        Serial.printf("[ACTUATOR] Feeder %d -> Physical Pin %2d | Board Label %-4s | GPIO %2d (State: LOCKED OFF)\n",
+                      i + 1, POLE_FEEDER_RELAY_PHYS_PINS[i], POLE_FEEDER_RELAY_LABELS[i], channels[i].pin);
     }
+    Serial.println(F("[ACTUATOR] Verification: Physical Pin 24 is D26 (GPIO 26). GPIO 24 is NOT used."));
+    Serial.println(F("[ACTUATOR] ──────────────────────────────────────────────────────────"));
 
     // 2. Critical Hardware Strapping Mitigation for GPIO 12
     if (gpio12HazardPresent) {
