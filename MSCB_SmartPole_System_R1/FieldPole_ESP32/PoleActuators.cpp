@@ -34,7 +34,8 @@ PoleActuators::PoleActuators() :
     activeLow(RELAY_ACTIVE_LOW),
     diagnosticPassed(false),
     emergencyActive(false),
-    gpio12HazardPresent(false)
+    gpio12HazardPresent(false),
+    relaysLockedDisabled(MSCB_RELAYS_LOCKED_DISABLED != 0)
 {
     for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
         channels[i].pin = SAFE_RELAY_PINS[i];
@@ -177,8 +178,30 @@ ActuatorDriverState PoleActuators::getDriverState() const {
     return driverState;
 }
 
+bool PoleActuators::areRelaysLockedDisabled() const {
+#if defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
+    return true;
+#else
+    return relaysLockedDisabled;
+#endif
+}
+
+void PoleActuators::setRelaysLockedDisabled(bool locked) {
+#if defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
+    relaysLockedDisabled = true; // Lockout permanently enforced by compile configuration
+#else
+    relaysLockedDisabled = locked;
+#endif
+}
+
 bool PoleActuators::requestRelayOn(uint8_t channel, const char* reason) {
     if (channel >= NUM_FEEDER_ACTUATORS) return false;
+
+    // MANDATORY CRITICAL SAFETY INTERLOCK: Enforce MSCB_RELAYS_LOCKED_DISABLED
+    if (areRelaysLockedDisabled()) {
+        Serial.printf("[ACTUATOR] ⛔ Relay ON Rejected: MSCB_RELAYS_LOCKED_DISABLED active (Channel %d)!\n", channel + 1);
+        return false;
+    }
 
     // Safety interlocks
     if (driverState != ACTUATOR_STATE_READY) {

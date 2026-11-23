@@ -18,6 +18,8 @@
 #include <WiFi.h>
 #include <esp_chip_info.h>
 #include "GwConfig.h"
+#include "GwFirmwareManager.h"
+#include "CommandSecurity.h"
 
 // =====================================================================
 //  GLOBAL STATE & TIMING VARIABLES
@@ -107,11 +109,31 @@ void setup() {
   // Print diagnostic audit
   printGatewayDiagnosticBanner();
 
+  // Initialize Firmware Lifecycle & OTA Manager
+  gwFwMgr.init(10);
+
+  // Security & Key Provisioning Audit
+  if (!cmdSecurity.isKeyProvisioned()) {
+    Serial.println(F("[SECURITY] ⚠️ No secure key provisioned. Operating in Fail-Closed mode."));
+  }
+
+  // Network Interface Readiness Check
+  if (strcmp(MSCB_WIFI_SSID, "CONFIGURE_YOUR_SSID_IN_PRIVATE_CONFIG") == 0) {
+    Serial.println(F("[WIFI] ⚠️ Production credentials unconfigured. Network stack in SAFE_STANDBY."));
+  }
+
   s_bootTimeMs = millis();
   s_lastHeartbeatMs = s_bootTimeMs;
-  s_hardwareAuditPassed = true;
 
-  Serial.println(F("[SYSTEM_INIT] Gateway Skeleton initialized successfully. Waiting for Prompt 07."));
+  // Never mark hardwareAuditPassed unconditionally! Check actual PSRAM and memory health
+  bool psramOk = psramFound();
+  if (!psramOk) {
+    s_hardwareAuditPassed = false;
+    Serial.println(F("[SYSTEM_INIT] ❌ CRITICAL: PSRAM hardware not detected! N16R8 Octal PSRAM required."));
+  } else {
+    s_hardwareAuditPassed = true;
+    Serial.println(F("[SYSTEM_INIT] Gateway initialized successfully in SAFE_STANDBY mode."));
+  }
 }
 
 // =====================================================================
@@ -131,8 +153,11 @@ void loop() {
     static uint8_t s_logDivider = 0;
     if (++s_logDivider >= 10) {
       s_logDivider = 0;
-      Serial.printf("[GW_HEARTBEAT] Uptime: %lu s | Free Heap: %u bytes | Mode: SAFE_STANDBY\n", 
-                    (currentMs - s_bootTimeMs) / 1000UL, ESP.getFreeHeap());
+      Serial.printf("[GW_HEARTBEAT] Uptime: %lu s | Heap: %u B | PSRAM Free: %u B | OTA: %s | Sec: %s\n", 
+                    (currentMs - s_bootTimeMs) / 1000UL, ESP.getFreeHeap(),
+                    psramFound() ? ESP.getFreePsram() : 0,
+                    gwOtaStateToString(gwFwMgr.getState()),
+                    cmdSecurity.isKeyProvisioned() ? "KEY_PROVISIONED" : "FAIL_CLOSED");
     }
   }
 

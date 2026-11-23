@@ -18,6 +18,8 @@
 #include <esp_chip_info.h>
 #include "PoleConfig.h"
 #include "PoleActuators.h"
+#include "PoleMetrology.h"
+#include "CommandSecurity.h"
 
 // =====================================================================
 //  GLOBAL STATE & TIMING VARIABLES
@@ -115,6 +117,10 @@ void setup() {
   pinMode(POLE_DECODER_A1_PIN, OUTPUT);
   poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
 
+  // Initialize Metrology Subsystem (3x ADS131M08)
+  SPI.begin(POLE_SPI_SCK_PIN, POLE_SPI_MISO_PIN, POLE_SPI_MOSI_PIN);
+  bool metrologyOk = poleMetrology.begin();
+
   // Configure Status LED
   pinMode(POLE_STATUS_LED_PIN, OUTPUT);
   digitalWrite(POLE_STATUS_LED_PIN, LOW);
@@ -126,11 +132,25 @@ void setup() {
   // Print diagnostic audit
   printPoleDiagnosticBanner();
 
+  // Security & Key Provisioning Audit
+  if (!cmdSecurity.isKeyProvisioned()) {
+    Serial.println(F("[SECURITY] ⚠️ No secure key provisioned. Operating in Fail-Closed mode."));
+  }
+
   s_bootTimeMs = millis();
   s_lastHeartbeatMs = s_bootTimeMs;
-  s_hardwareAuditPassed = true;
 
-  Serial.println(F("[SYSTEM_INIT] Field Pole Skeleton initialized successfully. Waiting for Prompt 07."));
+  // Never mark hardwareAuditPassed unconditionally!
+  if (!diagOk || poleActuators.getDriverState() == ACTUATOR_STATE_FAULT || !poleActuators.isGpio12Safe()) {
+    s_hardwareAuditPassed = false;
+    Serial.println(F("[SYSTEM_INIT] ❌ CRITICAL: Actuator hardware audit FAILED! System locked in FAULT state."));
+  } else {
+    s_hardwareAuditPassed = true;
+    Serial.println(F("[SYSTEM_INIT] Field Pole initialized safely. Relays locked inactive."));
+    if (!metrologyOk) {
+      Serial.println(F("[SYSTEM_INIT] ⚠️ Metrology: ADS131M08 hardware absent. Zero-simulation enforced: ADC_NOT_CONNECTED."));
+    }
+  }
 }
 
 // =====================================================================
@@ -138,6 +158,12 @@ void setup() {
 // =====================================================================
 void loop() {
   uint32_t currentMs = millis();
+
+  // Service Metrology Subsystem Watchdog & Freshness
+  poleMetrology.service();
+
+  // Periodic Output Verification
+  poleActuators.verifyAllOutputs();
 
   // Periodic Heartbeat Status Flash (1 Hz non-blocking)
   if (currentMs - s_lastHeartbeatMs >= MSCB_STATUS_BLINK_INTERVAL_MS) {
@@ -150,8 +176,11 @@ void loop() {
     static uint8_t s_logDivider = 0;
     if (++s_logDivider >= 10) {
       s_logDivider = 0;
-      Serial.printf("[POLE_HEARTBEAT] Uptime: %lu s | Free Heap: %u bytes | Feeders: 6 LOCKED_OFF\n", 
-                    (currentMs - s_bootTimeMs) / 1000UL, ESP.getFreeHeap());
+      Serial.printf("[POLE_HEARTBEAT] Uptime: %lu s | Free Heap: %u B | Feeders: 6 %s | ADC: %s | Sec: %s\n", 
+                    (currentMs - s_bootTimeMs) / 1000UL, ESP.getFreeHeap(),
+                    poleActuators.areRelaysLockedDisabled() ? "LOCKED_OFF" : "OPERATIONAL",
+                    poleMetrology.areAllAdcsDetected() ? "3_CHIPS_OK" : "ADC_NOT_CONNECTED",
+                    cmdSecurity.isKeyProvisioned() ? "KEY_PROVISIONED" : "FAIL_CLOSED");
     }
   }
 

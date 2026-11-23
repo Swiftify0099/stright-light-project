@@ -41,7 +41,7 @@ enum McbTripStatus : uint8_t {
 };
 
 // =====================================================================
-//  NODE OPERATIONAL HEALTH
+//  NODE OPERATIONAL HEALTH & CHANNEL AVAILABILITY
 // =====================================================================
 enum NodeHealthState : uint8_t {
   NODE_HEALTH_BOOTING     = 0,
@@ -50,6 +50,29 @@ enum NodeHealthState : uint8_t {
   NODE_HEALTH_FAULT       = 3,
   NODE_HEALTH_OFFLINE     = 4
 };
+
+enum ChannelDataState : uint8_t {
+  CHANNEL_STATE_OK              = 0, // Sampling active, within valid range
+  CHANNEL_ADC_NOT_CONNECTED     = 1, // Underlying ADC chip missing / not detected on SPI
+  CHANNEL_SENSOR_FAULT          = 2, // Sensor open, short, or invalid impedance
+  CHANNEL_DATA_UNAVAILABLE      = 3, // Measurement unavailable (hardware offline)
+  CHANNEL_DATA_STALE            = 4, // Sampling stopped / timed out; values preserved
+  CHANNEL_ZERO_FRAME_REJECTED   = 5, // All-zero or all-one dead bus frame rejected
+  CHANNEL_OVER_RANGE_CLIPPING   = 6  // Waveform clipped or saturated
+};
+
+inline const char* channelDataStateToString(ChannelDataState st) {
+  switch (st) {
+    case CHANNEL_STATE_OK:            return "OK";
+    case CHANNEL_ADC_NOT_CONNECTED:   return "ADC_NOT_CONNECTED";
+    case CHANNEL_SENSOR_FAULT:        return "SENSOR_FAULT";
+    case CHANNEL_DATA_UNAVAILABLE:    return "DATA_UNAVAILABLE";
+    case CHANNEL_DATA_STALE:          return "DATA_STALE";
+    case CHANNEL_ZERO_FRAME_REJECTED: return "ZERO_FRAME_REJECTED";
+    case CHANNEL_OVER_RANGE_CLIPPING: return "OVER_RANGE_CLIPPING";
+    default:                          return "UNKNOWN";
+  }
+}
 
 // =====================================================================
 //  ELECTRICAL MEASUREMENT DATA STRUCTURES (21 CHANNELS PER POLE)

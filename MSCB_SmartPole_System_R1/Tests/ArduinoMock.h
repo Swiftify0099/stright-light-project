@@ -33,9 +33,15 @@ typedef bool boolean;
 #define HEX 16
 #define DEC 10
 
+static uint8_t g_pinStates[40] = {0};
 inline void pinMode(uint8_t, uint8_t) {}
-inline void digitalWrite(uint8_t, uint8_t) {}
-inline int digitalRead(uint8_t) { return 0; }
+inline void digitalWrite(uint8_t pin, uint8_t val) {
+  if (pin < 40) g_pinStates[pin] = val;
+}
+inline int digitalRead(uint8_t pin) {
+  return (pin < 40) ? g_pinStates[pin] : 0;
+}
+inline void delayMicroseconds(unsigned long) {}
 
 static unsigned long g_simulatedMillis = 1000UL;
 inline unsigned long millis() { return g_simulatedMillis; }

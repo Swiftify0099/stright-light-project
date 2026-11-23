@@ -13,7 +13,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#ifdef ARDUINO
+#if defined(ARDUINO) || defined(ARDUINO_MOCK_H)
   #include <Arduino.h>
 #else
   #include <string>

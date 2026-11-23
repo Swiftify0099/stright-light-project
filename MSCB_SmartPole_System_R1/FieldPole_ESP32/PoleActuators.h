@@ -69,6 +69,8 @@ public:
     bool validateStartupState();
     bool isDiagnosticPassed() const;
     ActuatorDriverState getDriverState() const;
+    bool areRelaysLockedDisabled() const;
+    void setRelaysLockedDisabled(bool locked);
 
     // 3. Relay Switching Requests
     bool requestRelayOn(uint8_t channel, const char* reason = "CMD");
@@ -103,6 +105,7 @@ private:
     bool                diagnosticPassed;
     bool                emergencyActive;
     bool                gpio12HazardPresent;
+    bool                relaysLockedDisabled;
 
     ActuatorChannelSpec channels[NUM_FEEDER_ACTUATORS];
 
