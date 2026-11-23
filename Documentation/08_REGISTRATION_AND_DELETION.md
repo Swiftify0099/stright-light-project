@@ -107,6 +107,11 @@ sequenceDiagram
    - If any Preferences write (`putBytes`, `putUChar`, `putUInt`) fails, the active, revoked, and pending arrays immediately roll back to their pre-transaction snapshot.
 3. **Child Route Migration**:
    - Downstream children with the deleted pole as `primaryParent` or `backupParent` are automatically re-routed to the Master Gateway (`MSCB_GATEWAY_NODE_ID`, Rank 1).
+4. **Pending Queue Durability**:
+   - Pending registration entries are committed to NVS (`mscb_reg`) with discovery metadata (MAC, RSSI, SNR, FW version, parent).
+   - If the Gateway reboots while nodes are pending approval, the entire queue is restored upon restart.
+5. **Telegram Queue Pagination**:
+   - The Telegram interface displays pending devices in paginated pages with one-click `[✅ Approve]` and `[❌ Reject]` controls.
 
 ### 3.3 Revoked Pole Reappearance Detection & Re-Authorization
 1. **Field Pole Persistent Revocation**:

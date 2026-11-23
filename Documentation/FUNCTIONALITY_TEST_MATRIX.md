@@ -96,3 +96,20 @@ The verification harness executes 13 distinct standalone test engines verifying 
 - **Network Airtime**: Verified maximum node hourly duty cycle is **6.15%**, well within Indian WPC G.S.R. 347(E) limit ($\le 10.0\%$).
 - **Packet Delivery Ratio (PDR)**: $> 85.0\%$ achieved across simulated 5-hop mesh at 50 nodes.
 - **Status**: **PASS (100/100)**.
+
+### Domain 11: R1 Core Remediation Suites (`test_r1_*.exe`)
+- **Suite 1: Heartbeat & Actuators**: 21 passed / 0 failed.
+- **Suite 2: Registration & Revocation**: 23 passed / 0 failed.
+- **Suite 3: Metrology & Zero Fake Data**: 20 passed / 0 failed.
+- **Suite 4: Protocol & LoRa Mesh**: 21 passed / 0 failed.
+- **Suite 5: Command Security, Wi-Fi & OTA**: 25 passed / 0 failed.
+- **Status**: **PASS (110/110)**.
+
+### Domain 12: R2 Telegram Bot, Numeric Fallback & Feeder Flow (`test_r2_flow.exe`)
+- **Telegram API & Online Transition**: getMe check, single online notification, persistent action keyboard.
+- **Deterministic Numeric Fallback**: Digits `1` through `14` directly execute dashboards/submenus without welcome loop.
+- **Dynamic Registration & Revocation**: Persistent pending queue, paginated UI, 2PC permanent revocation blacklist.
+- **Feeder Scheduling & Mesh Time Sync**: Bounded rules, IST UTC+05:30 conversion, auto-OFF timers, time-sync mesh packet.
+- **Non-Blocking Feeder Control**: Asynchronous command tracking ring, auxiliary contact verification, network-wide authenticated fan-out.
+- **Zero Fake Data**: Real metrology display with explicit `UNAVAILABLE` channel indicators.
+- **Status**: **PASS (45/45)**.

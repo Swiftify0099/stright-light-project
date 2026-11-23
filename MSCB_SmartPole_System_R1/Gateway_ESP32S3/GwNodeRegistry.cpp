@@ -364,7 +364,7 @@ PoleDeleteResult GwNodeRegistry::deleteAndRevokePoleEx(uint16_t poleId, const ch
   }
   activeCount--;
 
-  // 3. Child Route Migration: If any pole had deleted pole as primary/backup parent, re-route to Gateway
+  // 5. Child Route Migration: If any pole had deleted pole as primary/backup parent, re-route to Gateway
   for (uint8_t i = 0; i < activeCount; i++) {
     if (poles[i].primaryParent == poleId) {
       poles[i].primaryParent = MSCB_GATEWAY_NODE_ID;

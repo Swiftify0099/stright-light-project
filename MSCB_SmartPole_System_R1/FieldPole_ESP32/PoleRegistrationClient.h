@@ -46,7 +46,7 @@ public:
 
   NodeRegClientState getState() const { return state; }
   const uint8_t* getMacAddress() const { return myMac; }
-  void setMacAddress(const uint8_t mac[6]) { memcpy(myMac, mac, 6); }
+  void setMacAddress(const uint8_t mac[6]) { if (mac) memcpy(myMac, mac, 6); }
   bool isRegistered() const { return (state == REG_CLIENT_REGISTERED); }
   bool isRevoked() const { return (state == REG_CLIENT_REVOKED_LOCKED); }
   uint16_t getAssignedId() const { return poleStorage.getAssignedPoleId(); }
