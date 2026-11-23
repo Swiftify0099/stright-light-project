@@ -43,11 +43,30 @@
 
 #define GW_MESH_MAX_HOPS             MSCB_DEFAULT_MAX_HOPS // 6
 #define GW_DUP_CACHE_SIZE            32
+#define GW_MAX_TRACKED_COMMANDS      16
 
 struct SeqCacheEntry {
   uint16_t srcAddress;
   uint16_t seqNumber;
   uint32_t timestampMs;
+};
+
+struct GwTrackedCommand {
+  bool     inUse;
+  uint32_t seqNumber;
+  uint16_t poleId;
+  uint8_t  feederId;
+  uint8_t  action;
+  uint8_t  groupMask;
+  int64_t  adminChatId;
+  uint32_t sentMs;
+  uint32_t timeoutMs;
+  uint8_t  lastAckState;
+  uint8_t  currentRelayMask;
+  uint8_t  currentAuxMask;
+  uint8_t  currentMcbMask;
+  bool     completed;
+  bool     notified;
 };
 
 class GwMeshCoordinator {
@@ -59,7 +78,8 @@ public:
 
   // Downlink Transmission
   bool sendDownlinkPacket(uint16_t targetPoleId, uint8_t packetType, const uint8_t *payload, uint16_t payloadLen, uint8_t priority = PRIO_NORMAL);
-  bool sendFeederCommand(uint16_t poleId, uint8_t feederId, uint8_t action, uint8_t groupMask, uint32_t &outSeqNumber);
+  bool sendFeederCommand(uint16_t poleId, uint8_t feederId, uint8_t action, uint8_t groupMask, uint32_t &outSeqNumber, int64_t adminChatId = 0);
+  bool sendRegisterResponse(const uint8_t mac[6], uint16_t assignedPoleId, uint16_t assignedParent, uint8_t status);
 
   // Packet Processing
   bool processIncomingWireFrame(const MeshWireFrame &frame, int16_t rssi, int8_t snr);
@@ -69,35 +89,40 @@ public:
   uint32_t getDuplicatesSuppressed() const { return duplicatesSuppressed; }
   uint32_t getHopExceededCount() const { return hopExceededCount; }
 
-  // Feeder ACK tracking
+  // Feeder ACK tracking (Non-blocking)
   bool isFeederAckPending() const { return feederAckPending; }
   uint32_t getPendingAckSeq() const { return pendingAckSeq; }
   uint8_t getLastAckState() const { return lastAckState; }
   uint16_t getLastAckPole() const { return lastAckPole; }
   void resetFeederAckTracking();
 
+  // Multi-command Non-blocking Tracking
+  bool pollCompletedCommand(GwTrackedCommand &outCmd);
+
 private:
   bool isDuplicate(uint16_t src, uint16_t seq);
   void addDuplicate(uint16_t src, uint16_t seq);
   void broadcastBeacon();
 
-  uint16_t       seqCounter;
-  uint32_t       lastBeaconMs;
-  uint32_t       packetsForwarded;
-  uint32_t       duplicatesSuppressed;
-  uint32_t       hopExceededCount;
+  uint16_t          seqCounter;
+  uint32_t          lastBeaconMs;
+  uint32_t          packetsForwarded;
+  uint32_t          duplicatesSuppressed;
+  uint32_t          hopExceededCount;
 
-  SeqCacheEntry  dupCache[GW_DUP_CACHE_SIZE];
-  uint8_t        dupCacheIdx;
+  SeqCacheEntry     dupCache[GW_DUP_CACHE_SIZE];
+  uint8_t           dupCacheIdx;
 
   // Feeder ACK synchronization
-  bool           feederAckPending;
-  uint32_t       pendingAckSeq;
-  uint16_t       pendingAckPole;
-  uint8_t        pendingAckFeeder;
-  uint32_t       pendingAckStartMs;
-  uint8_t        lastAckState;
-  uint16_t       lastAckPole;
+  bool              feederAckPending;
+  uint32_t          pendingAckSeq;
+  uint16_t          pendingAckPole;
+  uint8_t           pendingAckFeeder;
+  uint32_t          pendingAckStartMs;
+  uint8_t           lastAckState;
+  uint16_t          lastAckPole;
+
+  GwTrackedCommand  trackedCommands[GW_MAX_TRACKED_COMMANDS];
 };
 
 extern GwMeshCoordinator gwMesh;

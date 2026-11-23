@@ -90,8 +90,12 @@ sequenceDiagram
 ```
 
 ### 3.2 Permanent Blacklisting & Re-Commissioning Protection
-1. **Gateway Blacklist**: The Gateway appends the revoked node's physical MAC address to the persistent `revoc` NVS namespace (`MAX_REVOKED_NODES = 50`). Any future `JOIN_REQ` from this hardware is silently rejected without notifying the admin.
-2. **Pole Anti-Replay Lock**: The revoked pole's internal flash is flagged with `REVOKED_PERMANENT`. Even if rebooted or power-cycled, the node will never transmit registration probes or energize relay coils. Re-commissioning requires physical factory reprogramming over USB.
+1. **Revocation Capacity Verification**: Prior to deleting any active pole, the Gateway strictly verifies that revocation storage has available capacity (`revokedCount < MSCB_MAX_REVOCATION_RECORDS`). If the blacklist is full, deletion is prevented with `REVOCATION_STORAGE_EXHAUSTED` to prevent untracked deletions.
+2. **Pre-Write Audit Persistence**: The revocation record (MAC address, decommission timestamp, admin audit trail) is durably committed to NVS *before* the node is removed from the active node registry.
+3. **Gateway Blacklist**: The Gateway appends the revoked node's physical MAC address to the persistent `mscb_reg` NVS namespace (`MAX_REVOKED_NODES = 50`). Any future `JOIN_REQ` from this hardware is rejected with `REG_RESP_REJECTED_REVOKED` without entering the pending queue.
+4. **Pole Anti-Replay Lock**: The revoked pole's internal flash is flagged with `REVOKED_PERMANENT`. Even if rebooted or power-cycled, the node will never transmit registration probes or energize relay coils. Re-commissioning requires physical factory reprogramming over USB.
+5. **Pending Queue Durability**: Pending registration entries are committed to NVS (`mscb_reg`) with discovery metadata (MAC, RSSI, SNR, FW version, parent). If the Gateway reboots while nodes are pending approval, the entire queue is seamlessly restored upon restart.
+6. **Telegram Queue Pagination**: The Telegram interface displays pending devices in paginated pages of 4 nodes per screen with one-click `[✅ Approve]` and `[❌ Reject]` controls.
 
 ### 3.3 Downstream Child Impact Mitigation
 When an intermediate relay node is deleted:

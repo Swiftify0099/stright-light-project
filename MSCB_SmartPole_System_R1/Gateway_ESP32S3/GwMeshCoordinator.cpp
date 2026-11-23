@@ -17,6 +17,7 @@ GwMeshCoordinator::GwMeshCoordinator() :
   pendingAckFeeder(0), pendingAckStartMs(0), lastAckState(0), lastAckPole(0)
 {
   memset(dupCache, 0, sizeof(dupCache));
+  memset(trackedCommands, 0, sizeof(trackedCommands));
 }
 
 bool GwMeshCoordinator::begin() {
@@ -88,7 +89,16 @@ void GwMeshCoordinator::service() {
     }
   }
 
-  // 3. Timeout check for pending Feeder ACK
+  // 3. Timeout check for tracked feeder commands (Non-blocking)
+  for (uint8_t i = 0; i < GW_MAX_TRACKED_COMMANDS; i++) {
+    if (trackedCommands[i].inUse && !trackedCommands[i].completed) {
+      if (now - trackedCommands[i].sentMs >= trackedCommands[i].timeoutMs) {
+        trackedCommands[i].completed = true;
+      }
+    }
+  }
+
+  // Timeout check for legacy single-command pending Feeder ACK
   if (feederAckPending && (now - pendingAckStartMs > 5000)) {
     feederAckPending = false;
   }
@@ -191,8 +201,27 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
             lastAckPole = ack.poleId;
             if (ack.ackState == FEEDER_ACK_COMPLETED ||
                 ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
-                ack.ackState >= FEEDER_ACK_REJECTED_STALE) {
+                ack.ackState >= FEEDER_ACK_REJECTED_STALE ||
+                ack.ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) {
               feederAckPending = false;
+            }
+          }
+
+          // Update non-blocking tracked command record
+          for (uint8_t i = 0; i < GW_MAX_TRACKED_COMMANDS; i++) {
+            if (trackedCommands[i].inUse && trackedCommands[i].seqNumber == ack.sequenceNumber) {
+              trackedCommands[i].lastAckState = ack.ackState;
+              trackedCommands[i].currentRelayMask = ack.currentRelayMask;
+              trackedCommands[i].currentAuxMask = ack.currentAuxMask;
+              trackedCommands[i].currentMcbMask = ack.currentMcbMask;
+
+              if (ack.ackState == FEEDER_ACK_COMPLETED ||
+                  ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
+                  ack.ackState >= FEEDER_ACK_REJECTED_STALE ||
+                  ack.ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) {
+                trackedCommands[i].completed = true;
+              }
+              break;
             }
           }
 
@@ -265,7 +294,7 @@ bool GwMeshCoordinator::sendDownlinkPacket(uint16_t targetPoleId, uint8_t packet
   return gwRadio.sendPacket(frame);
 }
 
-bool GwMeshCoordinator::sendFeederCommand(uint16_t poleId, uint8_t feederId, uint8_t action, uint8_t groupMask, uint32_t &outSeqNumber) {
+bool GwMeshCoordinator::sendFeederCommand(uint16_t poleId, uint8_t feederId, uint8_t action, uint8_t groupMask, uint32_t &outSeqNumber, int64_t adminChatId) {
   AuthenticatedCommandEnvelope env;
   uint32_t expiryEpoch = (millis() / 1000) + 60; // 60 seconds validity
   bool ok = cmdSecurity.createCommand(MSCB_GATEWAY_NODE_ID, poleId, feederId,
@@ -291,7 +320,70 @@ bool GwMeshCoordinator::sendFeederCommand(uint16_t poleId, uint8_t feederId, uin
   pendingAckStartMs = millis();
   lastAckState = FEEDER_ACK_SENT;
 
+  // Enqueue in non-blocking tracked commands
+  for (uint8_t i = 0; i < GW_MAX_TRACKED_COMMANDS; i++) {
+    if (!trackedCommands[i].inUse) {
+      trackedCommands[i].inUse = true;
+      trackedCommands[i].seqNumber = env.sequenceNumber;
+      trackedCommands[i].poleId = poleId;
+      trackedCommands[i].feederId = feederId;
+      trackedCommands[i].action = action;
+      trackedCommands[i].groupMask = groupMask;
+      trackedCommands[i].adminChatId = adminChatId;
+      trackedCommands[i].sentMs = millis();
+      trackedCommands[i].timeoutMs = 4500;
+      trackedCommands[i].lastAckState = FEEDER_ACK_SENT;
+      trackedCommands[i].currentRelayMask = 0;
+      trackedCommands[i].currentAuxMask = 0;
+      trackedCommands[i].currentMcbMask = 0;
+      trackedCommands[i].completed = false;
+      trackedCommands[i].notified = false;
+      break;
+    }
+  }
+
   return sendDownlinkPacket(poleId, PKT_CMD_FEEDER_SWITCH, (const uint8_t*)&cmd, sizeof(PktFeederCmdPayload), PRIO_COMMAND);
+}
+
+bool GwMeshCoordinator::sendRegisterResponse(const uint8_t mac[6], uint16_t assignedPoleId, uint16_t assignedParent, uint8_t status) {
+  if (!mac) return false;
+  PktRegisterResponsePayload resp;
+  memcpy(resp.macAddress, mac, 6);
+  resp.status = status;
+  resp.assignedPoleId = assignedPoleId;
+  resp.assignedParent = assignedParent ? assignedParent : MSCB_GATEWAY_NODE_ID;
+  resp.heartbeatIntervalSec = 30;
+  resp.networkKeyEpoch = 1;
+
+  MeshWireFrame respFrame;
+  memset(&respFrame, 0, sizeof(MeshWireFrame));
+  respFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+  respFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+  respFrame.header.version = MSCB_PROTOCOL_VERSION;
+  respFrame.header.type = PKT_REGISTER_RESPONSE;
+  respFrame.header.priority = PRIO_COMMAND;
+  respFrame.header.hopCount = 0;
+  respFrame.header.maxHops = GW_MESH_MAX_HOPS;
+  respFrame.header.seqNumber = seqCounter++;
+  respFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
+  respFrame.header.dstAddress = assignedPoleId ? assignedPoleId : MSCB_BROADCAST_NODE_ID;
+  respFrame.header.nextHop = MSCB_BROADCAST_NODE_ID;
+  respFrame.header.payloadLen = sizeof(PktRegisterResponsePayload);
+  memcpy(respFrame.payload, &resp, sizeof(PktRegisterResponsePayload));
+
+  return gwRadio.sendPacket(respFrame);
+}
+
+bool GwMeshCoordinator::pollCompletedCommand(GwTrackedCommand &outCmd) {
+  for (uint8_t i = 0; i < GW_MAX_TRACKED_COMMANDS; i++) {
+    if (trackedCommands[i].inUse && trackedCommands[i].completed && !trackedCommands[i].notified) {
+      outCmd = trackedCommands[i];
+      trackedCommands[i].notified = true;
+      trackedCommands[i].inUse = false; // Mark free
+      return true;
+    }
+  }
+  return false;
 }
 
 void GwMeshCoordinator::resetFeederAckTracking() {

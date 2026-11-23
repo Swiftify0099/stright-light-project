@@ -148,6 +148,7 @@ uint8_t GwNodeRegistry::handleJoinRequest(const PktRegisterRequestPayload &req,
     p.snr = snr;
     p.requestTimestamp = millis() / 1000;
     p.notifiedAdmin = false;
+    saveRegistry();
   }
 
   outResp.status = REG_RESP_PENDING_APPROVAL;
@@ -203,6 +204,7 @@ bool GwNodeRegistry::rejectPending(const uint8_t mac[6]) {
     pending[i] = pending[i + 1];
   }
   pendingCount--;
+  saveRegistry();
   return true;
 }
 
@@ -216,27 +218,48 @@ bool GwNodeRegistry::deleteAndRevokePole(uint16_t poleId, const char* adminId, c
   }
   if (targetIdx < 0) return false;
 
-  // 1. Add hardware identity to permanent revocation list
-  if (revokedCount < MSCB_MAX_REVOCATION_RECORDS) {
-    PermanentRevocationRecord &r = revoked[revokedCount++];
-    char macHex[13];
-    snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
-             poles[targetIdx].mac[0], poles[targetIdx].mac[1], poles[targetIdx].mac[2],
-             poles[targetIdx].mac[3], poles[targetIdx].mac[4], poles[targetIdx].mac[5]);
-    strncpy(r.hwId, macHex, sizeof(r.hwId) - 1);
-    strncpy(r.logicalId, poles[targetIdx].stringId, sizeof(r.logicalId) - 1);
-    strncpy(r.reason, reason ? reason : "ADMIN_REVOKED", sizeof(r.reason) - 1);
-    strncpy(r.adminId, adminId ? adminId : "TELEGRAM_ADMIN", sizeof(r.adminId) - 1);
-    r.timestamp = millis() / 1000;
+  // 1. Strict Revocation Capacity Check:
+  // Deletion MUST NEVER proceed if the permanent revocation list is full!
+  if (revokedCount >= MSCB_MAX_REVOCATION_RECORDS) {
+    #if defined(ARDUINO)
+    Serial.println(F("[REGISTRY] ❌ Deletion aborted: Permanent revocation list is full!"));
+    #endif
+    return false;
   }
 
-  // 2. Remove from active poles array
+  // 2. Add hardware identity to permanent revocation list
+  PermanentRevocationRecord &r = revoked[revokedCount];
+  char macHex[13];
+  snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
+           poles[targetIdx].mac[0], poles[targetIdx].mac[1], poles[targetIdx].mac[2],
+           poles[targetIdx].mac[3], poles[targetIdx].mac[4], poles[targetIdx].mac[5]);
+  strncpy(r.hwId, macHex, sizeof(r.hwId) - 1);
+  r.hwId[sizeof(r.hwId) - 1] = '\0';
+  strncpy(r.logicalId, poles[targetIdx].stringId, sizeof(r.logicalId) - 1);
+  r.logicalId[sizeof(r.logicalId) - 1] = '\0';
+  strncpy(r.reason, reason ? reason : "ADMIN_REVOKED", sizeof(r.reason) - 1);
+  r.reason[sizeof(r.reason) - 1] = '\0';
+  strncpy(r.adminId, adminId ? adminId : "TELEGRAM_ADMIN", sizeof(r.adminId) - 1);
+  r.adminId[sizeof(r.adminId) - 1] = '\0';
+  r.timestamp = millis() / 1000;
+  revokedCount++;
+
+  // 3. Persist revocation record in NVS BEFORE removing active registration
+  if (!saveRegistry()) {
+    revokedCount--; // Rollback on failure
+    #if defined(ARDUINO)
+    Serial.println(F("[REGISTRY] ❌ Storage persistence failed; aborting pole deletion."));
+    #endif
+    return false;
+  }
+
+  // 4. Remove from active poles array
   for (uint8_t i = targetIdx; i < activeCount - 1; i++) {
     poles[i] = poles[i + 1];
   }
   activeCount--;
 
-  // 3. Child Route Migration: If any pole had deleted pole as primary/backup parent, re-route to Gateway
+  // 5. Child Route Migration: If any pole had deleted pole as primary/backup parent, re-route to Gateway
   for (uint8_t i = 0; i < activeCount; i++) {
     if (poles[i].primaryParent == poleId) {
       poles[i].primaryParent = MSCB_GATEWAY_NODE_ID;
@@ -272,15 +295,27 @@ void GwNodeRegistry::updateNodeTelemetry(uint16_t poleId, uint16_t priParent, ui
 
 bool GwNodeRegistry::saveRegistry() {
 #if defined(ARDUINO)
-  prefs.begin("mscb_reg", false);
+  if (!prefs.begin("mscb_reg", false)) {
+    return false;
+  }
   prefs.putUChar("active_cnt", activeCount);
   prefs.putUChar("revoked_cnt", revokedCount);
+  prefs.putUChar("pending_cnt", pendingCount);
 
   if (activeCount > 0) {
     prefs.putBytes("poles", poles, activeCount * sizeof(RegisteredPole));
+  } else {
+    prefs.remove("poles");
   }
   if (revokedCount > 0) {
     prefs.putBytes("revoked", revoked, revokedCount * sizeof(PermanentRevocationRecord));
+  } else {
+    prefs.remove("revoked");
+  }
+  if (pendingCount > 0) {
+    prefs.putBytes("pending", pending, pendingCount * sizeof(PendingRegistration));
+  } else {
+    prefs.remove("pending");
   }
   prefs.end();
 #endif
@@ -289,18 +324,25 @@ bool GwNodeRegistry::saveRegistry() {
 
 bool GwNodeRegistry::loadRegistry() {
 #if defined(ARDUINO)
-  prefs.begin("mscb_reg", true);
+  if (!prefs.begin("mscb_reg", true)) {
+    return false;
+  }
   activeCount = prefs.getUChar("active_cnt", 0);
   revokedCount = prefs.getUChar("revoked_cnt", 0);
+  pendingCount = prefs.getUChar("pending_cnt", 0);
 
   if (activeCount > GW_MAX_MANAGED_POLES) activeCount = 0;
   if (revokedCount > MSCB_MAX_REVOCATION_RECORDS) revokedCount = 0;
+  if (pendingCount > GW_MAX_PENDING_REGISTRATIONS) pendingCount = 0;
 
   if (activeCount > 0) {
     prefs.getBytes("poles", poles, activeCount * sizeof(RegisteredPole));
   }
   if (revokedCount > 0) {
     prefs.getBytes("revoked", revoked, revokedCount * sizeof(PermanentRevocationRecord));
+  }
+  if (pendingCount > 0) {
+    prefs.getBytes("pending", pending, pendingCount * sizeof(PendingRegistration));
   }
   prefs.end();
 #endif

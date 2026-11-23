@@ -10,17 +10,51 @@
 
 ## 1. Introduction & Authentication Security
 
-The Master Gateway provides an encrypted, mobile-accessible administrative user interface via Telegram. All system management—from dynamic device registration to high-voltage feeder switching—is conducted through interactive inline keyboards.
+The Master Gateway provides an encrypted, mobile-accessible administrative user interface via Telegram. All system management—from dynamic device registration to high-voltage feeder switching—is conducted through interactive inline keyboards and persistent action keyboards.
 
 ### 1.1 Security Policy & Session Management
-- **Single Active Admin**: Only authorized Telegram Chat IDs provisioned during commissioning can interact with the bot. Unauthorized users receive an access denial response.
+- **Sender Identity Authentication**: Every callback and message strictly verifies the user's Telegram User ID (`from_id`), not just `chat_id`. Unauthorized users are immediately rejected.
+- **Single Active Admin**: Only authorized Telegram Chat IDs provisioned during commissioning (`MSCB_TELEGRAM_ADMIN_ALLOWLIST`) can interact with the bot.
 - **Inactivity Timeout**: Administrator sessions expire automatically after **15 minutes** of inactivity (`TG_SESSION_TIMEOUT_MS = 900000`).
 - **Sensitive Button Expiration**: High-impact buttons (e.g. Delete Pole, All-Off, Wi-Fi Change) expire after **60 seconds** (`TG_BUTTON_TTL_MS = 60000`).
 - **Rate Limiting**: Commands are capped at **5 requests per 10 seconds** (`TG_RATE_LIMIT_MAX_CMDS = 5`).
+- **Webhook Conflict Elimination**: Gateway automatically purges any dangling webhooks on boot/connect to ensure flawless long-polling.
 
 ---
 
-## 2. Comprehensive 25-Workflow Administrator Guide
+## 2. Interactive Menu Layout & Numeric Fallback
+
+The bot provides two synchronized input mechanisms:
+1. **Interactive Inline & Reply Keyboards**: 14 structured main menu options arranged in clean, responsive rows for Android, iOS, and Desktop Telegram clients.
+2. **Deterministic Numeric Fallback**: Operators in poor network areas or field conditions can type raw numbers `1` through `14` to directly open the respective dashboard or submenu without looping to the welcome message.
+
+```
+┌──────┬───────────────────────────────┬──────────────────────────────────────────┐
+│ Key  │ Button Text                   │ Action / Destination Screen              │
+├──────┼───────────────────────────────┼──────────────────────────────────────────┤
+│  1   │ 📊 Dashboard                  │ Network summary, pole count, alarms      │
+│  2   │ 💡 Poles Directory           │ Paginated list of all registered poles   │
+│  3   │ ⚡ 3-Phase Voltage            │ Real 3-phase bus voltage & frequency     │
+│  4   │ 🔌 Feeder Control             │ Select Pole & Feeder for ON/OFF switching│
+│  5   │ 🟢 All Feeders ON             │ 2-Step Network-wide ALL ON confirmation │
+│  6   │ 🔴 All Feeders OFF            │ 2-Step Network-wide ALL OFF confirmation│
+│  7   │ 📋 Pole Registrations         │ Paginated pending queue (Approve/Reject) │
+│  8   │ 🗑️ Delete Pole                │ 2-Step Revocation & Permanent Blacklist │
+│  9   │ ⏱️ Feeder Timer / Schedule    │ Recurring daily schedules & Auto-OFF     │
+│ 10   │ 🕒 Mesh Time Sync             │ Broadcast NTP/RTC time sync across mesh  │
+│ 11   │ 📶 Wi-Fi Settings             │ Safe non-destructive Wi-Fi credential cfg│
+│ 12   │ 🔄 Firmware OTA               │ Gateway & Pole cryptographic OTA status  │
+│ 13   │ 🚨 Alarm Log                  │ System electrical and mesh alarms audit  │
+│ 14   │ ⚙️ System Settings            │ Heartbeat & network configuration        │
+└──────┴───────────────────────────────┴──────────────────────────────────────────┘
+```
+
+> [!NOTE]
+> Typing `/start`, `/menu`, or `/help` opens the main menu and refreshes the persistent ReplyKeyboard. Unknown text inputs receive a concise help prompt without spamming menus or entering recursive loops.
+
+---
+
+## 3. Comprehensive 25-Workflow Administrator Guide
 
 ### Workflow 1: Opening the Bot
 - Open your Telegram mobile or desktop client.

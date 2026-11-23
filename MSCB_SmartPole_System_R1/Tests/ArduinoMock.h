@@ -129,6 +129,15 @@ public:
 
 extern MockSerial Serial;
 
+class MockESP {
+public:
+  uint32_t getFreeHeap() { return 245000; }
+  uint32_t getFreePsram() { return 8192000; }
+  uint32_t getPsramSize() { return 8388608; }
+};
+static MockESP ESP;
+inline bool psramFound() { return true; }
+
 #define F(s) (s)
 
 #endif // ARDUINO_MOCK_H

@@ -26,6 +26,7 @@
 #include "GwWiFiManager.h"
 #include "GwTelegramBot.h"
 #include "GwFirmwareManager.h"
+#include "GwScheduleManager.h"
 #include <CommandSecurity.h>
 
 // =====================================================================
@@ -154,6 +155,9 @@ void setup() {
   // Initialize Telegram Bot Interface
   gwTelegram.begin();
 
+  // Initialize Feeder Schedule & NTP Time Synchronization Manager
+  gwSchedule.begin();
+
   // Network Interface Readiness Check
   if (strcmp(MSCB_WIFI_SSID, "CONFIGURE_YOUR_SSID_IN_PRIVATE_CONFIG") == 0) {
     Serial.println(F("[WIFI] ⚠️ Production credentials unconfigured. Network stack in SAFE_STANDBY."));
@@ -192,7 +196,10 @@ void loop() {
   // 3. Service Telegram Admin Bot (polling & alert dispatch)
   gwTelegram.service();
 
-  // 4. Periodic Pole Heartbeat & Offline State Check (every 5 seconds)
+  // 4. Service Feeder Schedule Manager & NTP Clock
+  gwSchedule.service();
+
+  // 5. Periodic Pole Heartbeat & Offline State Check (every 5 seconds)
   if (currentMs - s_lastHealthCheckMs >= 5000) {
     s_lastHealthCheckMs = currentMs;
     gwHeartbeat.checkHealth(currentMs / 1000);

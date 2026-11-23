@@ -32,6 +32,7 @@
 #include "GwHeartbeatMonitor.h"
 #include "GwWiFiManager.h"
 #include "GwFirmwareManager.h"
+#include "GwScheduleManager.h"
 
 class GwTelegramBot {
 public:
@@ -57,29 +58,37 @@ public:
   void showPoleDetail(int64_t chatId, uint16_t poleId);
   void showVoltageDashboard(int64_t chatId, uint16_t poleId = 0);
   void showFeederDashboard(int64_t chatId, uint16_t poleId = 0);
-  void showRegistrationsMenu(int64_t chatId);
-  void showDeleteMenu(int64_t chatId);
+  void showRegistrationsMenu(int64_t chatId, uint8_t page = 0);
+  void showDeleteMenu(int64_t chatId, uint8_t page = 0);
   void showDeleteConfirm(int64_t chatId, uint16_t poleId);
   void showConfirmAllPoles(int64_t chatId, uint8_t action);
+  void showFeederScheduleMenu(int64_t chatId, uint8_t page = 0);
+  void showMeshTimeSync(int64_t chatId);
   void showWifiSettings(int64_t chatId);
   void showFirmwareOta(int64_t chatId);
   void showAlarmLog(int64_t chatId);
   void showSettingsMenu(int64_t chatId);
 
-  // Feeder Naming
+  // Feeder Naming & Persistence (50 Poles)
   const char* getFeederName(uint16_t poleId, uint8_t feederId) const;
   void setFeederName(uint16_t poleId, uint8_t feederId, const char* name);
+  bool saveFeederNames();
+  bool loadFeederNames();
+
+  // Network-wide Execution
+  void executeAllPolesNetworkWide(int64_t chatId, uint8_t action);
 
   bool isOnline() const { return telegramOnline; }
 
 private:
   void checkOnlineAndNotify();
   void pollUpdates();
+  void serviceTrackedCommands();
 
   void cmdStart(int64_t chatId);
   void cmdStatus(int64_t chatId);
   void cmdPoles(int64_t chatId, uint8_t page = 0);
-  void cmdPending(int64_t chatId);
+  void cmdPending(int64_t chatId, uint8_t page = 0);
   void cmdPoleDetail(int64_t chatId, uint16_t poleId);
   void cmdFeeder(int64_t chatId, uint16_t poleId, uint8_t feederId, uint8_t action);
   void cmdGroup(int64_t chatId, uint16_t poleId, uint8_t groupMask, uint8_t action);
@@ -99,7 +108,7 @@ private:
   bool     startupNotified;
   uint32_t lastVerifyAttemptMs;
 
-  char customFeederNames[10][6][24]; // Custom feeder names for up to 10 poles
+  char customFeederNames[GW_MAX_MANAGED_POLES][6][24]; // Custom feeder names for all 50 poles
 
 #if defined(ARDUINO)
   WiFiClientSecure client;

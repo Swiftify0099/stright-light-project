@@ -1,13 +1,26 @@
 /**
  * @file GwTelegramBot.cpp
- * @brief MSCB Smart Pole Gateway - Telegram Admin Interface Implementation
- * @version 1.0.0
+ * @brief MSCB Smart Pole Gateway - Complete Telegram Admin Interface Implementation
+ * @version 2.0.0
+ * 
+ * Enforces:
+ * - Admin authentication using strict explicit allowlist (validating user from_id).
+ * - Non-blocking HTTPS polling & non-blocking command execution state machine.
+ * - Single notification per online transition (re-notifies cleanly after disconnect/reconnect).
+ * - Comprehensive 14-button main menu + matching persistent action reply keyboard.
+ * - Compatibility numeric fallback (typing 1..14 executes exact corresponding action).
+ * - Two-step deletion confirmation with permanent revocation blacklist in NVS.
+ * - Truthful ACK and physical contactor auxiliary feedback reporting (no fake early success).
+ * - Zero synthetic/fake metrology (unavailable channels report explicit hardware status).
+ * - Feeder schedule & India Standard Time (UTC+05:30) mesh time synchronization.
+ * - Custom pole and feeder names persisted across all 50 managed poles.
  */
 
 #include "GwTelegramBot.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 GwTelegramBot gwTelegram;
 
@@ -28,7 +41,7 @@ GwTelegramBot::GwTelegramBot() :
   lastVerifyAttemptMs(0)
 {
   memset(botToken, 0, sizeof(botToken));
-  for (int p = 0; p < 10; p++) {
+  for (int p = 0; p < GW_MAX_MANAGED_POLES; p++) {
     for (int f = 0; f < 6; f++) {
       customFeederNames[p][f][0] = '\0';
     }
@@ -52,6 +65,8 @@ bool GwTelegramBot::begin() {
   bot.waitForResponse = 1500;
   bot.maxMessageLength = 4096;
 #endif
+
+  loadFeederNames();
 
   lastPollMs = millis();
   telegramOnline = false;
@@ -95,8 +110,11 @@ void GwTelegramBot::sendMessage(int64_t chatId, const char* text) {
   client.setInsecure();
   bool ok = bot.sendMessage(chatIdStr, text, "Markdown");
   if (!ok) {
-    // Retry without Markdown in case formatting characters triggered a Telegram parse error
-    bot.sendMessage(chatIdStr, text, "");
+    // Retry without Markdown if formatting characters triggered a parse error
+    ok = bot.sendMessage(chatIdStr, text, "");
+    if (!ok) {
+      Serial.printf("[TG] ⚠️ sendMessage to %s failed (TLS or network error)\n", idBuf);
+    }
   }
 #else
   printf("[TELEGRAM_SEND to %lld]: %s\n", (long long)chatId, text);
@@ -124,8 +142,11 @@ void GwTelegramBot::sendMessageWithKeyboard(int64_t chatId, const char* text, co
   client.setInsecure();
   bool ok = bot.sendMessageWithInlineKeyboard(chatIdStr, text, "Markdown", kbClean, 0);
   if (!ok) {
-    // Retry without Markdown if formatting characters triggered a Telegram parse error
-    bot.sendMessageWithInlineKeyboard(chatIdStr, text, "", kbClean, 0);
+    // Retry without Markdown if formatting characters triggered a parse error
+    ok = bot.sendMessageWithInlineKeyboard(chatIdStr, text, "", kbClean, 0);
+    if (!ok) {
+      Serial.printf("[TG] ⚠️ sendMessageWithInlineKeyboard to %s failed\n", idBuf);
+    }
   }
 #else
   printf("[TELEGRAM_KEYBOARD to %lld]: %s\nKB: %s\n", (long long)chatId, text, keyboardJson ? keyboardJson : "");
@@ -143,17 +164,25 @@ void GwTelegramBot::sendReplyKeyboard(int64_t chatId, const char* text) {
   snprintf(idBuf, sizeof(idBuf), "%lld", (long long)chatId);
   String chatIdStr(idBuf);
 
-  // Big persistent bottom action keyboard
+  // 14-Action Persistent Bottom Keyboard compliant with Telegram Bot API
   const char* kb =
-    "[[\"⚡ ALL FEEDERS ON\", \"🚨 ALL FEEDERS OFF\"],"
-    "[\"🔌 Feeder Control\", \"⚡ 3-Phase Voltage\"],"
-    "[\"💡 Poles Directory\", \"📊 Dashboard Status\"],"
-    "[\"📶 Wi-Fi Settings\", \"📋 Registrations\"]]";
+    "["
+    "[{\"text\":\"⚡ ALL FEEDERS ON\"},{\"text\":\"🚨 ALL FEEDERS OFF\"}],"
+    "[{\"text\":\"🔌 Feeder Control\"},{\"text\":\"⚡ 3-Phase Voltage\"}],"
+    "[{\"text\":\"💡 Poles Directory\"},{\"text\":\"📊 Dashboard Status\"}],"
+    "[{\"text\":\"⏰ Feeder Schedule\"},{\"text\":\"🕒 Mesh Time Sync\"}],"
+    "[{\"text\":\"📋 Registrations\"},{\"text\":\"🗑️ Delete Pole\"}],"
+    "[{\"text\":\"📶 Wi-Fi Settings\"},{\"text\":\"📲 Firmware OTA\"}],"
+    "[{\"text\":\"🚨 Alarm Log\"},{\"text\":\"⚙️ System Settings\"}]"
+    "]";
 
   client.setInsecure();
   bool ok = bot.sendMessageWithReplyKeyboard(chatIdStr, text, "Markdown", kb, true, false, false);
   if (!ok) {
-    bot.sendMessageWithReplyKeyboard(chatIdStr, text, "", kb, true, false, false);
+    ok = bot.sendMessageWithReplyKeyboard(chatIdStr, text, "", kb, true, false, false);
+    if (!ok) {
+      Serial.printf("[TG] ⚠️ sendReplyKeyboard to %s failed\n", idBuf);
+    }
   }
 #else
   printf("[TELEGRAM_REPLY_KB to %lld]: %s\n", (long long)chatId, text);
@@ -163,16 +192,16 @@ void GwTelegramBot::sendReplyKeyboard(int64_t chatId, const char* text) {
 const char* GwTelegramBot::getFeederName(uint16_t poleId, uint8_t feederId) const {
   if (feederId < 1 || feederId > 6) return "Unknown";
   uint8_t pIdx = (poleId >= GW_POLE_ID_START) ? (poleId - GW_POLE_ID_START) : 0;
-  if (pIdx < 10 && customFeederNames[pIdx][feederId - 1][0] != '\0') {
+  if (pIdx < GW_MAX_MANAGED_POLES && customFeederNames[pIdx][feederId - 1][0] != '\0') {
     return customFeederNames[pIdx][feederId - 1];
   }
   switch (feederId) {
-    case 1: return "Street 1";
-    case 2: return "Street 2";
-    case 3: return "High Mast";
-    case 4: return "Farmer 1";
-    case 5: return "Farmer 2";
-    case 6: return "Spare";
+    case 1: return "Feeder 1";
+    case 2: return "Feeder 2";
+    case 3: return "Feeder 3";
+    case 4: return "Feeder 4";
+    case 5: return "Feeder 5";
+    case 6: return "Feeder 6";
     default: return "Feeder";
   }
 }
@@ -180,10 +209,31 @@ const char* GwTelegramBot::getFeederName(uint16_t poleId, uint8_t feederId) cons
 void GwTelegramBot::setFeederName(uint16_t poleId, uint8_t feederId, const char* name) {
   if (feederId < 1 || feederId > 6 || !name) return;
   uint8_t pIdx = (poleId >= GW_POLE_ID_START) ? (poleId - GW_POLE_ID_START) : 0;
-  if (pIdx < 10) {
+  if (pIdx < GW_MAX_MANAGED_POLES) {
     strncpy(customFeederNames[pIdx][feederId - 1], name, sizeof(customFeederNames[pIdx][feederId - 1]) - 1);
     customFeederNames[pIdx][feederId - 1][sizeof(customFeederNames[pIdx][feederId - 1]) - 1] = '\0';
+    saveFeederNames();
   }
+}
+
+bool GwTelegramBot::saveFeederNames() {
+#if defined(ARDUINO)
+  Preferences p;
+  if (!p.begin("mscb_fnames", false)) return false;
+  p.putBytes("names", customFeederNames, sizeof(customFeederNames));
+  p.end();
+#endif
+  return true;
+}
+
+bool GwTelegramBot::loadFeederNames() {
+#if defined(ARDUINO)
+  Preferences p;
+  if (!p.begin("mscb_fnames", true)) return false;
+  p.getBytes("names", customFeederNames, sizeof(customFeederNames));
+  p.end();
+#endif
+  return true;
 }
 
 void GwTelegramBot::broadcastAdminAlert(const char* alertText) {
@@ -200,293 +250,6 @@ void GwTelegramBot::broadcastAdminAlert(const char* alertText) {
   }
 }
 
-void GwTelegramBot::cmdStatus(int64_t chatId) {
-  char buf[384];
-  snprintf(buf, sizeof(buf),
-           "📊 *MSCB GATEWAY STATUS*\n"
-           "Firmware: %d.%d.%d (%s)\n"
-           "Uptime: %lu s\n"
-           "Heap Free: %u B | PSRAM: %u KB\n"
-           "Wi-Fi SSID: %s (RSSI: %d dBm)\n"
-           "IP Address: %s\n"
-           "LoRa Radio: %s (TX: +8 dBm)\n"
-           "LoRa Packets: TX %lu | RX %lu\n"
-           "Active Poles: %u / 50\n"
-           "Pending Poles: %u\n"
-           "Revoked Poles: %u\n"
-           "Security: FAIL-CLOSED AUTH ENFORCED",
-           MSCB_FW_VERSION_MAJOR, MSCB_FW_VERSION_MINOR, MSCB_FW_VERSION_PATCH, MSCB_SYSTEM_CODENAME,
-           (unsigned long)(millis() / 1000),
-           ESP.getFreeHeap(),
-           psramFound() ? (ESP.getFreePsram() / 1024) : 0,
-           gwWifi.getActiveSsid(), gwWifi.getRssi(),
-           gwWifi.getLocalIp(),
-           gwRadio.isDetected() ? "ONLINE (SX1278 433MHz)" : "FAULT_OFFLINE",
-           (unsigned long)gwRadio.getPacketsTx(), (unsigned long)gwRadio.getPacketsRx(),
-           gwRegistry.getActiveCount(),
-           gwRegistry.getPendingCount(),
-           gwRegistry.getRevokedCount());
-  sendMessage(chatId, buf);
-}
-
-void GwTelegramBot::cmdPoles(int64_t chatId, uint8_t page) {
-  uint8_t total = gwRegistry.getActiveCount();
-  if (total == 0) {
-    sendMessage(chatId, "No active Pole Nodes registered yet. Check /pending.");
-    return;
-  }
-
-  uint8_t pageSize = 10;
-  uint8_t startIndex = page * pageSize;
-  if (startIndex >= total) startIndex = 0;
-
-  char buf[512];
-  snprintf(buf, sizeof(buf), "📍 *REGISTERED POLES (Page %u)*\n", page + 1);
-
-  uint8_t count = 0;
-  for (uint8_t i = startIndex; i < total && count < pageSize; i++, count++) {
-    const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
-    if (!p) continue;
-    PoleHealthStateMonitor state = gwHeartbeat.getPoleState(p->poleId);
-    char line[96];
-    snprintf(line, sizeof(line), "- %s (0x%04X): %s | Par: 0x%04X | %0.1fV\n",
-             p->stringId, p->poleId,
-             poleHealthStateToString(state),
-             p->primaryParent, p->lastBusVoltage);
-    strncat(buf, line, sizeof(buf) - strlen(buf) - 1);
-  }
-
-  sendMessage(chatId, buf);
-}
-
-void GwTelegramBot::cmdPending(int64_t chatId) {
-  uint8_t pCount = gwRegistry.getPendingCount();
-  if (pCount == 0) {
-    sendMessage(chatId, "✅ No pending pole registration requests.");
-    return;
-  }
-
-  char buf[512];
-  snprintf(buf, sizeof(buf), "⏳ *PENDING REGISTRATIONS (%u)*\n", pCount);
-
-  for (uint8_t i = 0; i < pCount; i++) {
-    const PendingRegistration* p = gwRegistry.getPendingByIndex(i);
-    if (!p) continue;
-    char line[128];
-    snprintf(line, sizeof(line),
-             "\nMAC: %02X:%02X:%02X:%02X:%02X:%02X\nRSSI: %d dBm | SNR: %d dB\nApprove: /approve_%02X%02X%02X%02X%02X%02X\nReject: /reject_%02X%02X%02X%02X%02X%02X\n",
-             p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5],
-             p->rssi, p->snr,
-             p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5],
-             p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5]);
-    strncat(buf, line, sizeof(buf) - strlen(buf) - 1);
-  }
-
-  sendMessage(chatId, buf);
-}
-
-void GwTelegramBot::cmdPoleDetail(int64_t chatId, uint16_t poleId) {
-  RegisteredPole* p = gwRegistry.findPoleById(poleId);
-  if (!p) {
-    sendMessage(chatId, "❌ Pole ID not found in active registry.");
-    return;
-  }
-
-  PoleHealthStateMonitor state = gwHeartbeat.getPoleState(poleId);
-  char buf[448];
-  snprintf(buf, sizeof(buf),
-           "📍 *POLE DETAILS: %s*\n"
-           "Logical ID: 0x%04X\n"
-           "MAC: %02X:%02X:%02X:%02X:%02X:%02X\n"
-           "Health Status: %s\n"
-           "Primary Parent: 0x%04X (Rank %u)\n"
-           "Backup Parent: 0x%04X\n"
-           "RF RSSI: %d dBm | SNR: %d dB\n"
-           "Last Seen: %lu s ago\n"
-           "Bus Voltage: %0.1f VAC\n"
-           "Feeder Relays: %c%c%c%c%c%c (1..6)\n"
-           "Contactor Aux: %c%c%c%c%c%c\n"
-           "MCB Status:    %c%c%c%c%c%c\n"
-           "Delete: /delete_%u",
-           p->stringId, p->poleId,
-           p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5],
-           poleHealthStateToString(state),
-           p->primaryParent, p->rank,
-           p->backupParent,
-           p->lastRssi, p->lastSnr,
-           (unsigned long)((millis() / 1000) - p->lastSeenTimestamp),
-           p->lastBusVoltage,
-           (p->feederStateMask & 0x01) ? '1' : '0', (p->feederStateMask & 0x02) ? '1' : '0',
-           (p->feederStateMask & 0x04) ? '1' : '0', (p->feederStateMask & 0x08) ? '1' : '0',
-           (p->feederStateMask & 0x10) ? '1' : '0', (p->feederStateMask & 0x20) ? '1' : '0',
-           (p->auxFeedbackMask & 0x01) ? '1' : '0', (p->auxFeedbackMask & 0x02) ? '1' : '0',
-           (p->auxFeedbackMask & 0x04) ? '1' : '0', (p->auxFeedbackMask & 0x08) ? '1' : '0',
-           (p->auxFeedbackMask & 0x10) ? '1' : '0', (p->auxFeedbackMask & 0x20) ? '1' : '0',
-           (p->mcbStatusMask & 0x01) ? '1' : '0', (p->mcbStatusMask & 0x02) ? '1' : '0',
-           (p->mcbStatusMask & 0x04) ? '1' : '0', (p->mcbStatusMask & 0x08) ? '1' : '0',
-           (p->mcbStatusMask & 0x10) ? '1' : '0', (p->mcbStatusMask & 0x20) ? '1' : '0',
-           p->poleId);
-  sendMessage(chatId, buf);
-}
-
-void GwTelegramBot::cmdFeeder(int64_t chatId, uint16_t poleId, uint8_t feederId, uint8_t action) {
-  if (feederId < 1 || feederId > 6) {
-    sendMessage(chatId, "❌ Invalid feeder ID (must be 1 to 6).");
-    return;
-  }
-
-  RegisteredPole* p = gwRegistry.findPoleById(poleId);
-  if (!p) {
-    sendMessage(chatId, "❌ Target pole not found in registry.");
-    return;
-  }
-
-  sendMessage(chatId, "⏳ Command sent over mesh... Waiting for contactor auxiliary feedback ACK.");
-
-  uint32_t seq = 0;
-  bool sent = gwMesh.sendFeederCommand(poleId, feederId, action, 0, seq);
-  if (!sent) {
-    sendMessage(chatId, "⛔ Failed to dispatch command: Key not provisioned or radio error.");
-    return;
-  }
-
-  // Wait up to 3 seconds for physical ACK progression
-  uint32_t waitStart = millis();
-  while (gwMesh.isFeederAckPending() && (millis() - waitStart < 3500)) {
-    gwMesh.service();
-    delay(50);
-  }
-
-  uint8_t ackState = gwMesh.getLastAckState();
-  if (ackState == FEEDER_ACK_COMPLETED || ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED) {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "✅ Pole 0x%04X Feeder %u switched %s and verified by auxiliary feedback!",
-             poleId, feederId, (action == 1) ? "ON" : "OFF");
-    sendMessage(chatId, buf);
-  } else if (ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) {
-    sendMessage(chatId, "⚠️ Relay switched but AUXILIARY FEEDBACK NOT CONNECTED (Physical contactor unverified).");
-  } else if (ackState == FEEDER_ACK_REJECTED_LOCKED) {
-    sendMessage(chatId, "⛔ Command REJECTED: Production safety lock (MSCB_RELAYS_LOCKED_DISABLED) active!");
-  } else {
-    sendMessage(chatId, "❌ Command execution failed or ACK timed out over LoRa mesh.");
-  }
-}
-
-void GwTelegramBot::cmdGroup(int64_t chatId, uint16_t poleId, uint8_t groupMask, uint8_t action) {
-  sendMessage(chatId, "⏳ Group command sent... Waiting for ACK.");
-  uint32_t seq = 0;
-  gwMesh.sendFeederCommand(poleId, 0xF0, action, groupMask, seq);
-  sendMessage(chatId, "✅ Group feeder command dispatched over mesh.");
-}
-
-void GwTelegramBot::cmdAll(int64_t chatId, uint16_t poleId, uint8_t action) {
-  sendMessage(chatId, "⏳ All-Feeder command sent... Waiting for ACK.");
-  uint32_t seq = 0;
-  gwMesh.sendFeederCommand(poleId, 0x00, action, 0x3F, seq);
-  sendMessage(chatId, "✅ All-Feeder command dispatched over mesh.");
-}
-
-void GwTelegramBot::cmdDeletePrompt(int64_t chatId, uint16_t poleId) {
-  RegisteredPole* p = gwRegistry.findPoleById(poleId);
-  if (!p) {
-    sendMessage(chatId, "❌ Pole not found.");
-    return;
-  }
-
-  char buf[256];
-  snprintf(buf, sizeof(buf),
-           "⚠️ *TWO-STEP DELETE CONFIRMATION*\n"
-           "Are you sure you want to delete and PERMANENTLY REVOKE %s (0x%04X)?\n"
-           "Its hardware identity will be permanently blacklisted!\n\n"
-           "To confirm deletion, reply: /confirm_delete_%u",
-           p->stringId, p->poleId, p->poleId);
-  sendMessage(chatId, buf);
-}
-
-void GwTelegramBot::cmdDeleteConfirm(int64_t chatId, uint16_t poleId) {
-  char adminStr[24];
-  snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
-
-  bool ok = gwRegistry.deleteAndRevokePole(poleId, adminStr, "ADMIN_DELETED_VIA_TELEGRAM");
-  if (ok) {
-    char buf[192];
-    snprintf(buf, sizeof(buf),
-             "✅ Pole 0x%04X deleted from registry and permanently blacklisted in NVS.\nDownstream children migrated to Gateway.",
-             poleId);
-    sendMessage(chatId, buf);
-  } else {
-    sendMessage(chatId, "❌ Failed to delete pole (not found or error).");
-  }
-}
-
-void GwTelegramBot::cmdConfig(int64_t chatId, const char* args) {
-  if (!args || strlen(args) == 0) {
-    char buf[192];
-    snprintf(buf, sizeof(buf),
-             "⚙️ *HEARTBEAT CONFIGURATION*\n"
-             "Heartbeat Interval: %u s\n"
-             "Offline Timeout: %u s\n\n"
-             "To change: /config <hb_seconds> <offline_seconds>",
-             gwHeartbeat.getHeartbeatIntervalSec(),
-             gwHeartbeat.getOfflineTimeoutSec());
-    sendMessage(chatId, buf);
-    return;
-  }
-
-  int hb = 0, to = 0;
-  if (sscanf(args, "%d %d", &hb, &to) == 2 && hb >= 5 && to >= 15) {
-    gwHeartbeat.setHeartbeatIntervalSec(hb);
-    gwHeartbeat.setOfflineTimeoutSec(to);
-    char buf[128];
-    snprintf(buf, sizeof(buf), "✅ Config updated: Heartbeat %u s | Timeout %u s (persisted).", hb, to);
-    sendMessage(chatId, buf);
-  } else {
-    sendMessage(chatId, "❌ Invalid syntax. Usage: /config <hb_seconds> <offline_seconds>");
-  }
-}
-
-void GwTelegramBot::cmdWifi(int64_t chatId, const char* args) {
-  if (!args || strlen(args) == 0) {
-    sendMessage(chatId, "Usage: /wifi <NewSSID> <NewPassword>\nNote: Automatically validates and rolls back on failure.");
-    return;
-  }
-
-  char newSsid[33];
-  char newPass[65];
-  if (sscanf(args, "%32s %64s", newSsid, newPass) == 2) {
-    sendMessage(chatId, "⏳ Attempting connection with new Wi-Fi credentials...\nLoRa mesh remains fully active.\nRollback is armed if connection fails.");
-    bool initiated = gwWifi.requestCredentialUpdate(newSsid, newPass);
-    if (!initiated) {
-      sendMessage(chatId, "❌ Credential update rejected (invalid SSID or password too short).");
-    }
-  } else {
-    sendMessage(chatId, "❌ Syntax: /wifi <NewSSID> <NewPassword>");
-  }
-}
-
-void GwTelegramBot::cmdOta(int64_t chatId) {
-  char buf[256];
-  snprintf(buf, sizeof(buf),
-           "📲 *FIRMWARE & OTA STATUS*\n"
-           "Current Version: %u\n"
-           "Target Hardware: %s\n"
-           "OTA State: %s\n"
-           "Signature Engine: SECURE MBEDTLS ECDSA P-256\n"
-           "Anti-Rollback: ACTIVE MONOTONIC",
-           gwFwMgr.getCurrentVersion(),
-           CURRENT_GATEWAY_HW_TARGET,
-           gwOtaStateToString(gwFwMgr.getState()));
-  sendMessage(chatId, buf);
-}
-
-void GwTelegramBot::cmdAlarms(int64_t chatId) {
-  sendMessage(chatId, "📋 *ALARM & EVENT AUDIT LOG*\n- [SYSTEM_BOOT]: Gateway online. Relays safe OFF.\n- [SECURITY]: Monotonic Replay Protection active.\n- [WPC]: Conducted TX power bounded to +8 dBm.");
-}
-
-void GwTelegramBot::cmdStart(int64_t chatId) {
-  showMainMenu(chatId);
-}
-
 void GwTelegramBot::showMainMenu(int64_t chatId) {
   uint8_t aCount = gwRegistry.getActiveCount();
   uint8_t pCount = gwRegistry.getPendingCount();
@@ -500,22 +263,24 @@ void GwTelegramBot::showMainMenu(int64_t chatId) {
            "📶 *Wi-Fi:* `%s` (%d dBm)\n"
            "📡 *LoRa RF:* SX1278 RA-02 (433.920 MHz)\n"
            "💡 *Active Poles:* %u / 50 | *Pending:* %u\n"
-           "🔒 *Security:* Fail-Closed HMAC SHA-256\n"
+           "🔒 *Security:* Fail-Closed HMAC-SHA256\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "Select an action from the buttons below:",
+           "Select an action from the buttons below or send number (1-14):",
            GW_STRING_ID, GW_NODE_ADDRESS,
            gwWifi.getActiveSsid(), gwWifi.getRssi(),
            aCount, pCount);
 
-  char kb[450];
+  // 14 Interactive Action Buttons
+  char kb[1024];
   snprintf(kb, sizeof(kb),
            "["
-           "[{\"text\":\"📊 Dashboard\",\"callback_data\":\"MENU:DASH\"},{\"text\":\"💡 Poles Directory (%u)\",\"callback_data\":\"MENU:POLES:0\"}],"
-           "[{\"text\":\"⚡ 3-Phase Voltage\",\"callback_data\":\"MENU:VOLT:0\"},{\"text\":\"🔌 Feeder Control\",\"callback_data\":\"MENU:FDR:0\"}],"
-           "[{\"text\":\"⚡ ALL FEEDERS ON\",\"callback_data\":\"ALL:CONFIRM:1\"},{\"text\":\"🚨 ALL FEEDERS OFF\",\"callback_data\":\"ALL:CONFIRM:0\"}],"
-           "[{\"text\":\"📋 Registrations (%u)\",\"callback_data\":\"MENU:REG\"},{\"text\":\"🗑️ Delete Pole\",\"callback_data\":\"MENU:DEL\"}],"
-           "[{\"text\":\"📶 Wi-Fi Settings\",\"callback_data\":\"MENU:WIFI\"},{\"text\":\"📲 Firmware OTA\",\"callback_data\":\"MENU:OTA\"}],"
-           "[{\"text\":\"🚨 Alarm Log\",\"callback_data\":\"MENU:ALARMS\"},{\"text\":\"⚙️ Settings\",\"callback_data\":\"MENU:CONFIG\"}]"
+           "[{\"text\":\"📊 1. Dashboard\",\"callback_data\":\"MENU:DASH\"},{\"text\":\"💡 2. Poles (%u)\",\"callback_data\":\"MENU:POLES:0\"}],"
+           "[{\"text\":\"⚡ 3. 3-Phase Voltage\",\"callback_data\":\"MENU:VOLT:0\"},{\"text\":\"🔌 4. Feeder Control\",\"callback_data\":\"MENU:FDR:0\"}],"
+           "[{\"text\":\"⚡ 5. ALL FEEDERS ON\",\"callback_data\":\"ALL:CONFIRM:1\"},{\"text\":\"🚨 6. ALL FEEDERS OFF\",\"callback_data\":\"ALL:CONFIRM:0\"}],"
+           "[{\"text\":\"📋 7. Registrations (%u)\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🗑️ 8. Delete Pole\",\"callback_data\":\"MENU:DEL:0\"}],"
+           "[{\"text\":\"⏰ 9. Feeder Schedule\",\"callback_data\":\"MENU:SCHED:0\"},{\"text\":\"🕒 10. Mesh Time Sync\",\"callback_data\":\"MENU:TIMESYNC\"}],"
+           "[{\"text\":\"📶 11. Wi-Fi Settings\",\"callback_data\":\"MENU:WIFI\"},{\"text\":\"📲 12. Firmware OTA\",\"callback_data\":\"MENU:OTA\"}],"
+           "[{\"text\":\"🚨 13. Alarm Log\",\"callback_data\":\"MENU:ALARMS\"},{\"text\":\"⚙️ 14. Settings\",\"callback_data\":\"MENU:CONFIG\"}]"
            "]",
            aCount, pCount);
 
@@ -523,11 +288,15 @@ void GwTelegramBot::showMainMenu(int64_t chatId) {
 }
 
 void GwTelegramBot::showDashboard(int64_t chatId) {
-  char buf[480];
+  char timeStr[48];
+  gwSchedule.getIstTimeStr(timeStr, sizeof(timeStr));
+
+  char buf[580];
   snprintf(buf, sizeof(buf),
            "📊 *MSCB GATEWAY SYSTEM DASHBOARD*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "• Firmware Version: %d.%d.%d (%s)\n"
+           "• System Clock: `%s`\n"
            "• System Uptime: %lu s\n"
            "• Free Heap DRAM: %u B | PSRAM: %u KB\n"
            "• Wi-Fi SSID: `%s` (RSSI: %d dBm)\n"
@@ -538,8 +307,10 @@ void GwTelegramBot::showDashboard(int64_t chatId) {
            "• Pending Join Requests: %u\n"
            "• Permanent Revocations: %u\n"
            "• Security: FAIL-CLOSED AUTH ENFORCED\n"
+           "• Production Relays: SAFE LOCKED\n"
            "━━━━━━━━━━━━━━━━━━━━━━",
            MSCB_FW_VERSION_MAJOR, MSCB_FW_VERSION_MINOR, MSCB_FW_VERSION_PATCH, MSCB_SYSTEM_CODENAME,
+           timeStr,
            (unsigned long)(millis() / 1000),
            ESP.getFreeHeap(),
            psramFound() ? (ESP.getFreePsram() / 1024) : 0,
@@ -565,22 +336,23 @@ void GwTelegramBot::showPolesMenu(int64_t chatId, uint8_t page) {
                   "━━━━━━━━━━━━━━━━━━━━━━\n"
                   "⚠️ No active Pole Nodes registered yet.\n\n"
                   "When poles transmit JOIN_REQ over LoRa mesh, they appear in *Registrations* for one-click approval.";
-    const char* kb = "[[{\"text\":\"📋 Check Pending\",\"callback_data\":\"MENU:REG\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
+    const char* kb = "[[{\"text\":\"📋 Check Pending\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
     sendMessageWithKeyboard(chatId, text.c_str(), kb);
     return;
   }
 
   uint8_t pageSize = 5;
+  uint8_t totalPages = (total + pageSize - 1) / pageSize;
+  if (page >= totalPages) page = totalPages - 1;
   uint8_t startIndex = page * pageSize;
-  if (startIndex >= total) startIndex = 0;
 
   char buf[300];
   snprintf(buf, sizeof(buf),
-           "💡 *ACTIVE FIELD POLES (Page %u)*\n"
+           "💡 *ACTIVE FIELD POLES (Page %u of %u)*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "Total Active Nodes: %u / 50\n"
-           "Tap any pole below to view 3-phase voltages or control feeders:",
-           page + 1, total);
+           "Tap any pole below to view detail, telemetry, or control feeders:",
+           page + 1, totalPages, total);
 
   String kb = "[";
   uint8_t count = 0;
@@ -588,7 +360,7 @@ void GwTelegramBot::showPolesMenu(int64_t chatId, uint8_t page) {
     const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
     if (!p) continue;
     PoleHealthStateMonitor st = gwHeartbeat.getPoleState(p->poleId);
-    const char* stStr = (st == POLE_STATE_ONLINE) ? "🟢 ON" : "🔴 OFF";
+    const char* stStr = (st == POLE_STATE_ONLINE) ? "🟢 ON" : (st == POLE_STATE_DELAYED ? "🟡 DLY" : "🔴 OFF");
     char btn[128];
     snprintf(btn, sizeof(btn), "[{\"text\":\"📍 %s (%s)\",\"callback_data\":\"P_SEL:%u\"}],",
              p->stringId, stStr, p->poleId);
@@ -596,12 +368,12 @@ void GwTelegramBot::showPolesMenu(int64_t chatId, uint8_t page) {
   }
 
   kb += "[";
-  if (startIndex > 0) {
+  if (page > 0) {
     char prevBtn[48];
     snprintf(prevBtn, sizeof(prevBtn), "{\"text\":\"◀ Prev\",\"callback_data\":\"MENU:POLES:%u\"},", page - 1);
     kb += prevBtn;
   }
-  if (startIndex + pageSize < total) {
+  if (page + 1 < totalPages) {
     char nextBtn[48];
     snprintf(nextBtn, sizeof(nextBtn), "{\"text\":\"Next ▶\",\"callback_data\":\"MENU:POLES:%u\"},", page + 1);
     kb += nextBtn;
@@ -621,7 +393,14 @@ void GwTelegramBot::showPoleDetail(int64_t chatId, uint16_t poleId) {
   PoleHealthStateMonitor state = gwHeartbeat.getPoleState(poleId);
   const char* hStr = (state == POLE_STATE_ONLINE) ? "🟢 ONLINE" : (state == POLE_STATE_DELAYED ? "🟡 DELAYED" : "🔴 OFFLINE");
 
-  char buf[700];
+  char voltBuf[32];
+  if (p->lastBusVoltage > 0.1f) {
+    snprintf(voltBuf, sizeof(voltBuf), "%0.1f VAC", p->lastBusVoltage);
+  } else {
+    snprintf(voltBuf, sizeof(voltBuf), "UNAVAILABLE");
+  }
+
+  char buf[800];
   snprintf(buf, sizeof(buf),
            "📍 *POLE DETAILS: %s*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -629,25 +408,28 @@ void GwTelegramBot::showPoleDetail(int64_t chatId, uint16_t poleId) {
            "🏷️ Pole Name: *%s*\n"
            "📶 Health: *%s*\n"
            "📡 LoRa RF: `%d dBm` (SNR: `%d dB`)\n"
-           "⚡ Bus Voltage: *%0.1f VAC*\n"
+           "🌲 Mesh: Parent `0x%04X` (Rank %u) | Backup `0x%04X`\n"
+           "⚡ Bus Voltage: *%s*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "🔌 *Individual Feeder Statuses:*\n"
-           "• F1: *%s* `[%s]`\n"
-           "• F2: *%s* `[%s]`\n"
-           "• F3: *%s* `[%s]`\n"
-           "• F4: *%s* `[%s]`\n"
-           "• F5: *%s* `[%s]`\n"
-           "• F6: *%s* `[%s]`\n"
+           "• F1: *%s* `[%s]` (Aux: %s | MCB: %s)\n"
+           "• F2: *%s* `[%s]` (Aux: %s | MCB: %s)\n"
+           "• F3: *%s* `[%s]` (Aux: %s | MCB: %s)\n"
+           "• F4: *%s* `[%s]` (Aux: %s | MCB: %s)\n"
+           "• F5: *%s* `[%s]` (Aux: %s | MCB: %s)\n"
+           "• F6: *%s* `[%s]` (Aux: %s | MCB: %s)\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "Tap buttons below to toggle feeders instantly:",
            p->stringId, p->poleId, p->stringId, hStr,
-           p->lastRssi, p->lastSnr, p->lastBusVoltage,
-           getFeederName(p->poleId, 1), (p->feederStateMask & 0x01) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 2), (p->feederStateMask & 0x02) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 3), (p->feederStateMask & 0x04) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 4), (p->feederStateMask & 0x08) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 5), (p->feederStateMask & 0x10) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 6), (p->feederStateMask & 0x20) ? "⚡ ON" : "⭕ OFF");
+           p->lastRssi, p->lastSnr,
+           p->primaryParent, p->rank, p->backupParent,
+           voltBuf,
+           getFeederName(p->poleId, 1), (p->feederStateMask & 0x01) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x01) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x01) ? "TRIP" : "OK",
+           getFeederName(p->poleId, 2), (p->feederStateMask & 0x02) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x02) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x02) ? "TRIP" : "OK",
+           getFeederName(p->poleId, 3), (p->feederStateMask & 0x04) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x04) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x04) ? "TRIP" : "OK",
+           getFeederName(p->poleId, 4), (p->feederStateMask & 0x08) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x08) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x08) ? "TRIP" : "OK",
+           getFeederName(p->poleId, 5), (p->feederStateMask & 0x10) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x10) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x10) ? "TRIP" : "OK",
+           getFeederName(p->poleId, 6), (p->feederStateMask & 0x20) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x20) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x20) ? "TRIP" : "OK");
 
   char kb[600];
   snprintf(kb, sizeof(kb),
@@ -681,68 +463,78 @@ void GwTelegramBot::showVoltageDashboard(int64_t chatId, uint16_t poleId) {
     p = (RegisteredPole*)gwRegistry.getPoleByIndex(0);
   }
 
+  // If no poles registered:
   if (!p) {
     char buf[512];
     snprintf(buf, sizeof(buf),
              "⚡ *3-PHASE VOLTAGE & METROLOGY DASHBOARD*\n"
              "━━━━━━━━━━━━━━━━━━━━━━\n"
-             "🏢 *Station:* MSCB Sub-Station Gateway\n"
-             "📊 *Grid Frequency:* 50.02 Hz (Synchronized)\n"
-             "⚡ *Grid Phase Sequence:* R-Y-B Balanced (120°)\n\n"
-             "🔴 *Phase R (L1-N):* 231.4 VAC `[NORMAL]`\n"
-             "🟡 *Phase Y (L2-N):* 229.8 VAC `[NORMAL]`\n"
-             "🔵 *Phase B (L3-N):* 230.7 VAC `[NORMAL]`\n"
-             "⚡ *Line-to-Line (V_RY/YB/BR):* 399.2 VAC\n"
+             "🏢 *Sub-Station Gateway Metrology*\n"
+             "• Phase R (L1-N): `UNAVAILABLE (No Active Poles)`\n"
+             "• Phase Y (L2-N): `UNAVAILABLE (No Active Poles)`\n"
+             "• Phase B (L3-N): `UNAVAILABLE (No Active Poles)`\n"
+             "• Line-to-Line: `UNAVAILABLE`\n"
+             "• Grid Frequency: `UNAVAILABLE`\n"
              "━━━━━━━━━━━━━━━━━━━━━━\n"
-             "💡 *Note:* Waiting for field pole nodes to transmit load telemetry.\n"
-             "Once poles join, each pole's individual Phase voltages and Feeder currents (A) update live!");
+             "💡 *Real Metrology Mandate:*\n"
+             "No synthetic or placeholder values are ever displayed. Once Field Poles connect and sample real ADC channels, live verified readings will appear here.");
     const char* kb =
       "["
-      "[{\"text\":\"🔄 Refresh Voltage\",\"callback_data\":\"MENU:VOLT:0\"},{\"text\":\"🔌 Feeder Control\",\"callback_data\":\"MENU:FDR:0\"}],"
+      "[{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:VOLT:0\"},{\"text\":\"🔌 Feeder Control\",\"callback_data\":\"MENU:FDR:0\"}],"
       "[{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]"
       "]";
     sendMessageWithKeyboard(chatId, buf, kb);
     return;
   }
 
-  float vr = (p->lastBusVoltage > 50.0f) ? p->lastBusVoltage : 230.0f;
-  float vy = vr * 0.994f;
-  float vb = vr * 1.006f;
-  float vll = vr * 1.732f;
+  // Real metrology display (Strictly zero synthetic or derived numbers)
+  char vrStr[32], vyStr[32], vbStr[32], vllStr[32];
+  if (p->lastBusVoltage > 50.0f) {
+    snprintf(vrStr, sizeof(vrStr), "%0.1f VAC `[LIVE]`", p->lastBusVoltage);
+    // Phases Y and B are independent physical channels on ADS131M08.
+    // If not independently reported by packet, indicate hardware channel status:
+    snprintf(vyStr, sizeof(vyStr), "UNAVAILABLE `[AFE Ch 02 Pending]`");
+    snprintf(vbStr, sizeof(vbStr), "UNAVAILABLE `[AFE Ch 03 Pending]`");
+    snprintf(vllStr, sizeof(vllStr), "UNAVAILABLE `[3-Phase Unverified]`");
+  } else {
+    snprintf(vrStr, sizeof(vrStr), "UNAVAILABLE `[ADC Not Connected]`");
+    snprintf(vyStr, sizeof(vyStr), "UNAVAILABLE `[ADC Not Connected]`");
+    snprintf(vbStr, sizeof(vbStr), "UNAVAILABLE `[ADC Not Connected]`");
+    snprintf(vllStr, sizeof(vllStr), "UNAVAILABLE `[ADC Not Connected]`");
+  }
 
   char buf[750];
   snprintf(buf, sizeof(buf),
            "⚡ *3-PHASE VOLTAGE & METROLOGY DASHBOARD*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "📍 *Target Pole:* `%s` (0x%04X)\n"
-           "📊 *Grid Synchronization:* NORMAL (50.02 Hz)\n"
-           "⚡ *Phase Sequence:* RYB BALANCED (120° Lag)\n\n"
-           "🔴 *Phase R (L1-N):* *%0.1f VAC*  `[OK]`\n"
-           "🟡 *Phase Y (L2-N):* *%0.1f VAC*  `[OK]`\n"
-           "🔵 *Phase B (L3-N):* *%0.1f VAC*  `[OK]`\n"
-           "⚡ *Line-to-Line (V_RY, V_YB, V_BR):* *%0.1f VAC*\n"
+           "📊 *Frequency:* `UNAVAILABLE (Pending Bench Cert)`\n\n"
+           "🔴 *Phase R (L1-N):* %s\n"
+           "🟡 *Phase Y (L2-N):* %s\n"
+           "🔵 *Phase B (L3-N):* %s\n"
+           "⚡ *Line-to-Line:* %s\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "🔌 *Feeder Load Currents (Amperes):*\n"
-           "• F1 (%s): %s | %0.2f A\n"
-           "• F2 (%s): %s | %0.2f A\n"
-           "• F3 (%s): %s | %0.2f A\n"
-           "• F4 (%s): %s | %0.2f A\n"
-           "• F5 (%s): %s | %0.2f A\n"
-           "• F6 (%s): %s | %0.2f A\n"
+           "🔌 *Feeder Load Currents (CT Metrology):*\n"
+           "• F1 (%s): %s | `UNAVAILABLE (No CT Hardware)`\n"
+           "• F2 (%s): %s | `UNAVAILABLE (No CT Hardware)`\n"
+           "• F3 (%s): %s | `UNAVAILABLE (No CT Hardware)`\n"
+           "• F4 (%s): %s | `UNAVAILABLE (No CT Hardware)`\n"
+           "• F5 (%s): %s | `UNAVAILABLE (No CT Hardware)`\n"
+           "• F6 (%s): %s | `UNAVAILABLE (No CT Hardware)`\n"
            "━━━━━━━━━━━━━━━━━━━━━━",
            p->stringId, p->poleId,
-           vr, vy, vb, vll,
-           getFeederName(p->poleId, 1), (p->feederStateMask & 0x01) ? "⚡ ON" : "⭕ OFF", (p->feederStateMask & 0x01) ? 2.15f : 0.0f,
-           getFeederName(p->poleId, 2), (p->feederStateMask & 0x02) ? "⚡ ON" : "⭕ OFF", (p->feederStateMask & 0x02) ? 1.85f : 0.0f,
-           getFeederName(p->poleId, 3), (p->feederStateMask & 0x04) ? "⚡ ON" : "⭕ OFF", (p->feederStateMask & 0x04) ? 5.40f : 0.0f,
-           getFeederName(p->poleId, 4), (p->feederStateMask & 0x08) ? "⚡ ON" : "⭕ OFF", (p->feederStateMask & 0x08) ? 3.20f : 0.0f,
-           getFeederName(p->poleId, 5), (p->feederStateMask & 0x10) ? "⚡ ON" : "⭕ OFF", (p->feederStateMask & 0x10) ? 2.90f : 0.0f,
-           getFeederName(p->poleId, 6), (p->feederStateMask & 0x20) ? "⚡ ON" : "⭕ OFF", (p->feederStateMask & 0x20) ? 0.00f : 0.0f);
+           vrStr, vyStr, vbStr, vllStr,
+           getFeederName(p->poleId, 1), (p->feederStateMask & 0x01) ? "⚡ ON" : "⭕ OFF",
+           getFeederName(p->poleId, 2), (p->feederStateMask & 0x02) ? "⚡ ON" : "⭕ OFF",
+           getFeederName(p->poleId, 3), (p->feederStateMask & 0x04) ? "⚡ ON" : "⭕ OFF",
+           getFeederName(p->poleId, 4), (p->feederStateMask & 0x08) ? "⚡ ON" : "⭕ OFF",
+           getFeederName(p->poleId, 5), (p->feederStateMask & 0x10) ? "⚡ ON" : "⭕ OFF",
+           getFeederName(p->poleId, 6), (p->feederStateMask & 0x20) ? "⚡ ON" : "⭕ OFF");
 
-  char kb[300];
+  char kb[320];
   snprintf(kb, sizeof(kb),
            "["
-           "[{\"text\":\"🔄 Refresh Voltage\",\"callback_data\":\"MENU:VOLT:%u\"},{\"text\":\"🔌 Control Feeders\",\"callback_data\":\"P_SEL:%u\"}],"
+           "[{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:VOLT:%u\"},{\"text\":\"🔌 Control Feeders\",\"callback_data\":\"P_SEL:%u\"}],"
            "[{\"text\":\"◀ Prev Pole\",\"callback_data\":\"VOLT_PREV:%u\"},{\"text\":\"Next Pole ▶\",\"callback_data\":\"VOLT_NEXT:%u\"}],"
            "[{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]"
            "]",
@@ -766,7 +558,7 @@ void GwTelegramBot::showFeederDashboard(int64_t chatId, uint16_t poleId) {
                   "━━━━━━━━━━━━━━━━━━━━━━\n"
                   "⚠️ No active Pole Nodes registered yet.\n\n"
                   "When poles connect to the LoRa mesh, their 6 individual feeders can be toggled ON/OFF directly here with quick action buttons.";
-    const char* kb = "[[{\"text\":\"📋 Check Registrations\",\"callback_data\":\"MENU:REG\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
+    const char* kb = "[[{\"text\":\"📋 Check Registrations\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
     sendMessageWithKeyboard(chatId, text.c_str(), kb);
     return;
   }
@@ -813,46 +605,65 @@ void GwTelegramBot::showFeederDashboard(int64_t chatId, uint16_t poleId) {
   sendMessageWithKeyboard(chatId, buf, kb);
 }
 
-void GwTelegramBot::showRegistrationsMenu(int64_t chatId) {
+void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
   uint8_t pCount = gwRegistry.getPendingCount();
   if (pCount == 0) {
     String text = "📋 *PENDING POLE REGISTRATIONS*\n"
                   "━━━━━━━━━━━━━━━━━━━━━━\n"
                   "✅ *All Clear!* No pending pole join requests.\n"
                   "When an unprovisioned pole powers on, its MAC address and signal metrics will appear here for one-click approval.";
-    const char* kb = "[[{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:REG\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
+    const char* kb = "[[{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
     sendMessageWithKeyboard(chatId, text.c_str(), kb);
     return;
   }
 
-  char buf[384];
+  uint8_t pageSize = 4;
+  uint8_t totalPages = (pCount + pageSize - 1) / pageSize;
+  if (page >= totalPages) page = totalPages - 1;
+  uint8_t startIndex = page * pageSize;
+
+  char buf[512];
   snprintf(buf, sizeof(buf),
-           "📋 *PENDING POLE REGISTRATIONS (%u)*\n"
+           "📋 *PENDING POLE REGISTRATIONS (Page %u of %u)*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Total Pending Nodes: %u / %d\n"
            "Unprovisioned hardware detected over LoRa mesh.\n"
            "Tap [✅ Approve] to assign ID and cryptographic keys:",
-           pCount);
+           page + 1, totalPages, pCount, GW_MAX_PENDING_REGISTRATIONS);
 
   String kb = "[";
-  for (uint8_t i = 0; i < pCount && i < 4; i++) {
+  uint8_t count = 0;
+  for (uint8_t i = startIndex; i < pCount && count < pageSize; i++, count++) {
     const PendingRegistration* p = gwRegistry.getPendingByIndex(i);
     if (!p) continue;
     char macHex[13];
     snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
              p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5]);
-    char row[160];
+    char row[180];
     snprintf(row, sizeof(row),
-             "[{\"text\":\"✅ Approve %s (%ddBm)\",\"callback_data\":\"REG:APP:%s\"},"
+             "[{\"text\":\"✅ Approve %02X:%02X (%ddBm)\",\"callback_data\":\"REG:APP:%s\"},"
              "{\"text\":\"❌ Reject\",\"callback_data\":\"REG:REJ:%s\"}],",
-             macHex + 6, p->rssi, macHex, macHex);
+             p->mac[4], p->mac[5], p->rssi, macHex, macHex);
     kb += row;
   }
-  kb += "[{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:REG\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
+
+  kb += "[";
+  if (page > 0) {
+    char prevBtn[48];
+    snprintf(prevBtn, sizeof(prevBtn), "{\"text\":\"◀ Prev\",\"callback_data\":\"MENU:REG:%u\"},", page - 1);
+    kb += prevBtn;
+  }
+  if (page + 1 < totalPages) {
+    char nextBtn[48];
+    snprintf(nextBtn, sizeof(nextBtn), "{\"text\":\"Next ▶\",\"callback_data\":\"MENU:REG:%u\"},", page + 1);
+    kb += nextBtn;
+  }
+  kb += "{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
 
   sendMessageWithKeyboard(chatId, buf, kb.c_str());
 }
 
-void GwTelegramBot::showDeleteMenu(int64_t chatId) {
+void GwTelegramBot::showDeleteMenu(int64_t chatId, uint8_t page) {
   uint8_t total = gwRegistry.getActiveCount();
   if (total == 0) {
     String text = "🗑️ *DELETE POLE MANAGEMENT*\n"
@@ -863,12 +674,21 @@ void GwTelegramBot::showDeleteMenu(int64_t chatId) {
     return;
   }
 
-  String text = "🗑️ *DELETE POLE MANAGEMENT*\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "Select a pole to permanently delete and blacklist its hardware:";
+  uint8_t pageSize = 5;
+  uint8_t totalPages = (total + pageSize - 1) / pageSize;
+  if (page >= totalPages) page = totalPages - 1;
+  uint8_t startIndex = page * pageSize;
+
+  char buf[300];
+  snprintf(buf, sizeof(buf),
+           "🗑️ *DELETE POLE MANAGEMENT (Page %u of %u)*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Select a pole to permanently delete and blacklist its hardware in NVS:",
+           page + 1, totalPages);
 
   String kb = "[";
-  for (uint8_t i = 0; i < total && i < 10; i++) {
+  uint8_t count = 0;
+  for (uint8_t i = startIndex; i < total && count < pageSize; i++, count++) {
     const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
     if (!p) continue;
     char btn[128];
@@ -876,9 +696,21 @@ void GwTelegramBot::showDeleteMenu(int64_t chatId) {
              p->stringId, p->poleId, p->poleId);
     kb += btn;
   }
-  kb += "[{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
 
-  sendMessageWithKeyboard(chatId, text.c_str(), kb.c_str());
+  kb += "[";
+  if (page > 0) {
+    char prevBtn[48];
+    snprintf(prevBtn, sizeof(prevBtn), "{\"text\":\"◀ Prev\",\"callback_data\":\"MENU:DEL:%u\"},", page - 1);
+    kb += prevBtn;
+  }
+  if (page + 1 < totalPages) {
+    char nextBtn[48];
+    snprintf(nextBtn, sizeof(nextBtn), "{\"text\":\"Next ▶\",\"callback_data\":\"MENU:DEL:%u\"},", page + 1);
+    kb += nextBtn;
+  }
+  kb += "{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
+
+  sendMessageWithKeyboard(chatId, buf, kb.c_str());
 }
 
 void GwTelegramBot::showDeleteConfirm(int64_t chatId, uint16_t poleId) {
@@ -888,16 +720,18 @@ void GwTelegramBot::showDeleteConfirm(int64_t chatId, uint16_t poleId) {
     return;
   }
 
-  char buf[384];
+  char buf[420];
   snprintf(buf, sizeof(buf),
            "⚠️ *TWO-STEP DELETION WARNING*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "Are you sure you want to permanently delete and blacklist:\n"
-           "📍 *%s* (Logical ID: `0x%04X`)?\n\n"
-           "🚨 *Warning:* Its hardware MAC address will be permanently blacklisted in NVS and dropped from the LoRa mesh!",
-           p->stringId, p->poleId);
+           "📍 *%s* (Logical ID: `0x%04X`)?\n"
+           "MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n\n"
+           "🚨 *Permanent Action:* Its hardware MAC address will be permanently recorded in NVS Revocation Blacklist and dropped from the LoRa mesh!",
+           p->stringId, p->poleId,
+           p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5]);
 
-  char kb[200];
+  char kb[220];
   snprintf(kb, sizeof(kb),
            "["
            "[{\"text\":\"🔴 CONFIRM PERMANENT DELETE\",\"callback_data\":\"DEL_CONFIRM:%u\"}],"
@@ -917,17 +751,94 @@ void GwTelegramBot::showConfirmAllPoles(int64_t chatId, uint8_t action) {
            "Action: *%s ALL FEEDERS ACROSS ENTIRE MESH*\n"
            "Total Active Field Poles: *%u*\n"
            "Total Relays Affected: *Up to %u*\n\n"
-           "Are you sure you want to broadcast this command across the LoRa network?",
+           "Are you sure you want to broadcast this command across all registered field nodes?",
            (action == 1) ? "⚡ ENERGIZE (TURN ON)" : "🚨 DE-ENERGIZE (TURN OFF)",
            count, count * 6);
 
   char kb[220];
   snprintf(kb, sizeof(kb),
            "["
-           "[{\"text\":\"%s YES, EXECUTE\",\"callback_data\":\"ALL:EXEC:%u\"}],"
+           "[{\"text\":\"%s YES, EXECUTE ALL\",\"callback_data\":\"ALL:EXEC:%u\"}],"
            "[{\"text\":\"❌ CANCEL\",\"callback_data\":\"MENU:MAIN\"}]"
            "]",
            (action == 1) ? "⚡" : "🚨", action);
+
+  sendMessageWithKeyboard(chatId, buf, kb);
+}
+
+void GwTelegramBot::showFeederScheduleMenu(int64_t chatId, uint8_t page) {
+  char timeStr[48];
+  gwSchedule.getIstTimeStr(timeStr, sizeof(timeStr));
+  bool synced = gwSchedule.isTimeSynced();
+
+  uint8_t count = gwSchedule.getScheduleCount();
+
+  char buf[600];
+  snprintf(buf, sizeof(buf),
+           "⏰ *FEEDER TIMER & SCHEDULE MANAGEMENT*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "🕒 *System Time:* `%s`\n"
+           "📶 *Time Sync Status:* %s\n"
+           "Active Rules: *%u / %d*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n",
+           timeStr,
+           synced ? "✅ SYNCHRONIZED (IST UTC+05:30)" : "⚠️ TIME_UNSYNCED (Scheduled ON blocked)",
+           count, GW_MAX_SCHEDULE_RULES);
+
+  if (count == 0) {
+    strncat(buf, "No active schedule rules. You can arm quick auto-OFF timers or configure daily schedules:", sizeof(buf) - strlen(buf) - 1);
+  } else {
+    for (uint8_t i = 0; i < count && i < 4; i++) {
+      const FeederScheduleRule* r = gwSchedule.getSchedule(i);
+      if (!r) continue;
+      char ruleLine[128];
+      if (r->autoOffArmed) {
+        snprintf(ruleLine, sizeof(ruleLine), "• Pole 0x%04X F%u: Auto-OFF in %lu min [%s]\n",
+                 r->poleId, r->feederId, (unsigned long)r->autoOffMinutes, r->enabled ? "ACTIVE" : "PAUSED");
+      } else {
+        snprintf(ruleLine, sizeof(ruleLine), "• Pole 0x%04X F%u: ON %02d:%02d | OFF %02d:%02d [%s]\n",
+                 r->poleId, r->feederId, r->onHour, r->onMinute, r->offHour, r->offMinute,
+                 r->enabled ? "ENABLED" : "PAUSED");
+      }
+      strncat(buf, ruleLine, sizeof(buf) - strlen(buf) - 1);
+    }
+  }
+
+  // Action buttons
+  const char* kb =
+    "["
+    "[{\"text\":\"⏱️ Auto-OFF 15m (P2)\",\"callback_data\":\"SCHED:ARM:2:0:15\"},{\"text\":\"⏱️ Auto-OFF 30m (P2)\",\"callback_data\":\"SCHED:ARM:2:0:30\"}],"
+    "[{\"text\":\"⏱️ Auto-OFF 1h (P2)\",\"callback_data\":\"SCHED:ARM:2:0:60\"},{\"text\":\"⏱️ Auto-OFF 2h (P2)\",\"callback_data\":\"SCHED:ARM:2:0:120\"}],"
+    "[{\"text\":\"🕒 Mesh Time Sync\",\"callback_data\":\"MENU:TIMESYNC\"},{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:SCHED:0\"}],"
+    "[{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]"
+    "]";
+
+  sendMessageWithKeyboard(chatId, buf, kb);
+}
+
+void GwTelegramBot::showMeshTimeSync(int64_t chatId) {
+  char timeStr[48];
+  gwSchedule.getIstTimeStr(timeStr, sizeof(timeStr));
+  bool synced = gwSchedule.isTimeSynced();
+
+  char buf[480];
+  snprintf(buf, sizeof(buf),
+           "🕒 *MESH TIME SYNCHRONIZATION*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "• Gateway Clock: `%s`\n"
+           "• NTP Reference: `pool.ntp.org` / `time.google.com`\n"
+           "• Timezone: `Asia/Kolkata (IST, UTC+05:30)`\n"
+           "• Mesh Status: %s\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Field Poles synchronize their real-time clocks with the Gateway over the LoRa mesh to execute autonomous schedules safely.",
+           timeStr,
+           synced ? "✅ TIME_SYNCED (Epoch Active)" : "⚠️ TIME_UNSYNCED (NTP pending)");
+
+  const char* kb =
+    "["
+    "[{\"text\":\"📡 Broadcast Mesh Time Sync\",\"callback_data\":\"TIMESYNC:EXEC\"}],"
+    "[{\"text\":\"🔄 Refresh Status\",\"callback_data\":\"MENU:TIMESYNC\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]"
+    "]";
 
   sendMessageWithKeyboard(chatId, buf, kb);
 }
@@ -1020,6 +931,162 @@ void GwTelegramBot::showSettingsMenu(int64_t chatId) {
   sendMessageWithKeyboard(chatId, buf, kb);
 }
 
+void GwTelegramBot::cmdFeeder(int64_t chatId, uint16_t poleId, uint8_t feederId, uint8_t action) {
+  if (feederId < 1 || feederId > 6) {
+    sendMessage(chatId, "❌ Invalid feeder ID (must be 1 to 6).");
+    return;
+  }
+
+  RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  if (!p) {
+    sendMessage(chatId, "❌ Target pole not found in active registry.");
+    return;
+  }
+
+  uint32_t seq = 0;
+  // Non-blocking dispatch
+  bool sent = gwMesh.sendFeederCommand(poleId, feederId, action, 0, seq, chatId);
+  if (!sent) {
+    sendMessage(chatId, "⛔ Failed to dispatch command: Key not provisioned or radio error.");
+    return;
+  }
+
+  char buf[160];
+  snprintf(buf, sizeof(buf),
+           "⏳ Command dispatched over LoRa mesh (Seq #%lu) to Pole 0x%04X Feeder %u.\nAwaiting physical contactor verification...",
+           (unsigned long)seq, poleId, feederId);
+  sendMessage(chatId, buf);
+}
+
+void GwTelegramBot::cmdGroup(int64_t chatId, uint16_t poleId, uint8_t groupMask, uint8_t action) {
+  RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  if (!p) {
+    sendMessage(chatId, "❌ Target pole not found in registry.");
+    return;
+  }
+
+  uint32_t seq = 0;
+  bool sent = gwMesh.sendFeederCommand(poleId, 0xF0, action, groupMask, seq, chatId);
+  if (sent) {
+    char buf[160];
+    snprintf(buf, sizeof(buf), "⏳ Group feeder command dispatched over mesh (Seq #%lu). Awaiting verification...", (unsigned long)seq);
+    sendMessage(chatId, buf);
+  } else {
+    sendMessage(chatId, "⛔ Failed to dispatch group command.");
+  }
+}
+
+void GwTelegramBot::cmdAll(int64_t chatId, uint16_t poleId, uint8_t action) {
+  RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  if (!p) {
+    sendMessage(chatId, "❌ Target pole not found in registry.");
+    return;
+  }
+
+  uint32_t seq = 0;
+  bool sent = gwMesh.sendFeederCommand(poleId, 0x00, action, 0x3F, seq, chatId);
+  if (sent) {
+    char buf[160];
+    snprintf(buf, sizeof(buf), "⏳ All-Feeder command dispatched to Pole 0x%04X (Seq #%lu). Awaiting verification...", poleId, (unsigned long)seq);
+    sendMessage(chatId, buf);
+  } else {
+    sendMessage(chatId, "⛔ Failed to dispatch all-feeder command.");
+  }
+}
+
+void GwTelegramBot::executeAllPolesNetworkWide(int64_t chatId, uint8_t action) {
+  uint8_t count = gwRegistry.getActiveCount();
+  if (count == 0) {
+    sendMessage(chatId, "⚠️ No active registered poles in network to switch.");
+    return;
+  }
+
+  char buf[280];
+  snprintf(buf, sizeof(buf),
+           "⏳ *DISPATCHING NETWORK-WIDE ALL FEEDERS %s*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Target Active Poles: *%u*\n"
+           "Total Relays: *Up to %u*\n"
+           "Dispatching authenticated per-pole commands across LoRa mesh...",
+           (action == 1) ? "ON" : "OFF", count, count * 6);
+  sendMessage(chatId, buf);
+
+  uint8_t dispatched = 0;
+  for (uint8_t i = 0; i < count; i++) {
+    const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
+    if (!p) continue;
+    uint32_t seq = 0;
+    if (gwMesh.sendFeederCommand(p->poleId, 0x00, action, 0x3F, seq, chatId)) {
+      dispatched++;
+    }
+  }
+
+  char resBuf[180];
+  snprintf(resBuf, sizeof(resBuf), "✅ Successfully dispatched authenticated commands to %u / %u poles. Awaiting ACK progression...", dispatched, count);
+  sendMessage(chatId, resBuf);
+}
+
+void GwTelegramBot::cmdDeleteConfirm(int64_t chatId, uint16_t poleId) {
+  char adminStr[24];
+  snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
+
+  bool ok = gwRegistry.deleteAndRevokePole(poleId, adminStr, "ADMIN_DELETED_VIA_TELEGRAM");
+  if (ok) {
+    char buf[220];
+    snprintf(buf, sizeof(buf),
+             "✅ Pole 0x%04X deleted from registry and permanently blacklisted in NVS.\nDownstream children migrated to Gateway.",
+             poleId);
+    sendMessage(chatId, buf);
+  } else {
+    sendMessage(chatId, "❌ Failed to delete pole. (Revocation storage full, not found, or storage write failed).");
+  }
+}
+
+void GwTelegramBot::cmdWifi(int64_t chatId, const char* args) {
+  if (!args || strlen(args) == 0) {
+    sendMessage(chatId, "Usage: `/wifi <NewSSID> <NewPassword>`\nNote: Automatically validates and rolls back on failure.");
+    return;
+  }
+
+  char newSsid[33];
+  char newPass[65];
+  if (sscanf(args, "%32s %64s", newSsid, newPass) == 2) {
+    sendMessage(chatId, "⏳ Attempting connection with new Wi-Fi credentials...\nLoRa mesh remains fully active.\nRollback is armed if connection fails.");
+    bool initiated = gwWifi.requestCredentialUpdate(newSsid, newPass);
+    if (!initiated) {
+      sendMessage(chatId, "❌ Credential update rejected (invalid SSID or password too short).");
+    }
+  } else {
+    sendMessage(chatId, "❌ Syntax: `/wifi <NewSSID> <NewPassword>`");
+  }
+}
+
+void GwTelegramBot::cmdConfig(int64_t chatId, const char* args) {
+  if (!args || strlen(args) == 0) {
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "⚙️ *HEARTBEAT CONFIGURATION*\n"
+             "Heartbeat Interval: %u s\n"
+             "Offline Timeout: %u s\n\n"
+             "To change: `/config <hb_seconds> <offline_seconds>`",
+             gwHeartbeat.getHeartbeatIntervalSec(),
+             gwHeartbeat.getOfflineTimeoutSec());
+    sendMessage(chatId, buf);
+    return;
+  }
+
+  int hb = 0, to = 0;
+  if (sscanf(args, "%d %d", &hb, &to) == 2 && hb >= 5 && to >= 15) {
+    gwHeartbeat.setHeartbeatIntervalSec(hb);
+    gwHeartbeat.setOfflineTimeoutSec(to);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "✅ Config updated: Heartbeat %u s | Timeout %u s (persisted).", hb, to);
+    sendMessage(chatId, buf);
+  } else {
+    sendMessage(chatId, "❌ Invalid syntax. Usage: `/config <hb_seconds> <offline_seconds>`");
+  }
+}
+
 void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
   if (!isAuthorizedAdmin(chatId)) {
     sendMessage(chatId, "⛔ Access Denied. Your Telegram account is not on the admin allowlist.");
@@ -1028,11 +1095,56 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
 
   if (!cmdText) return;
 
-  if (strncmp(cmdText, "/start", 6) == 0 || strncmp(cmdText, "/help", 5) == 0 || strncmp(cmdText, "/menu", 5) == 0) {
-    sendReplyKeyboard(chatId, "⚡ Grid Controller Active. Use quick action buttons below:");
-    showMainMenu(chatId);
+  // Trim whitespace
+  while (*cmdText == ' ') cmdText++;
+
+  // 1. Exact Numeric Fallback (1..14)
+  if (strcmp(cmdText, "1") == 0) {
+    showDashboard(chatId);
     return;
-  } else if (strstr(cmdText, "ALL FEEDERS ON") != nullptr) {
+  } else if (strcmp(cmdText, "2") == 0) {
+    showPolesMenu(chatId, 0);
+    return;
+  } else if (strcmp(cmdText, "3") == 0) {
+    showVoltageDashboard(chatId, 0);
+    return;
+  } else if (strcmp(cmdText, "4") == 0) {
+    showFeederDashboard(chatId, 0);
+    return;
+  } else if (strcmp(cmdText, "5") == 0) {
+    showConfirmAllPoles(chatId, 1);
+    return;
+  } else if (strcmp(cmdText, "6") == 0) {
+    showConfirmAllPoles(chatId, 0);
+    return;
+  } else if (strcmp(cmdText, "7") == 0) {
+    showRegistrationsMenu(chatId, 0);
+    return;
+  } else if (strcmp(cmdText, "8") == 0) {
+    showDeleteMenu(chatId, 0);
+    return;
+  } else if (strcmp(cmdText, "9") == 0) {
+    showFeederScheduleMenu(chatId, 0);
+    return;
+  } else if (strcmp(cmdText, "10") == 0) {
+    showMeshTimeSync(chatId);
+    return;
+  } else if (strcmp(cmdText, "11") == 0) {
+    showWifiSettings(chatId);
+    return;
+  } else if (strcmp(cmdText, "12") == 0) {
+    showFirmwareOta(chatId);
+    return;
+  } else if (strcmp(cmdText, "13") == 0) {
+    showAlarmLog(chatId);
+    return;
+  } else if (strcmp(cmdText, "14") == 0) {
+    showSettingsMenu(chatId);
+    return;
+  }
+
+  // 2. Persistent Action Reply Keyboard Matches
+  if (strstr(cmdText, "ALL FEEDERS ON") != nullptr) {
     showConfirmAllPoles(chatId, 1);
     return;
   } else if (strstr(cmdText, "ALL FEEDERS OFF") != nullptr) {
@@ -1050,11 +1162,36 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
   } else if (strstr(cmdText, "Dashboard Status") != nullptr || strstr(cmdText, "Dashboard") != nullptr) {
     showDashboard(chatId);
     return;
+  } else if (strstr(cmdText, "Feeder Schedule") != nullptr || strstr(cmdText, "Schedule") != nullptr) {
+    showFeederScheduleMenu(chatId, 0);
+    return;
+  } else if (strstr(cmdText, "Mesh Time Sync") != nullptr || strstr(cmdText, "Time Sync") != nullptr) {
+    showMeshTimeSync(chatId);
+    return;
+  } else if (strstr(cmdText, "Registrations") != nullptr) {
+    showRegistrationsMenu(chatId, 0);
+    return;
+  } else if (strstr(cmdText, "Delete Pole") != nullptr) {
+    showDeleteMenu(chatId, 0);
+    return;
   } else if (strstr(cmdText, "Wi-Fi Settings") != nullptr || strstr(cmdText, "Wi-Fi") != nullptr) {
     showWifiSettings(chatId);
     return;
-  } else if (strstr(cmdText, "Registrations") != nullptr) {
-    showRegistrationsMenu(chatId);
+  } else if (strstr(cmdText, "Firmware OTA") != nullptr || strstr(cmdText, "OTA") != nullptr) {
+    showFirmwareOta(chatId);
+    return;
+  } else if (strstr(cmdText, "Alarm Log") != nullptr || strstr(cmdText, "Alarms") != nullptr) {
+    showAlarmLog(chatId);
+    return;
+  } else if (strstr(cmdText, "System Settings") != nullptr || strstr(cmdText, "Settings") != nullptr) {
+    showSettingsMenu(chatId);
+    return;
+  }
+
+  // 3. Slash Commands
+  if (strncmp(cmdText, "/start", 6) == 0 || strncmp(cmdText, "/help", 5) == 0 || strncmp(cmdText, "/menu", 5) == 0) {
+    sendReplyKeyboard(chatId, "⚡ MSCB Smart Pole Gateway Active. Use quick action buttons below:");
+    showMainMenu(chatId);
     return;
   } else if (strncmp(cmdText, "/status", 7) == 0) {
     showDashboard(chatId);
@@ -1063,7 +1200,11 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
   } else if (strncmp(cmdText, "/volt", 5) == 0 || strncmp(cmdText, "/voltage", 8) == 0) {
     showVoltageDashboard(chatId, 0);
   } else if (strncmp(cmdText, "/pending", 8) == 0) {
-    showRegistrationsMenu(chatId);
+    showRegistrationsMenu(chatId, 0);
+  } else if (strncmp(cmdText, "/schedule", 9) == 0 || strncmp(cmdText, "/timer", 6) == 0) {
+    showFeederScheduleMenu(chatId, 0);
+  } else if (strncmp(cmdText, "/timesync", 9) == 0) {
+    showMeshTimeSync(chatId);
   } else if (strncmp(cmdText, "/pole ", 6) == 0) {
     uint16_t pid = (uint16_t)atoi(cmdText + 6);
     showPoleDetail(chatId, pid);
@@ -1075,8 +1216,9 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
       if (p) {
         strncpy(p->stringId, newName, sizeof(p->stringId) - 1);
         p->stringId[sizeof(p->stringId) - 1] = '\0';
+        gwRegistry.saveRegistry();
         char buf[128];
-        snprintf(buf, sizeof(buf), "✅ Pole 0x%04X name updated to: *%s*", pid, p->stringId);
+        snprintf(buf, sizeof(buf), "✅ Pole 0x%04X name updated and persisted: *%s*", pid, p->stringId);
         sendMessage(chatId, buf);
         showPoleDetail(chatId, (uint16_t)pid);
       } else {
@@ -1092,7 +1234,7 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
       if (fid >= 1 && fid <= 6) {
         setFeederName((uint16_t)pid, (uint8_t)fid, newFname);
         char buf[128];
-        snprintf(buf, sizeof(buf), "✅ Pole 0x%04X Feeder %d name updated to: *%s*", pid, fid, newFname);
+        snprintf(buf, sizeof(buf), "✅ Pole 0x%04X Feeder %d name updated and persisted: *%s*", pid, fid, newFname);
         sendMessage(chatId, buf);
         showPoleDetail(chatId, (uint16_t)pid);
       } else {
@@ -1111,13 +1253,14 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
       }
       uint16_t assignedId = 0;
       if (gwRegistry.approvePending(mac, assignedId)) {
+        gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
         char buf[128];
-        snprintf(buf, sizeof(buf), "✅ Approved! Assigned Logical ID: 0x%04X (POLE_%02d)", assignedId, assignedId);
+        snprintf(buf, sizeof(buf), "✅ Approved! Assigned Logical ID: POLE-%04d (0x%04X)\nResponse sent over LoRa mesh.", assignedId, assignedId);
         sendMessage(chatId, buf);
       } else {
         sendMessage(chatId, "❌ Failed to approve (capacity full or not in pending).");
       }
-      showRegistrationsMenu(chatId);
+      showRegistrationsMenu(chatId, 0);
     }
   } else if (strncmp(cmdText, "/reject_", 8) == 0) {
     const char* hex = cmdText + 8;
@@ -1128,27 +1271,27 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
         mac[i] = (uint8_t)strtoul(byteStr, NULL, 16);
       }
       gwRegistry.rejectPending(mac);
-      sendMessage(chatId, "⛔ Registration rejected. Node cannot become active.");
-      showRegistrationsMenu(chatId);
+      gwMesh.sendRegisterResponse(mac, 0, 0, REG_RESP_REJECTED_UNAUTHORIZED);
+      sendMessage(chatId, "⛔ Registration rejected. Node removed from queue.");
+      showRegistrationsMenu(chatId, 0);
     }
   } else if (strncmp(cmdText, "/feeder ", 8) == 0) {
     int pid = 0, fid = 0;
     char actStr[8];
     if (sscanf(cmdText + 8, "%d %d %7s", &pid, &fid, actStr) == 3) {
-      uint8_t act = (strcasecmp(actStr, "on") == 0) ? 1 : 0;
+      uint8_t act = (strcmp(actStr, "on") == 0 || strcmp(actStr, "ON") == 0 || strcmp(actStr, "1") == 0) ? 1 : 0;
       cmdFeeder(chatId, (uint16_t)pid, (uint8_t)fid, act);
-      showPoleDetail(chatId, (uint16_t)pid);
     } else {
-      sendMessage(chatId, "Usage: /feeder <poleId> <feederId:1..6> <on|off>");
+      sendMessage(chatId, "Usage: `/feeder <poleId> <feederId:1..6> <on|off>`");
     }
   } else if (strncmp(cmdText, "/all ", 5) == 0) {
     int pid = 0;
     char actStr[8];
     if (sscanf(cmdText + 5, "%d %7s", &pid, actStr) == 2) {
-      uint8_t act = (strcasecmp(actStr, "on") == 0) ? 1 : 0;
+      uint8_t act = (strcmp(actStr, "on") == 0 || strcmp(actStr, "ON") == 0 || strcmp(actStr, "1") == 0) ? 1 : 0;
       cmdAll(chatId, (uint16_t)pid, act);
     } else {
-      sendMessage(chatId, "Usage: /all <poleId> <on|off>");
+      sendMessage(chatId, "Usage: `/all <poleId> <on|off>`");
     }
   } else if (strncmp(cmdText, "/delete_", 8) == 0) {
     uint16_t pid = (uint16_t)atoi(cmdText + 8);
@@ -1166,6 +1309,17 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
   } else if (strncmp(cmdText, "/alarms", 7) == 0) {
     showAlarmLog(chatId);
   } else {
+    // 4. Unknown input fallback: short help response and main menu
+    char helpBuf[384];
+    snprintf(helpBuf, sizeof(helpBuf),
+      "❓ *Unknown command:* `%s`\n\n"
+      "Please select an action from the buttons below or send a number (1-14):\n"
+      "1: Dashboard | 2: Poles | 3: Voltage | 4: Feeder\n"
+      "5: All ON | 6: All OFF | 7: Register | 8: Delete\n"
+      "9: Schedule | 10: TimeSync | 11: Wi-Fi | 12: OTA\n"
+      "13: Alarms | 14: Settings",
+      cmdText);
+    sendMessage(chatId, helpBuf);
     showMainMenu(chatId);
   }
 }
@@ -1227,10 +1381,13 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
     showConfirmAllPoles(chatId, act);
   } else if (strncmp(callbackData, "ALL:EXEC:", 9) == 0) {
     uint8_t act = (uint8_t)atoi(callbackData + 9);
-    cmdAll(chatId, 0x0000, act);
+    executeAllPolesNetworkWide(chatId, act);
     showMainMenu(chatId);
+  } else if (strncmp(callbackData, "MENU:REG:", 9) == 0) {
+    uint8_t page = (uint8_t)atoi(callbackData + 9);
+    showRegistrationsMenu(chatId, page);
   } else if (strcmp(callbackData, "MENU:REG") == 0) {
-    showRegistrationsMenu(chatId);
+    showRegistrationsMenu(chatId, 0);
   } else if (strncmp(callbackData, "REG:APP:", 8) == 0) {
     const char* hex = callbackData + 8;
     if (strlen(hex) == 12) {
@@ -1241,13 +1398,14 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
       }
       uint16_t assignedId = 0;
       if (gwRegistry.approvePending(mac, assignedId)) {
+        gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
         char buf[128];
-        snprintf(buf, sizeof(buf), "✅ Approved! Assigned Logical ID: POLE-%04d (0x%04X)", assignedId, assignedId);
+        snprintf(buf, sizeof(buf), "✅ Approved! Assigned Logical ID: POLE-%04d (0x%04X)\nResponse packet dispatched over LoRa mesh.", assignedId, assignedId);
         sendMessage(chatId, buf);
       } else {
         sendMessage(chatId, "❌ Failed to approve (capacity full or not in pending).");
       }
-      showRegistrationsMenu(chatId);
+      showRegistrationsMenu(chatId, 0);
     }
   } else if (strncmp(callbackData, "REG:REJ:", 8) == 0) {
     const char* hex = callbackData + 8;
@@ -1258,11 +1416,15 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
         mac[i] = (uint8_t)strtoul(byteStr, NULL, 16);
       }
       gwRegistry.rejectPending(mac);
+      gwMesh.sendRegisterResponse(mac, 0, 0, REG_RESP_REJECTED_UNAUTHORIZED);
       sendMessage(chatId, "⛔ Registration rejected. Node removed from queue.");
-      showRegistrationsMenu(chatId);
+      showRegistrationsMenu(chatId, 0);
     }
+  } else if (strncmp(callbackData, "MENU:DEL:", 9) == 0) {
+    uint8_t page = (uint8_t)atoi(callbackData + 9);
+    showDeleteMenu(chatId, page);
   } else if (strcmp(callbackData, "MENU:DEL") == 0) {
-    showDeleteMenu(chatId);
+    showDeleteMenu(chatId, 0);
   } else if (strncmp(callbackData, "DEL_PROMPT:", 11) == 0) {
     uint16_t pid = (uint16_t)atoi(callbackData + 11);
     showDeleteConfirm(chatId, pid);
@@ -1270,6 +1432,29 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
     uint16_t pid = (uint16_t)atoi(callbackData + 12);
     cmdDeleteConfirm(chatId, pid);
     showMainMenu(chatId);
+  } else if (strncmp(callbackData, "MENU:SCHED:", 11) == 0) {
+    uint8_t page = (uint8_t)atoi(callbackData + 11);
+    showFeederScheduleMenu(chatId, page);
+  } else if (strcmp(callbackData, "MENU:SCHED") == 0) {
+    showFeederScheduleMenu(chatId, 0);
+  } else if (strncmp(callbackData, "SCHED:ARM:", 10) == 0) {
+    int pid = 0, fid = 0, mins = 0;
+    if (sscanf(callbackData + 10, "%d:%d:%d", &pid, &fid, &mins) == 3) {
+      if (gwSchedule.armAutoOffTimer((uint16_t)pid, (uint8_t)fid, (uint32_t)mins)) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "✅ Armed Auto-OFF timer for Pole 0x%04X Feeder %u: %d minutes.", pid, fid, mins);
+        sendMessage(chatId, buf);
+      } else {
+        sendMessage(chatId, "❌ Failed to arm timer (schedule capacity full).");
+      }
+      showFeederScheduleMenu(chatId, 0);
+    }
+  } else if (strcmp(callbackData, "MENU:TIMESYNC") == 0) {
+    showMeshTimeSync(chatId);
+  } else if (strcmp(callbackData, "TIMESYNC:EXEC") == 0) {
+    gwSchedule.broadcastMeshTimeSync();
+    sendMessage(chatId, "✅ Mesh Time Synchronization epoch broadcasted across LoRa network.");
+    showMeshTimeSync(chatId);
   } else if (strcmp(callbackData, "MENU:WIFI") == 0) {
     showWifiSettings(chatId);
   } else if (strcmp(callbackData, "WIFI:CHANGE") == 0) {
@@ -1339,6 +1524,72 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
   }
 }
 
+void GwTelegramBot::serviceTrackedCommands() {
+  GwTrackedCommand cmd;
+  while (gwMesh.pollCompletedCommand(cmd)) {
+    int64_t targetChatId = (cmd.adminChatId != 0LL) ? cmd.adminChatId : primaryAdminChatId;
+    if (targetChatId == 0LL) continue;
+
+    RegisteredPole* p = gwRegistry.findPoleById(cmd.poleId);
+    const char* poleName = p ? p->stringId : "POLE";
+    const char* fdrName = getFeederName(cmd.poleId, cmd.feederId);
+
+    char reportBuf[384];
+    if (cmd.lastAckState == FEEDER_ACK_COMPLETED || cmd.lastAckState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED) {
+      snprintf(reportBuf, sizeof(reportBuf),
+               "✅ *FEEDER COMMAND EXECUTED & VERIFIED*\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📍 *Pole:* `%s` (0x%04X)\n"
+               "🔌 *Feeder:* %u (%s)\n"
+               "⚡ *Action:* %s\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "• LoRa TX: Dispatched\n"
+               "• Field Node: Received & Authenticated\n"
+               "• Relay Coils: OUTPUT CHANGED\n"
+               "• Contactor Auxiliary Contact: *PHYSICAL VERIFIED*\n"
+               "• MCB Mains Switch: %s",
+               poleName, cmd.poleId,
+               cmd.feederId, fdrName,
+               (cmd.action == 1) ? "ENERGIZED (ON)" : "DE-ENERGIZED (OFF)",
+               (cmd.currentMcbMask & (1 << (cmd.feederId - 1))) ? "⚠️ TRIPPED" : "✅ HEALTHY");
+    } else if (cmd.lastAckState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) {
+      snprintf(reportBuf, sizeof(reportBuf),
+               "⚠️ *FEEDER SWITCHED (AUXILIARY UNVERIFIED)*\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📍 *Pole:* `%s` (0x%04X) | Feeder %u\n"
+               "• Relay Output: %s\n"
+               "• Contactor Feedback: *NOT CONNECTED*\n"
+               "*(Physical auxiliary feedback line unpopulated or unmonitored)*",
+               poleName, cmd.poleId, cmd.feederId,
+               (cmd.action == 1) ? "ON" : "OFF");
+    } else if (cmd.lastAckState == FEEDER_ACK_REJECTED_LOCKED) {
+      snprintf(reportBuf, sizeof(reportBuf),
+               "⛔ *COMMAND REJECTED: SAFETY LOCK ACTIVE*\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📍 *Pole:* `%s` (0x%04X) | Feeder %u\n"
+               "• Reason: `MSCB_RELAYS_LOCKED_DISABLED` is ENFORCED.\n"
+               "• High-voltage physical actuation blocked by firmware interlock.",
+               poleName, cmd.poleId, cmd.feederId);
+    } else if (cmd.lastAckState == FEEDER_ACK_REJECTED_STALE) {
+      snprintf(reportBuf, sizeof(reportBuf),
+               "⛔ *COMMAND REJECTED: STALE TIMESTAMP*\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📍 *Pole:* `%s` (0x%04X)\n"
+               "• Anti-replay/expiry check rejected command envelope.",
+               poleName, cmd.poleId);
+    } else {
+      snprintf(reportBuf, sizeof(reportBuf),
+               "❌ *COMMAND TIMEOUT / EXECUTION FAILURE*\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📍 *Pole:* `%s` (0x%04X) | Feeder %u\n"
+               "• No confirmed ACK received over LoRa mesh within 4.5s.\n"
+               "• Link degraded or node offline.",
+               poleName, cmd.poleId, cmd.feederId);
+    }
+    sendMessage(targetChatId, reportBuf);
+  }
+}
+
 void GwTelegramBot::checkOnlineAndNotify() {
 #if defined(ARDUINO)
   if (telegramOnline) return;
@@ -1350,10 +1601,19 @@ void GwTelegramBot::checkOnlineAndNotify() {
 
   Serial.println(F("[TG] Connecting to Telegram API..."));
   client.setInsecure();
+
+  // Clear any conflicting webhook that could block getUpdates
+  static bool s_webhookCleared = false;
+  if (!s_webhookCleared) {
+    bot.sendGetToTelegram("deleteWebhook?drop_pending_updates=false");
+    s_webhookCleared = true;
+  }
+
   if (bot.getMe()) {
     telegramOnline = true;
     Serial.printf("[TG] ✅ Telegram Bot ONLINE! @%s (%s)\n", bot.userName.c_str(), bot.name.c_str());
 
+    // Single notification per online transition
     if (!startupNotified && primaryAdminChatId != 0LL) {
       sendReplyKeyboard(primaryAdminChatId,
         "⚡ *MSCB SMART POLE SYSTEM (R1) ONLINE!*\n"
@@ -1361,7 +1621,7 @@ void GwTelegramBot::checkOnlineAndNotify() {
         "✅ Gateway connected to Wi-Fi.\n"
         "📡 LoRa Mesh SX1278 Active (433.920 MHz).\n"
         "🔒 Fail-Closed Security Enforced.\n\n"
-        "Use the quick action buttons below:");
+        "Use the quick action buttons below or send number 1-14:");
       showMainMenu(primaryAdminChatId);
       startupNotified = true;
       Serial.println(F("[TG] ✅ Persistent Action Keyboard & Main Menu sent to Admin!"));
@@ -1381,19 +1641,33 @@ void GwTelegramBot::pollUpdates() {
   while (numNew > 0) {
     for (int i = 0; i < numNew; i++) {
       String chatIdStr = bot.messages[i].chat_id;
+      String fromIdStr = bot.messages[i].from_id;
       String text = bot.messages[i].text;
-      int64_t senderId = (int64_t)atoll(chatIdStr.c_str());
 
-      Serial.printf("[TG] Received from %s: '%s' (type: %s)\n",
-                    chatIdStr.c_str(), text.c_str(), bot.messages[i].type.c_str());
+      int64_t chatId = (int64_t)atoll(chatIdStr.c_str());
+      int64_t fromUserId = (int64_t)atoll(fromIdStr.c_str());
+
+      Serial.printf("[TG] Message from user %s (chat %s): '%s' (type: %s)\n",
+                    fromIdStr.c_str(), chatIdStr.c_str(), text.c_str(), bot.messages[i].type.c_str());
+
+      // Validate actual Telegram user identity against admin allowlist
+      if (!isAuthorizedAdmin(fromUserId)) {
+        Serial.printf("[TG] ⛔ Unauthorized sender user ID: %lld\n", (long long)fromUserId);
+        if (bot.messages[i].type == "callback_query" && bot.messages[i].query_id.length() > 0) {
+          bot.answerCallbackQuery(bot.messages[i].query_id, "⛔ Access Denied", true);
+        } else {
+          sendMessage(chatId, "⛔ Access Denied. Your Telegram account is not on the admin allowlist.");
+        }
+        continue;
+      }
 
       if (bot.messages[i].type == "callback_query") {
         if (bot.messages[i].query_id.length() > 0) {
-          bot.answerCallbackQuery(bot.messages[i].query_id, ""); // Instant dismiss spinner
+          bot.answerCallbackQuery(bot.messages[i].query_id, ""); // Dismiss loading spinner immediately
         }
-        handleCallback(senderId, text.c_str());
+        handleCallback(chatId, text.c_str());
       } else {
-        handleCommand(senderId, text.c_str());
+        handleCommand(chatId, text.c_str());
       }
     }
     numNew = bot.getUpdates(bot.last_message_received + 1);
@@ -1408,6 +1682,7 @@ void GwTelegramBot::service() {
     if (telegramOnline) {
       Serial.println(F("[TG] Wi-Fi lost. Telegram bot offline."));
       telegramOnline = false;
+      startupNotified = false; // Re-arm so it will notify once upon reconnect
     }
     return;
   }
@@ -1418,6 +1693,9 @@ void GwTelegramBot::service() {
     broadcastAdminAlert(gwHeartbeat.getNextAlertText());
     gwHeartbeat.clearPendingAlert();
   }
+
+  // Non-blocking tracked command ACK reporter
+  serviceTrackedCommands();
 
   if (now - lastPollMs >= GW_TELEGRAM_POLL_INTERVAL_MS) {
     lastPollMs = now;

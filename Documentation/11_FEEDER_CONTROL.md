@@ -98,3 +98,24 @@ The system maintains an operational distinction between deactivating a feeder an
 | **Removed** | De-provisioned | Hidden from Dashboard | Excluded from Telemetry| Re-commissioning required |
 
 - **Deactivation Use Case**: Seasonal irrigation feeders (e.g. pumps offline during harvest) or street lights undergoing physical cable maintenance. Deactivated feeders reject all scheduled or group switching commands.
+
+---
+
+## 5. Non-Blocking Command Architecture & Network-Wide Fan-Out
+
+### 5.1 Non-Blocking Asynchronous Command Tracking
+In previous iterations, the Gateway blocked its execution thread in a 3.5-second `while()` loop waiting for LoRa ACKs. This caused Wi-Fi drops, Telegram polling timeouts, and lost packets.
+- The R2 architecture introduces an asynchronous command tracking ring (`GwTrackedCommand[GW_MAX_TRACKED_COMMANDS]`).
+- Commands are dispatched instantly (< 5ms). The operator receives immediate visual confirmation of transmission.
+- The Gateway's non-blocking `service()` loop monitors incoming `PKT_CMD_FEEDER_ACK` wire frames and matches sequence numbers.
+- Upon receiving physical auxiliary confirmation or encountering a timeout (4,500 ms), the Gateway asynchronously updates the operator with a full audit card:
+  - 📤 LoRa Command Transmitted
+  - 📥 Field Pole HMAC & Nonce Verified
+  - ⚙️ Microcontroller GPIO Actuated
+  - 🧲 Physical Contactor Auxiliary Contact Verified
+  - ⚡ MCB Breaker Continuity Confirmed
+
+### 5.2 Network-Wide Fan-Out
+- MSCB Protocol specifies destination `0xFFFF` as broadcast. Transmitting commands to `0x0000` previously failed cryptographic envelope verification at the poles.
+- For network-wide `ALL FEEDERS ON` and `ALL FEEDERS OFF`, the Gateway iterates all active nodes in `GwNodeRegistry` and transmits individual, authenticated, sequence-tracked commands per pole with 100ms staggering to prevent mesh channel congestion.
+- Network-wide operations require a 2-step confirmation dialog on Telegram to prevent inadvertent blackout or mass inrush.
