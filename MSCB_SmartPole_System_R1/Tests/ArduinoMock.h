@@ -33,6 +33,10 @@ typedef bool boolean;
 #define HEX 16
 #define DEC 10
 
+inline void pinMode(uint8_t, uint8_t) {}
+inline void digitalWrite(uint8_t, uint8_t) {}
+inline int digitalRead(uint8_t) { return 0; }
+
 static unsigned long g_simulatedMillis = 1000UL;
 inline unsigned long millis() { return g_simulatedMillis; }
 inline void delay(unsigned long ms) { g_simulatedMillis += ms; }

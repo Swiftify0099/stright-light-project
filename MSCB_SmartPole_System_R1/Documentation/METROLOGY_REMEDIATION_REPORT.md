@@ -1,200 +1,260 @@
 # MSCB Smart Pole & Feeder Automation System: 21-Channel Metrology & Sensor Audit
 
-**Document ID**: MSCB-AUDIT-MET-02 (Third-Pass Critical Defect Remediation)  
+**Document ID**: MSCB-AUDIT-MET-05 (Fifth-Pass Comprehensive Independent Audit)  
 **Classification**: Electrical Metrology, Analog Front-End (AFE) & Sensor Engineering Audit  
 **Target System**: ESP32 Field Pole Node (3x Texas Instruments ADS131M08 24-Bit ADC Architecture)  
-**Author**: Principal Metrology Engineer, Analog Front-End Architect & Hardware Verification Specialist  
+**Author**: Principal Analog Design Engineer, Embedded Security Engineer, LoRa Network Engineer, and Independent Verification Lead  
 **Date**: November 22, 2026  
-**Status**: AUDITED & REMEDIATED / PHYSICAL AFE HARDWARE BLOCKED  
+**Status**: AUDITED & REMEDIATED / PHYSICAL AFE HARDWARE STRICTLY BLOCKED / CT BOM WITHHELD  
 
 ---
 
-## 1. Executive Summary & Critical Architectural Findings
+## 1. Executive Summary & Critical Architectural Realignment
 
-### 1.1 The 21-Channel Metrology Architecture
-Each MSCB Smart Pole controls and monitors **6 independent 3-phase feeders** powered from a common 3-phase 415V AC incoming utility bus. Full electrical visibility requires:
+### 1.1 The 21-Channel Active Metrology Architecture
+Each MSCB Smart Pole controls and monitors **6 independent 3-phase feeders** powered from a common 3-phase 415V AC incoming utility bus:
 - **18 Independent Current Channels**: 6 feeders $\times$ 3 phases ($R, Y, B$)
 - **3 Common Bus Voltage Channels**: 3 incoming bus phase-to-neutral voltages ($V_R, V_Y, V_B$)
-- **Total Analog Measurement Channels**: **21 Channels**
+- **Total Active Analog Measurement Channels**: **21 Channels**
 
-To achieve high-precision polyphase metering, the Field Pole Node integrates **three Texas Instruments ADS131M08 8-channel simultaneous-sampling 24-bit delta-sigma ADCs** sharing a high-speed SPI bus with dedicated chip selects:
-$$\text{Total Available Channels} = 3 \times 8 = 24 \text{ channels (21 active, 3 spare)}$$
+Polyphase metering is performed by **three Texas Instruments ADS131M08 8-channel simultaneous-sampling 24-bit delta-sigma ADCs** sharing a high-speed SPI bus with dedicated chip selects:
+$$\text{Physical ADC Capacity} = 3 \times 8 = 24 \text{ physical differential channels (21 active, 3 spare)}$$
 
----
+> [!IMPORTANT]
+> **STRICT TERMINOLOGY REALIGNMENT**:
+> The system possesses **21 active sensor measurement channels** and **3 spare ADC channels**, yielding a **24 physical ADC channel input capacity**. Earlier claims of "24 independent sensor channels" are hereby formally retracted.
 
-## 2. Sensor Front-End Audits & Defect Corrections
+### 1.2 Safe Termination and Diagnostic Monitoring for Spare Inputs
+The 3 unused ADC channels are:
+1. **ADC #2 Channel 7** (AIN7P / AIN7N)
+2. **ADC #3 Channel 6** (AIN6P / AIN6N)
+3. **ADC #3 Channel 7** (AIN7P / AIN7N)
 
-### 2.1 TASK 1 — ZMCT103C Current Transformer BOM Correction
-In the Second-Pass report, the ZMCT103C was erroneously documented with a 2000:1 ratio ($5\text{ A}:2.5\text{ mA}$) and an unverified $140.0\ \Omega$ burden resistor was approved. This constituted a critical metrological defect.
-
-#### 2.1.1 Manufacturer Verified Specifications
-- **Manufacturer**: Qingxian Zeming Langxi Electronic Co., Ltd.
-- **Model / Exact Part Number**: **ZMCT103C** (PCB pin-through mount)
-- **Rated Input Current ($I_{\text{pri}}$)**: $5.0\text{ A RMS}$
-- **Rated Output Current ($I_{\text{sec}}$)**: $5.0\text{ mA RMS}$ (at 5A input)
-- **Verified Turns Ratio ($N$)**: $\mathbf{1000:1}$ ($5\text{ A} / 0.005\text{ A} = 1000:1$, NOT 2000:1)
-- **Manufacturer Linear Dynamic Range**: $0\text{ A to } 10.0\text{ A RMS}$ (strictly specified with sampling resistor $R_b \le 50.0\ \Omega$)
-- **Phase Angle Error**: $\le 15'$ (15 arcminutes = $0.25^\circ$ at $5\text{ A}, 50\ \Omega$)
-- **Linearity Error**: $\le 0.2\%$ (at $5\%\text{ to } 120\%$ rated current)
-- **Dielectric Isolation**: $4,500\text{ V AC RMS}$ (1 minute)
-
-#### 2.1.2 Rejection of the 140.0 Ohm Burden Resistor
-If a $140.0\ \Omega$ burden resistor is connected to a ZMCT103C ($1000:1$ ratio):
-- At $10.0\text{ A RMS}$ maximum branch current:
-  $$I_{\text{sec}} = \frac{10.0\text{ A}}{1000} = 10.0\text{ mA RMS}$$
-  $$V_{\text{sec\_RMS}} = 10.0\text{ mA} \times 140.0\ \Omega = 1.400\text{ V RMS}$$
-  $$V_{\text{peak}} = 1.400\text{ V} \times \sqrt{2} = \mathbf{1.9799\text{ V peak}}$$
-- **Severe ADC Clipping**: The ADS131M08 full-scale differential range (FSR) is $\pm 1.200\text{ V}$. A $1.980\text{ V}$ peak input exceeds FSR by **$+65.0\%$**, driving the delta-sigma modulator into hard digital clipping (`0x7FFFFF`), corrupting True-RMS integration, and destroying harmonic measurements.
-- **Core Saturation Hazard**: A $140\ \Omega$ burden exceeds the manufacturer's maximum specified burden ($50\ \Omega$) by **$180\%$**. Operating at nearly triple the rated burden causes magnetic flux density ($B = V / (4.44 f N A)$) to saturate the iron core, causing phase displacement to jump from $\le 15'$ to $> 1.5^\circ - 3.0^\circ$ and ratio error to degrade from $< 0.2\%$ to $> 3-5\%$.
-- **Disposition**: The $140.0\ \Omega$ burden resistor is **REJECTED AND DISAPPROVED**.
-
-#### 2.1.3 Compliant 50.0 Ohm Burden Calculations (0 to 10A Range)
-The manufacturer-specified sampling resistor is **$R_b = 50.0\ \Omega \pm 0.1\%$**, $25\text{ ppm/}^\circ\text{C}$, $0.25\text{ W}$ metal film:
-
-| Input Current ($I_{\text{pri}}$) | Secondary Current ($I_{\text{sec}}$) | Secondary Voltage ($V_{\text{sec\_RMS}}$) | Peak Differential Voltage ($V_{\text{peak}}$) | Burden Dissipation ($P_b$) | ADC FSR Utilization | ADC Headroom Margin | ADC Counts ($\text{LSB}=143.05\text{ nV}$) | Phase Error |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **0.5 A RMS** | $0.50\text{ mA}$ | $25.0\text{ mV}$ | $\mathbf{35.36\text{ mV}}$ | $12.5\ \mu\text{W}$ | $2.95\%$ | $97.05\%$ ($1,164.6\text{ mV}$) | 247,153 counts | $\le 20'$ |
-| **1.0 A RMS** | $1.00\text{ mA}$ | $50.0\text{ mV}$ | $\mathbf{70.71\text{ mV}}$ | $50.0\ \mu\text{W}$ | $5.89\%$ | $94.11\%$ ($1,129.3\text{ mV}$) | 494,307 counts | $\le 18'$ |
-| **5.0 A RMS** (Rated) | $5.00\text{ mA}$ | $250.0\text{ mV}$ | $\mathbf{353.55\text{ mV}}$ | $1.25\text{ mW}$ | $29.46\%$ | $70.54\%$ ($846.4\text{ mV}$) | 2,471,537 counts | $\le 15'$ |
-| **10.0 A RMS** (Max) | $10.00\text{ mA}$ | $500.0\text{ mV}$ | $\mathbf{707.11\text{ mV}}$ | $5.00\text{ mW}$ | $58.93\%$ | $\mathbf{41.07\%}$ ($\mathbf{492.9\text{ mV}}$) | 4,943,074 counts | $\le 25'$ |
-
-- **BOM Part Numbers**: Susumu **RG2012P-500-B-T5** (0805, 50.0 $\Omega \pm 0.1\%$, 25 ppm, 0.125W) or Vishay Dale **PTF5650R000BYRE** (Through-hole, 50.0 $\Omega \pm 0.1\%$, 10 ppm, 0.125W/0.25W).
-- **High-Current Feeder Note**: For feeders rated at $32\text{ A}$ to $100\text{ A}$, the **YHDC SCT-013-000** ($100\text{ A}:50\text{ mA}$, $2000:1$) with a **$12.0\ \Omega \pm 0.1\%$ burden resistor** is required ($V_{\text{peak}} = \pm 0.849\text{ V}$, $29.2\%$ headroom).
+To prevent CMOS floating-gate oscillation, substrate current injection, and digital crosstalk into active metrology channels:
+1. **Hardware Termination**: Both differential inputs (AINP and AINN) are shorted together and connected directly to AGND through $100\ \Omega$ balancing resistors.
+2. **Software MUX Configuration**: During ADC initialization, the `CHx_CFG` register MUX bits are programmed to `001` (internal input shorted to mid-supply/AGND for noise and offset measurement).
+3. **Diagnostic Monitoring**: During boot and background health checks, firmware periodically samples these spare channels to verify that input noise remains within expected Gaussian thermal limits ($\le \pm 50\ \mu\text{V}$). Any excessive deviation triggers an automated diagnostic warning (`ADC_DIAG_CROSSTALK_WARNING`).
 
 ---
 
-### 2.2 TASK 2 — LCDA05 Input Protection Defect & Remediated AFE Stage
-In the Second-Pass report, the author asserted:
-> *"Transient Voltage Suppressor: Low-leakage bidirectional TVS array (Semtech LCDA05) clamping differential transients at $\le 1.5\text{ V}$."*
+## 2. Sensor Selection Matrix & Clamp Conflict Analysis (All 18 Current Channels)
 
-#### 2.2.1 Semtech LCDA05 Datasheet Audit & Fabrication Refutation
-Inspection of the Semtech LCDA05 datasheet reveals:
-- **Reverse Stand-Off Working Voltage ($V_{\text{RWM}}$)**: $\mathbf{5.0\text{ V}}$
-- **Reverse Breakdown Voltage ($V_{\text{BR}}$)**: $\mathbf{6.0\text{ V minimum}}$ (at test current $I_t = 1\text{ mA}$)
-- **Clamping Voltage ($V_C$)**:
-  - At $I_{PP} = 1.0\text{ A}$ ($8/20\ \mu\text{s}$ pulse): $\mathbf{V_C \le 9.8\text{ V}}$
-  - At $I_{PP} = 5.0\text{ A}$ ($8/20\ \mu\text{s}$ pulse): $\mathbf{V_C \le 11.0\text{ V}}$
-  - At $I_{PP} = 25.0\text{ A}$ ($8/20\ \mu\text{s}$ pulse): $\mathbf{V_C \le 20.0\text{ V}}$
-- **Physical Infeasibility**: A 5V silicon Zener TVS diode cannot physically conduct or clamp at $\le 1.5\text{ V}$.
-- **Destruction Hazard to ADS131M08**:
-  - ADS131M08 Absolute Maximum Analog Input Pin Voltage: $\text{AGND} - 1.6\text{ V}$ to $\text{AVDD} + 0.3\text{ V} = \mathbf{+3.6\text{ V}}$ (when $\text{AVDD}=3.3\text{ V}$).
-  - At a mild 1A surge, the LCDA05 clamps at $9.8\text{ V}$, subjecting the ADC input to **$+172\%$ above its destruction threshold**, instantly punching through gate oxide.
-  - Furthermore, LCDA05 does not clamp negative excursions to within the $-1.6\text{ V}$ substrate limit.
-- **Disposition**: LCDA05 is **REJECTED AND DISAPPROVED AS AN ADC CLAMP**.
+### 2.1 Refutation of Blanket 10A CT & Exposure of Stage-1 Clamp Conflict
+In prior drafts, the 10A ZMCT103C was approved for all 18 channels, which risked core saturation and burning on heavy distribution feeders carrying $16\text{ A} - 50\text{ A}$. The Fourth-Pass report substituted YHDC SCT-013-000 ($2000:1$) for heavy feeders but introduced a **critical circuit conflict**: it specified an antiparallel diode clamp across the burden limiting differential excursion to $\pm 0.70\text{ V}$, while simultaneously selecting burden resistors that produce up to $0.8591\text{ V}_{\text{peak}}$!
 
-#### 2.2.2 Validated 4-Stage Analog Front-End Protection Architecture
-To protect the ADS131M08 without introducing measurement distortion or phase error, the following 4-stage front end is designed:
+### 2.2 Exhaustive 18-Channel Current & Burden Analysis (Canonical Channels 04–21)
 
-```
-CT / PT Secondary Terminals
-   o──────┬────────────┬──────────────[ 1.0k 0.1% ]──────┬───────o AINP (ADS131M08)
-          │            │                                 │
-         [Rb]    [Anti-Parallel]                      [BAV199]
-        Burden   BAV99 Clamps                      Clamps to Rails
-          │       (+/- 0.7V)                             │
-          │            │                                [Cdiff] 4.7nF
-          │            │                                 │
-   o──────┴────────────┴──────────────[ 1.0k 0.1% ]──────┴───────o AINN (ADS131M08)
-```
+Canonical Channel Mapping Rule:
+- **Channels 01–03**: Common Bus Voltage (Phases R, Y, B) via ZMPT101B Voltage Transformers
+- **Channels 04–21**: Feeder Currents (Feeders 1 to 6, Phases R, Y, B) via Current Transformers
 
-1. **Stage 1: Anti-Parallel Clamping Diodes Across Burden**:
-   - Component: Dual high-speed diode array (**BAV99** or **BAV199** in anti-parallel).
-   - Operation: If a CT secondary opens or a 50A utility grid short-circuit occurs, the voltage across the secondary is clamped to $\mathbf{\pm 0.70\text{ V}}$ (well below the $\pm 1.20\text{ V}$ ADC FSR).
-2. **Stage 2: Balanced Series Current-Limiting Resistors**:
-   - Component: $R_{F1} = R_{F2} = \mathbf{1.00\text{ k}\Omega \pm 0.1\%}$, $25\text{ ppm/}^\circ\text{C}$ thin-film resistors.
-   - Fault Current Suppression: At a $50\text{ V}$ accidental cross-connection fault, injected current is limited to $I_{\text{fault}} = (50\text{ V} - 3.6\text{ V}) / 1000\ \Omega = \mathbf{46.4\text{ mA}}$, easily absorbed by the steering diodes without exceeding the ADC's $\pm 10\text{ mA}$ continuous pin rating.
-3. **Stage 3: Ultra-Low-Leakage Rail Steering Diodes (BAV199)**:
-   - Component: Nexperia / Diodes Inc **BAV199** dual low-leakage diode.
-   - Forward Drop: $V_F \approx 0.60\text{ V}$ at low current. Clamps analog inputs strictly between $\text{AGND} - 0.60\text{ V}$ and $\text{AVDD} + 0.60\text{ V} = \mathbf{+3.90\text{ V}}$, completely within the $-1.60\text{ V}$ to $+3.90\text{ V}$ silicon survival envelope of ADS131M08.
-   - Ultra-Low Leakage: Typical reverse leakage is $\mathbf{5\text{ pA at } 25^\circ\text{C}}$ ($5\text{ nA max at } 85^\circ\text{C}$). Across a $50\ \Omega$ burden, $5\text{ pA}$ leakage produces an error of $0.25\text{ pV}$ ($0.0000017\text{ LSB}$), ensuring zero harmonic distortion ($< 0.0005\%$ THD degradation).
-4. **Stage 4: Balanced Anti-Aliasing Low-Pass Filter**:
-   - Differential Capacitor: $C_{\text{diff}} = \mathbf{4.7\text{ nF}}$ C0G/NP0 dielectric ($\pm 5\%$).
-   - Common-Mode Capacitors: $C_{\text{cm1}} = C_{\text{cm2}} = \mathbf{470\text{ pF}}$ C0G/NP0 to Analog Ground.
-   - Differential Cutoff Frequency:
-     $$f_c = \frac{1}{2\pi \cdot (R_{F1} + R_{F2}) \cdot C_{\text{diff}}} = \frac{1}{2\pi \cdot 2000\ \Omega \cdot 4.7 \times 10^{-9}\text{ F}} = \mathbf{16.93\text{ kHz}}$$
-   - At $50\text{ Hz}$ fundamental: Attenuation is $< 0.0001\text{ dB}$; phase displacement is $0.169^\circ$ (digitally compensated).
-- **Gate B Status**: **BLOCKED** pending physical PCB daughterboard manufacturing and laboratory surge testing.
+Evaluated using exact CT turns ratio, maximum specified primary current, burden resistance tolerance ($\pm 1.0\%$), and silicon diode conduction curves:
 
----
+| Canonical Ch # | Feeder & Phase | Feeder Application | Design Current | Approved CT Model | Turns Ratio | Burden Resistor | Peak Secondary Current | Peak Burden Voltage (Nom / $+1\%$) | Stage 1 Clamp ($\pm 0.70\text{V}$) | Conduction & Waveform Distortion |
+| :---: | :--- | :--- | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Ch 04–06** | Feeder 1 (R, Y, B) | Municipal Street Lights | $0 - 8\text{ A RMS}$ | **ZMCT103C** | $1000:1$ | $50.0\ \Omega$ | $11.31\text{ mA}_{\text{pk}}$ | $0.5657\text{ V} / 0.5713\text{ V}$ | Partial Conduction ($+55^\circ\text{C}$) | Non-linear temp drift |
+| **Ch 04–06\***| Feeder 1 (10A max) | Municipal Street Lights | $10\text{ A RMS}$ | **ZMCT103C** | $1000:1$ | $50.0\ \Omega$ | $14.14\text{ mA}_{\text{pk}}$ | $0.7071\text{ V} / 0.7142\text{ V}$ | **CLIPPED** ($> 0.70\text{V}$) | **SEVERE CLIPPING** |
+| **Ch 07–09** | Feeder 2 (R, Y, B) | Agricultural Pump 1 | $5 - 28\text{ A RMS}$ | **SCT-013-000** | $2000:1$ | $30.0\ \Omega$ | $19.80\text{ mA}_{\text{pk}}$ | $0.5940\text{ V} / 0.5999\text{ V}$ | Partial Conduction ($+55^\circ\text{C}$) | Non-linear temp drift |
+| **Ch 10–12** | Feeder 3 (R, Y, B) | Agricultural Pump 2 | $5 - 28\text{ A RMS}$ | **SCT-013-000** | $2000:1$ | $30.0\ \Omega$ | $19.80\text{ mA}_{\text{pk}}$ | $0.5940\text{ V} / 0.5999\text{ V}$ | Partial Conduction ($+55^\circ\text{C}$) | Non-linear temp drift |
+| **Ch 13–15** | Feeder 4 (R, Y, B) | Heavy Distribution Feeder | $10 - 45\text{ A RMS}$ | **SCT-013-000** | $2000:1$ | $27.0\ \Omega$ | $31.82\text{ mA}_{\text{pk}}$ | **$0.8591\text{ V} / 0.8677\text{ V}$** | **CLIPPED** ($> 0.70\text{V}$) | **SEVERE CLIPPING** |
+| **Ch 16–18** | Feeder 5 (R, Y, B) | Commercial Feeder | $10 - 45\text{ A RMS}$ | **SCT-013-000** | $2000:1$ | $27.0\ \Omega$ | $31.82\text{ mA}_{\text{pk}}$ | **$0.8591\text{ V} / 0.8677\text{ V}$** | **CLIPPED** ($> 0.70\text{V}$) | **SEVERE CLIPPING** |
+| **Ch 19–21** | Feeder 6 (R, Y, B) | Auxiliary / Spare Feeder | $0 - 30\text{ A RMS}$ | **SCT-013-000** | $2000:1$ | $30.0\ \Omega$ | $21.21\text{ mA}_{\text{pk}}$ | $0.6364\text{ V} / 0.6428\text{ V}$ | Partial Conduction ($+55^\circ\text{C}$) | Non-linear temp drift |
 
-### 2.3 TASK 3 — ZMPT101B Voltage Transformer Front-End
-The raw ZMPT101B current-type voltage transformer requires precise primary and secondary matching to operate safely and accurately.
+### 2.3 Identification of Distortion & Severe Clipping
+1. **Feeders 4 & 5 (Channels 13–18)**: Under normal 45A full load, peak burden voltage reaches **$0.8591\text{ V}$** ($0.8677\text{ V}$ at $+1\%$ tolerance). Because this exceeds the $\pm 0.70\text{ V}$ diode threshold, the clamp conducts heavily on every AC cycle. The waveform is flattened at the peaks, introducing massive 3rd and 5th harmonic distortion and making True-RMS metrology impossible.
+2. **Feeder 1 at 10A Overload (Channels 04–06)**: Produces $0.7071\text{ V}_{\text{peak}}$, also exceeding the $0.70\text{ V}$ clamp.
+3. **Feeders 2, 3, 6 (Channels 07–12, 19–21)**: Peak burden voltages ($0.594\text{ V} - 0.636\text{ V}$) operate in the diode's exponential conduction knee. Inside an outdoor IP66 pole enclosure at $+55^\circ\text{C}$, the diode forward knee drops by $-2\text{ mV}/^\circ\text{C}$ ($\Delta V = -60\text{ mV}$), shifting the conduction knee down to $\sim 0.49\text{ V}$. Significant forward leakage current ($>100\ \mu\text{A}$) shunts the burden resistor, causing severe temperature-dependent calibration drift.
 
-#### 2.3.1 Manufacturer Verified Specifications
-- **Manufacturer**: Qingxian Zeming Langxi Electronic Co., Ltd.
-- **Model**: **ZMPT101B (Raw Component)**
-- **Rated Ratio**: $2.0\text{ mA} : 2.0\text{ mA}$ ($1:1$ current transformation ratio)
-- **Dielectric Isolation**: $4,000\text{ V AC RMS}$ (1 minute)
-- **Manufacturer Standard Test Condition**: **$R_L = 100.0\ \Omega$**
-  - Rated Phase Error: $\le 20'$ ($0.33^\circ$)
-  - Linearity Error: $\le 0.2\%$ (from $20\%$ to $100\%$ rated current)
-
-#### 2.3.2 100 Ohm (Manufacturer Baseline) vs 300 Ohm Evaluation
-- **Tripling Burden to 300 Ohm**:
-  - The secondary terminal voltage increases to $0.750\text{ V RMS}$ ($1.061\text{ V peak}$).
-  - Magnetizing current triples ($I_m = E_s / Z_m = (I_s R_b) / Z_m$).
-  - Core phase displacement increases from $\le 20'$ to **$> 45'-60'$** ($0.75^\circ - 1.0^\circ$), introducing severe active power errors at low power factors ($\cos \phi \le 0.5$).
-  - Linearity degrades below 100V RMS.
-- **Conclusion**: A $100.0\ \Omega$ burden is the **manufacturer-certified configuration**. If a $300\ \Omega$ burden is retained for dynamic range expansion, it **cannot be declared compliant without empirical multi-point phase calibration**.
-
-#### 2.3.3 Primary Current-Limiting Resistor Calculations & Working Voltage Derating
-Primary Resistance: $R_{\text{pri}} = \mathbf{120.0\text{ k}\Omega \pm 1.0\%}$
-- At $230\text{ V AC RMS}$ Nominal:
-  $$I_{\text{pri}} = \frac{230\text{ V}}{120\text{ k}\Omega} = \mathbf{1.917\text{ mA RMS}}$$
-  $$P_{\text{pri}} = \frac{(230\text{ V})^2}{120,000\ \Omega} = \mathbf{0.441\text{ W}}$$
-- At $300\text{ V AC RMS}$ Maximum Design Grid Over-Voltage:
-  $$I_{\text{pri\_max}} = \frac{300\text{ V}}{120\text{ k}\Omega} = \mathbf{2.500\text{ mA RMS}}$$
-  $$P_{\text{pri\_max}} = \frac{(300\text{ V})^2}{120,000\ \Omega} = \mathbf{0.750\text{ W}}$$
-
-#### 2.3.4 High-Voltage Working Voltage Rating & Component Selection
-- Standard 0.25W / 0.5W metal film resistors have continuous working voltages of only 200V to 350V. Placing a single resistor across 300V continuous violates IEC 61010-1 and risks dielectric flashover under lightning surges.
-- **Mandatory Series Construction**: $R_{\text{pri}}$ must be constructed using **TWO $60.0\text{ k}\Omega$, 2.0W Flameproof Metal Oxide Resistors in series**:
-  - Total Working Voltage: $2 \times 500\text{ V} = \mathbf{1,000\text{ V continuous}}$ ($2,000\text{ V}$ overload rating).
-  - Total Power Rating: $2 \times 2.0\text{ W} = \mathbf{4.0\text{ W}}$.
-  - Power Derating at 300V: $0.750\text{ W} / 4.0\text{ W} = \mathbf{18.75\%}$ (**$> 5.3\times$ power derating safety factor!**).
-  - Approved Part Numbers: TE Connectivity **ROX2SJ60K** (60k, 2W, 500V, flameproof) or Vishay Dale **ROX10060K0FKLB** (60k, 1.2W, 3000V).
-
-#### 2.3.5 Secondary Burden Voltages & Dissipation
-1. **Manufacturer Baseline ($R_{\text{sec}} = 100.0\ \Omega \pm 0.1\%$)**:
-   - At 230V Nominal: $V_{\text{sec\_RMS}} = 191.7\text{ mV RMS}$, $V_{\text{peak}} = \mathbf{271.1\text{ mV peak}}$ ($77.4\%$ headroom to 1.2V FSR).
-   - At 300V Max: $V_{\text{sec\_RMS}} = 250.0\text{ mV RMS}$, $V_{\text{peak}} = \mathbf{353.6\text{ mV peak}}$ ($70.5\%$ headroom to 1.2V FSR).
-   - Max Dissipation at 300V: $P = (2.5\text{ mA})^2 \times 100\ \Omega = \mathbf{0.625\text{ mW}}$.
-   - Part Number: Vishay Dale **PTF56100R00BYRE** (100.0 $\Omega \pm 0.1\%$, 10 ppm, 0.125W).
-2. **Evaluated Alternative ($R_{\text{sec}} = 300.0\ \Omega \pm 0.1\%$)**:
-   - At 230V Nominal: $V_{\text{sec\_RMS}} = 575.0\text{ mV RMS}$, $V_{\text{peak}} = \mathbf{813.2\text{ mV peak}}$ ($32.2\%$ headroom).
-   - At 300V Max: $V_{\text{sec\_RMS}} = 750.0\text{ mV RMS}$, $V_{\text{peak}} = \mathbf{1.061\text{ V peak}}$ ($11.6\%$ headroom).
-   - Max Dissipation at 300V: $P = (2.5\text{ mA})^2 \times 300\ \Omega = \mathbf{1.875\text{ mW}}$.
-   - Part Number: Vishay Dale **PTF56300R00BYRE** (300.0 $\Omega \pm 0.1\%$, 10 ppm, 0.125W).
-
-#### 2.3.6 Voltage Transformer Fault Analysis
-- **Single Primary Resistor Short**: If one 60k resistor shorts, the remaining 60k resistor receives 300V. It dissipates $1.50\text{ W} < 2.0\text{ W}$ rating and survives without catching fire. Secondary current is 5.0 mA, producing $0.707\text{ V peak}$ across $100\ \Omega$ ($< 1.200\text{ V}$ FSR, ADC undamaged).
-- **Secondary Burden Open Circuit**: High inductive flyback voltage is strictly clamped to $\pm 0.70\text{ V}$ by anti-parallel BAV199 steering diodes, completely protecting the ADC.
+### 2.4 Nexperia BAV199 Architecture & Resolution of FSR Contradiction
+To protect against open-circuit CT secondary hazards without clipping normal AC waveforms:
+1. **Nexperia BAV199 Internal Topology**:
+   - Package: SOT-23 / TO-236AB (Rev 8).
+   - Pinout: Pin 1 = Anode Diode 1 ($A_1$), Pin 2 = Cathode Diode 2 ($K_2$), Pin 3 = Center tap ($K_1/A_2$).
+   - Internal Topology: Two diodes connected in **SERIES** inside a single package between Pin 1 and Pin 2.
+2. **Package Count, Pin Connections & Reverse Orientation**:
+   - Because a single BAV199 package conducts only in one forward direction (Pin 1 to Pin 2), bidirectional clamping across differential burden terminals ($AINP, AINM$) **REQUIRES TWO PACKAGES PER CHANNEL**:
+     - **Package A (Forward Clamp)**: Pin 1 $\rightarrow AINP$, Pin 2 $\rightarrow AINM$ (Pin 3 NC).
+     - **Package B (Reverse Clamp)**: Pin 1 $\rightarrow AINM$, Pin 2 $\rightarrow AINP$ (Pin 3 NC).
+   - **Board Package Count**:
+     - 18 Current Channels $\times 2 = \mathbf{36\text{ packages}}$ (72 diodes).
+     - 3 Voltage Channels (if secondary clamped) $\times 2 = \mathbf{6\text{ packages}}$ (12 diodes).
+     - Total Active Channels (21 channels): $\mathbf{42\text{ packages}}$ (84 discrete diodes).
+3. **Guaranteed Clamp Voltage & Temperature Derating**:
+   - Guaranteed Nexperia Datasheet $V_F$ (Rev 8 per single diode):
+     - $V_F \le 0.90\text{ V}$ at $I_F = 1.0\text{ mA}$
+     - $V_F \le 1.00\text{ V}$ at $I_F = 10.0\text{ mA}$
+     - $V_F \le 1.10\text{ V}$ at $I_F = 50.0\text{ mA}$
+   - Series Pair Clamp Voltage:
+     - At $I_F = 10\text{ mA}$ (Fault current): $V_{\text{clamp,max}} = 2 \times 1.00\text{ V} = \mathbf{2.00\text{ V}}$ (guaranteed maximum).
+     - At $I_F = 1\text{ mA}$: $V_{\text{clamp,max}} = 2 \times 0.90\text{ V} = \mathbf{1.80\text{ V}}$.
+     - Nominal Clamp ($+25^\circ\text{C}$): $\approx \pm 1.40\text{ V}$ (conduction knee $\approx 1.10\text{ V}$).
+   - Temperature Sensitivity ($-2.0\text{ mV}/^\circ\text{C}$ per diode $\implies \mathbf{-4.0\text{ mV}/^\circ\text{C}}$ for series pair):
+     - At $+25^\circ\text{C}$: Knee $\approx 1.10\text{ V}$.
+     - At $+55^\circ\text{C}$: Knee $= 1.10\text{ V} - 0.12\text{ V} = \mathbf{0.98\text{ V}}$.
+     - At $+70^\circ\text{C}$: Knee $= 1.10\text{ V} - 0.18\text{ V} = \mathbf{0.92\text{ V}}$.
+4. **Resolution of Contradiction Between $\pm 1.40\text{V}$ Clamp and ADS131M08 $\pm 1.20\text{V}$ FSR**:
+   - **Identified Contradiction**: The Fourth/Fifth-Pass draft claimed that a $\pm 1.40\text{ V}$ clamp "fits inside ADS131M08 $\pm 1.20\text{ V}$ differential FSR". This was mathematically contradictory: $1.40\text{ V} > 1.20\text{ V}$.
+   - **Resolution & Rigorous Boundary Definition**:
+     - **Linear Metrology Span**: $\pm 1.20\text{ V}$ differential FSR (Gain = 1). Input signals must remain $\le \pm 1.20\text{ V}$ to prevent digital code clipping.
+     - **Overvoltage Protection Ceiling**: Dual-series clamp ($\pm 1.40\text{ V}$ nominal, $\le 2.00\text{ V}$ max at 10 mA). The clamp's role is **protective** against open-secondary CT spikes, sitting **ABOVE** the linear measurement FSR ($\pm 1.20\text{ V}$), but **SAFELY BELOW** the silicon damage threshold (ADS131M08 single-ended absolute maximum $-1.60\text{ V}$ to $+3.60\text{ V}$, differential absolute maximum $\sim 5.2\text{ V}$).
+     - **Thermal Defect on Feeders 4 & 5**: At $+70^\circ\text{C}$ enclosure ambient, the knee drops to $0.92\text{ V}$. Feeders 4 & 5 produce $0.8677\text{ V}_{\text{peak}}$ ($+1\%$), leaving only **$52\text{ mV}$ of margin** to the knee! This will induce sub-threshold leakage ($>1\ \mu\text{A}$) and non-linear distortion.
+     - **Required Fix**: Reduce burden resistor on Feeders 4 & 5 from $27\ \Omega$ to $20\ \Omega$ ($V_{\text{peak}} = 0.636\text{ V}$), restoring $284\text{ mV}$ of margin at $+70^\circ\text{C}$.
+5. **Gate B & CT BOM Disposition**:
+   - Approval is **STRICTLY WITHHELD**. **Gate B remains STRICTLY BLOCKED** until a complete, fully tested AFE daughterboard with verified thermal margins and active sub-rail sink regulation is fabricated and bench-tested.
 
 ---
 
-## 3. Verification Test Evidence
+## 3. Analog Front-End (AFE) RMS Fault & Shunt Regulator Failure Analysis
 
-The calculations and circuits were verified via independent C++ test suites compiled under MinGW GCC 6.3.0:
-- `test_task1_zmct103c_metrology.cpp` -> **PASS (100% assertions satisfied)**
-- `test_task2_lcda05_protection.cpp` -> **PASS (100% assertions satisfied)**
-- `test_task3_zmpt101b_metrology.cpp` -> **PASS (100% assertions satisfied)**
+### 3.1 Corrected 50V RMS Fault Peak Calculation
+In the Fourth-Pass report, a $50\text{ V}_{\text{RMS}}$ fault was erroneously calculated as if it were $50\text{ V}_{\text{DC}}$ ($50.0\text{ V}$). The correct physical peak voltage is:
+$$V_{\text{peak}} = V_{\text{RMS}} \times \sqrt{2} = 50.0\text{ V} \times 1.41421356 = \mathbf{70.7107\text{ V}}$$
 
-```text
-EXECUTION COMMAND:
-  g++ -std=c++11 -O2 -o test_task1.exe test_task1_zmct103c_metrology.cpp && .\test_task1.exe
-  g++ -std=c++11 -O2 -o test_task2.exe test_task2_lcda05_protection.cpp && .\test_task2.exe
-  g++ -std=c++11 -O2 -o test_task3.exe test_task3_zmpt101b_metrology.cpp && .\test_task3.exe
+### 3.2 Manufacturer Datasheet Diode Forward Voltage (Nexperia BAV199 Rev 8)
+An assumed fixed forward voltage of $0.65\text{ V}$ is invalid under fault currents. Per the official Nexperia BAV199 datasheet:
+- $V_F \le 0.90\text{ V}$ at $I_F = 1.0\text{ mA}$
+- $V_F \le 1.00\text{ V}$ at $I_F = 10.0\text{ mA}$
+- $V_F \le 1.05\text{ V} - 1.10\text{ V}$ at $I_F = 15.0\text{ mA}$
 
-ACTUAL OUTPUT HIGHLIGHTS:
-  [TEST TASK 1] ZMCT103C 1000:1 Verified. 50 Ohm Burden: 35.36mV (0.5A), 70.71mV (1A), 353.55mV (5A), 707.11mV (10A).
-                140 Ohm Burden rejected: 1.980V peak clips ADS131M08 by +65%.
-  [TEST TASK 2] LCDA05 VRWM=5V, VBR=6V, VC=9.8V@1A. Rejection confirmed.
-                Remediated BAV199 (+/-0.6V clamp) + 1.0k series + 4.7nF RC validated.
-  [TEST TASK 3] ZMPT101B 120k primary: 0.750W @ 300V. TE ROX2SJ60K 2x in series (1000V, 4W, 5.3x derating).
-                100 Ohm burden: 271mV @ 230V, 354mV @ 300V (70.5% headroom).
-```
+Steering overvoltage to a $+2.50\text{ V}$ sub-rail yields:
+$$V_{\text{pin,pos}} = 2.50\text{ V} + 1.05\text{ V} = \mathbf{+3.55\text{ V}} \quad (\text{Abs Max Limit: } +3.60\text{ V; Remaining Margin: ONLY } 50\text{ mV!})$$
+$$V_{\text{pin,neg}} = 0.00\text{ V} - 1.05\text{ V} = \mathbf{-1.05\text{ V}} \quad (\text{Abs Min Limit: } -1.60\text{ V})$$
 
-### 3.1 Remaining Blockers & Gate Dispositions
-1. **Gate B (Analog Front-End Protection)**: **BLOCKED**. Physical daughterboard with BAV199 clamps, 1k series resistors, and 4.7nF C0G filters must be fabricated and bench-tested under 50V cross-phase and surge generator conditions.
-2. **Gate I (Traceable Metrology Calibration)**: **NOT TESTED**. Calibration constants in NVS must be calibrated against a Fluke 6100A Electrical Power Standard.
-3. **Gate N (Live 415V Utility Grid Switching)**: **BLOCKED**. Strict prohibition on live mains testing remains enforced.
+### 3.3 Series Resistor Fault Currents ($R_{\text{series}} = 4.70\text{ k}\Omega$)
+- **Positive Clamp Peak Current**:
+  $$I_{\text{pos,peak}} = \frac{70.71\text{ V} - 3.55\text{ V}}{4700\ \Omega} = \mathbf{14.289\text{ mA}} \quad (\mathbf{+42.9\% \text{ over } \pm 10.0\text{ mA continuous abs max!}})$$
+- **Negative Clamp Peak Current**:
+  $$I_{\text{neg,peak}} = \frac{70.71\text{ V} - 1.05\text{ V}}{4700\ \Omega} = \mathbf{14.821\text{ mA}} \quad (\mathbf{+48.2\% \text{ over } \pm 10.0\text{ mA continuous abs max!}})$$
+- **Differential Fault ($100\text{ V}_{\text{peak}}$ across $9.40\text{ k}\Omega$)**:
+  $$I_{\text{diff,peak}} = \frac{100.0\text{ V} - 4.60\text{ V}}{9400\ \Omega} = \mathbf{10.149\text{ mA}} \quad (\mathbf{Over } 10.0\text{ mA limit!})$$
+
+### 3.4 LM4040 2.5V Rail Current Absorption & Multi-Channel Failure
+The Fourth-Pass proposed absorbing fault currents with an LM4040-2.5 precision micropower shunt reference. Per the Texas Instruments LM4040 datasheet:
+- Maximum Continuous Operating Reverse Current: **$15.0\text{ mA}$**
+- Absolute Maximum Reverse Current: **$20.0\text{ mA}$**
+
+Evaluating simultaneous fault injection from multiple channels:
+
+| Fault Scenario | Channels Faulting | Injected Current ($I_{\text{inj}}$) | LM4040 Sink Capacity Used | LM4040 Operating Status | Sub-Rail Voltage ($V_{\text{sub}}$) | Pin Voltage ($V_{\text{pin}}$) | Silicon Hazard |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Single Channel | 1 | $14.29\text{ mA}$ | **$95.3\%$** | Marginal Regulation | $+2.50\text{ V}$ | $+3.55\text{ V}$ | Zero Margin |
+| Two Channels | 2 | $28.58\text{ mA}$ | **$190.5\%$** | **Thermal Overload / Lost Reg**| $> +3.00\text{ V}$ | $> +4.05\text{ V}$ | **SILICON BLOWOUT** |
+| Single Feeder | 3 | $42.87\text{ mA}$ | **$285.8\%$** | **Catastrophic Failure** | $> +3.50\text{ V}$ | $> +4.55\text{ V}$ | **SILICON BLOWOUT** |
+| All Feeder R-Phases| 6 | $85.73\text{ mA}$ | **$571.5\%$** | **Catastrophic Failure** | $> +4.00\text{ V}$ | $> +5.05\text{ V}$ | **SILICON BLOWOUT** |
+| All Active Channels| 21 | $300.0\text{ mA}$ | **$2000\%$** | **Instant Destruction** | Shoots to Fault V | Shoots to Fault V | **TOTAL DESTRUCTION** |
+
+### 3.5 AVDD Unpowered Fault Hazard
+When the node is powered off ($\text{AVDD} = 0.0\text{ V}$):
+- The LM4040 is unpowered and cannot shunt current.
+- Texas Instruments ADS131M08 Table 7.1 specifies an absolute maximum input voltage of **$+0.30\text{ V}$** when unpowered.
+- Injected current flows through the internal ESD diodes into the unpowered $+3.3\text{ V}$ rail, clamping at $\sim +0.60\text{ V}$. This violates the $+0.30\text{ V}$ unpowered absolute maximum rating, causing permanent gate-oxide breakdown.
+
+### 3.6 Gate B Authoritative Disposition
+> [!CAUTION]
+> **GATE B REMAINS STRICTLY BLOCKED**:
+> Designing at the ADS131M08 absolute maximum continuous input current ($\pm 10.0\text{ mA}$) as an operational target is an unacceptable violation of electrical engineering safety standards. Sinking fault currents into an unbuffered LM4040 reference destroys regulation upon multi-channel faults. Gate B cannot pass until an active high-current shunt sink (TL431 + external BJT bypass transistor or discrete TVS array) is fabricated and surge-tested on physical hardware.
+
+---
+
+## 4. ZMPT101B Voltage Transformer Front End & Surge Withstand Refutation
+
+### 4.1 Primary Resistor Sizing & Operational Analysis ({\\text{pri}} = 150.0\\text{ k}\\Omega$, {\\text{sec}} = 100.0\\ \\Omega$)
+
+**Exact Manufacturer Variant Identification**:
+- **Manufacturer**: Qingxian Zeming Langxi Electronic Devices Co., Ltd.
+- **Part Number**: ZMPT101B (Raw 4-pin PCB through-hole micro voltage transformer).
+- **Prohibited Modules**: Generic blue active breakout modules containing LM358 operational amplifiers and onboard trim potentiometers are **STRICTLY PROHIBITED** due to severe temperature drift, phase noise, and poor linearity.
+- **Rated Input Current**: .0\\text{ mA RMS}$ (1:1 turns ratio, 1000:1000 turns)
+- **Sampling Resistor**: .0\\ \\Omega$ (0.1% metal film, 25 ppm/°C)
+- **Published Linearity**: $\\le 0.2\\%$ (tested at .0\\text{ mA}$)
+- **Published Phase Error**: $\\le 20'$ (tested strictly at .0\\text{ mA}$, \\ \\Omega$ burden)
+- **Dielectric Strength**: \\text{ VAC} / 1\\text{ min}$ (galvanic isolation)
+- **Max Continuous Thermal Current**: .0\\text{ mA RMS}$
+
+Performance across utility grid operating voltages:
+
+| Operating Condition | Utility Voltage | Primary Current ({\\text{pri}}$) | Secondary Current ({\\text{sec}}$) | Burden Voltage ({\\text{sec}}$) | ADC Differential Peak ({\\text{pk}}$) | Total Power Dissipation | Power per Resistor (\\times 50\\text{k}$) | $\\%$ of Rated Current | Accuracy Status |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Nominal Grid** | \\text{ V RMS}$ | .533\\text{ mA}$ | .533\\text{ mA}$ | .3\\text{ mV RMS}$ | .8\\text{ mV}_{\\text{pk}}$ | .353\\text{ W}$ | .118\\text{ W}$ (.0\\times$ derated) | .7\\%$ | Unverified (Bench Cal Pending) |
+| **High Grid Line** | \\text{ V RMS}$ | .000\\text{ mA}$ | .000\\text{ mA}$ | .0\\text{ mV RMS}$ | .8\\text{ mV}_{\\text{pk}}$ | .600\\text{ W}$ | .200\\text{ W}$ (.0\\times$ derated) | **.0\\%$** | Exact Datasheet Calibration Point |
+| **Phase-to-Phase Fault**| \\text{ V RMS}$ | .767\\text{ mA}$ | .767\\text{ mA}$ | .7\\text{ mV RMS}$ | .3\\text{ mV}_{\\text{pk}}$ | .148\\text{ W}$ | .383\\text{ W}$ (.2\\times$ derated) | **.3\\%$** | **UNVERIFIED BY MANUFACTURER** |
+
+### 4.2 Refutation of Class 1.0 / Phase Claims at 415V
+At 415V RMS across \\text{ k}\\Omega$, the transformer operates at **.3\\%$ of its manufacturer rated current**.
+- The manufacturer datasheet explicitly bounds its phase error guarantee ($\\le 20'$) to the .0\\text{ mA}$ test point.
+- Above 2.0 mA, magnetic core permeability drops, non-linear excitation current increases, and secondary phase angle shifts.
+- While the transformer is thermally safe (continuous limit is 10 mA), **claiming Class 1.0 or phase accuracy at 415V without manufacturer test evidence and multi-point bench calibration is physically unfounded**.
+- Furthermore, **NO Class 1.0 metrology claim can be made for any part of the system** prior to full end-to-end multi-point calibration on a physical test bench!
+
+### 4.3 Refutation of Summed Resistor Surge Ratings
+The Fourth-Pass report claimed that three 1000V overload resistors in series automatically provide a \\text{ V}$ surge withstand. This claim violates electrical physics:
+1. **Resistive vs Capacitive Voltage Division**: Under steady-state 50 Hz, voltage divides uniformly (.3\\%$ per resistor). However, under fast IEC 61000-4-5 .2/50\\ \\mu\\text{s}$ transients (spectral components up to $\\sim 1\\text{ MHz}$), parasitic stray capacitance to the PCB ground plane ( \\approx 1.0\\text{ pF}$) and parallel pad capacitance ( \\approx 0.2\\text{ pF}$) dominate.
+2. **Non-Uniform Voltage Ladder**: The series chain acts as a distributed RC transmission line ladder. High-frequency displacement currents are shunted to ground, causing the first resistor (closest to the mains terminal) to absorb **\\% - 75\\%$ of the total surge impulse step**!
+   V_{\\text{res1}} \\approx 0.65 \\times 2500\\text{ V} = \\mathbf{1,625\\text{ V}}
+   This **EXCEEDS** the individual \\text{ V}$ surge overload rating of the ROX2S resistor!
+3. **Creepage and Clearance**: Spanning $>30\\text{ mm}$ with .5\\text{ mm} \\times 25\\text{ mm}$ PCB isolation slots satisfies IEC 61010-1 Cat III creepage (.0\\text{ mm}$) and clearance (.0\\text{ mm}$), but does not equalize dynamic capacitive impulse distribution.
+4. **Physical Surge Status**: Mathematical summation is rejected; **physical surge generator validation remains strictly PENDING**.
+
+---
+
+## 5. Comprehensive 21-Channel Metrology Calibration Protocol
+
+### 5.1 Clear Separation of Metrology Test Instruments
+To avoid confusion between source generation and measurement verification, the calibration facility MUST strictly separate equipment roles:
+1. **Precision AC Signal Source (Generation)**: **Fluke 6100A / 6105A Electrical Power Standard** (or Chroma 61500 series).
+   - Generates stable, low-distortion (<0.05% THD) sinusoidal AC test voltages (0–300 VAC RMS) and currents (0–50 A RMS) with programmable phase displacement.
+2. **Reference Metrology Instrument (Verification)**: **Yokogawa WT310E Precision Digital Power Meter** (Class 0.1 accuracy).
+   - Independently senses and measures the actual True-RMS voltage, current, active power, and phase angle delivered to the Device Under Test (DUT).
+
+### 5.2 Canonical 21-Channel Mapping
+- **Channels 01 to 03**: Common Bus Voltage (Phases R, Y, B) via ZMPT101B $\\rightarrow$ ADC #3 (Pins AIN3, AIN4, AIN5).
+  - *Mains Isolation Rule*: 230VAC connects exclusively to the transformer primary resistor ladder; direct 230VAC connection to ADC input pins is strictly prohibited and physically isolated by .0\\text{ kV}$ transformer barrier.
+- **Channels 04 to 21**: Feeder Currents (Feeders 1 to 6, Phases R, Y, B) via CTs:
+  - Ch 04–06: Feeder 1 (ZMCT103C, 8A/10A) $\\rightarrow$ ADC #1 (AIN0–AIN2)
+  - Ch 07–09: Feeder 2 (SCT-013-000, 28A) $\\rightarrow$ ADC #1 (AIN3–AIN5)
+  - Ch 10–12: Feeder 3 (SCT-013-000, 28A) $\\rightarrow$ ADC #1 (AIN6–AIN7), ADC #2 (AIN0)
+  - Ch 13–15: Feeder 4 (SCT-013-000, 45A) $\\rightarrow$ ADC #2 (AIN1–AIN3)
+  - Ch 16–18: Feeder 5 (SCT-013-000, 45A) $\\rightarrow$ ADC #2 (AIN4–AIN6)
+  - Ch 19–21: Feeder 6 (SCT-013-000, 30A) $\\rightarrow$ ADC #3 (AIN0–AIN2)
+
+### 5.3 Multi-Point Calibration Protocol
+
+#### Phase 1: Zero-Offset Nulling (All Channels)
+1. De-energize all AC sources ( = 0.0\\text{ V}$,  = 0.0\\text{ A}$).
+2. Sample 1,280 points over 20 AC cycles (4 kSPS) across all channels.
+3. Compute and store DC offset {\\text{offset}} = \\frac{1}{N} \\sum V_{\\text{raw}}(n)$ in NVS. Confirm offset noise $\\le \\pm 50\\ \\mu\\text{V}$.
+
+#### Phase 2: Multi-Point Voltage Gain & Linearity Calibration (Channels 01–03)
+From the Fluke 6100A source, inject test voltages verified on Yokogawa WT310E:
+- **Point 1 (80% Nominal)**: .0\\text{ VAC RMS @ 50.00 Hz}$
+- **Point 2 (100% Nominal)**: .0\\text{ VAC RMS @ 50.00 Hz}$ (Primary Gain Reference)
+- **Point 3 (113% High Line)**: .0\\text{ VAC RMS @ 50.00 Hz}$
+- **Point 4 (130% Maximum Operating)**: .0\\text{ VAC RMS @ 50.00 Hz}$
+Compute multi-point gain coefficients and verify linearity error $\\le \\pm 0.5\\%$.
+
+#### Phase 3: Multi-Point Current Gain & Linearity Calibration (Channels 04–21)
+Inject sinusoidal currents across the dynamic range using the Fluke 6100A, verified on Yokogawa WT310E:
+- **Feeder 1 (Ch 04–06, ZMCT103C, 8A Nom / 10A Max)**:
+  .40\\text{ A}$ (5%), .80\\text{ A}$ (10%), .60\\text{ A}$ (20%), .00\\text{ A}$ (50%), .00\\text{ A}$ (100%), .00\\text{ A}$ (125%).
+- **Feeders 2 & 3 (Ch 07–12, SCT-013-000, 28A Max)**:
+  .40\\text{ A}$ (5%), .80\\text{ A}$ (10%), .60\\text{ A}$ (20%), .00\\text{ A}$ (50%), .00\\text{ A}$ (100%).
+- **Feeders 4 & 5 (Ch 13–18, SCT-013-000, 45A Max)**:
+  .25\\text{ A}$ (5%), .50\\text{ A}$ (10%), .00\\text{ A}$ (20%), .50\\text{ A}$ (50%), .00\\text{ A}$ (100%).
+- **Feeder 6 (Ch 19–21, SCT-013-000, 30A Max)**:
+  .50\\text{ A}$ (5%), .00\\text{ A}$ (10%), .00\\text{ A}$ (20%), .00\\text{ A}$ (50%), .00\\text{ A}$ (100%).
+
+#### Phase 4: Phase Displacement Angle Calibration
+Measure and calibrate transformer phase displacement against Yokogawa WT310E:
+- Condition 1: Unity Power Factor ($\\cos\\phi = 1.000, \\theta = 0.00^\\circ$)
+- Condition 2: Inductive Load ($\\cos\\phi = 0.800\\text{ lagging}, \\theta = +36.87^\\circ$)
+- Condition 3: Low Power Factor Inductive ($\\cos\\phi = 0.500\\text{ lagging}, \\theta = +60.00^\\circ$)
+Firmware applies FIR / fractional-delay sample phase compensation to ensure accurate active, reactive, and apparent power metrology.
+
+---
+
+## 6. Summary of Metrology Gate Dispositions
+
+1. **Gate B (AFE Input Protection)**: **STRICTLY BLOCKED** (50Vrms peak current reaches 14.29 mA, exceeding 10 mA abs max; LM4040 fails under 2+ simultaneous channels; dual-series clamp requires reduced burden resistors to guarantee thermal margin).
+2. **Gate H (Metrology Sizing & Burden)**: **PARTIAL / BLOCKED** (CT burden clamp thermal headroom defect on Feeders 4 & 5; ZMPT101B operated at 138.3% rated current at 415V without manufacturer accuracy specification).
+3. **Gate I (Physical Metrology Calibration)**: **NOT TESTED** (Class 1.0 unclaimable before physical multi-point calibration on Fluke 6100A / Yokogawa WT310E bench).
+4. **Gate N (Live 415V Grid Safety Interlock)**: **STRICTLY BLOCKED**.

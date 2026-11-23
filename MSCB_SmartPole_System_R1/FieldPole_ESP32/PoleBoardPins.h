@@ -31,7 +31,11 @@
 #ifndef POLE_BOARD_PINS_H
 #define POLE_BOARD_PINS_H
 
-#include <Arduino.h>
+#ifdef ARDUINO
+  #include <Arduino.h>
+#else
+  #include "../Tests/ArduinoMock.h"
+#endif
 
 // =====================================================================
 //  PRIMARY SPI BUS (VSPI NATIVE PINS)
@@ -133,16 +137,40 @@ static const uint8_t POLE_FEEDER_RELAY_PINS[6] = {
 #define POLE_MCB_AUX_ENABLED    1   // Restored via MCP23S17 daughterboard
 #define POLE_CONTACTOR_AUX_ENABLED 1
 
-// Helper functions for SPI Decoder Selection
+// Helper functions for SPI Decoder Selection (Glitch-Free Sequence)
+// Sequence per hardware audit:
+// 1. Disable decoder (/1E = HIGH)
+// 2. Set address lines A0, A1
+// 3. Settle logic propagation delay (t_pd ~18 ns)
+// 4. Enable decoder (/1E = LOW)
+// 5. [SPI Transfer executed]
+// 6. Disable decoder (/1E = HIGH)
 static inline void poleSelectSpiDevice(uint8_t dev) {
   if (dev == POLE_SPI_DEV_DESELECT) {
     digitalWrite(POLE_DECODER_ENABLE_PIN, HIGH);
   } else {
+    // Step 1: Ensure decoder is disabled first to prevent transient decode glitches
+    digitalWrite(POLE_DECODER_ENABLE_PIN, HIGH);
+    // Step 2: Set address lines
     digitalWrite(POLE_DECODER_A0_PIN, (dev & 0x01) ? HIGH : LOW);
     digitalWrite(POLE_DECODER_A1_PIN, (dev & 0x02) ? HIGH : LOW);
+    // Step 3: Wait for stable logic settling
+#if defined(ARDUINO)
+    delayMicroseconds(1);
+#endif
+    // Step 4: Enable decoder to activate target peripheral CS
     digitalWrite(POLE_DECODER_ENABLE_PIN, LOW);
   }
 }
+
+// HARDWARE TERMINATION & BOOT PULL-UP DIRECTIVES:
+// 1. External 10k pull-up resistor required on GPIO 13 (/1E) to 3.3V.
+//    Guarantees all CS lines remain inactive (HIGH) during ESP32 boot, reset, and deep sleep.
+// 2. 74HC139 Unused Unit 2 Pin Termination:
+//    - Pin 15 (/2E) tied to VCC (3.3V) -> Disables Unit 2.
+//    - Pin 14 (2A0) tied to GND.
+//    - Pin 13 (2A1) tied to GND.
+//    - Outputs (/2Y0../2Y3) left unconnected.
 
 // =====================================================================
 //  COMPILE-TIME HARDWARE CONFLICT AUDIT
@@ -162,6 +190,14 @@ static inline void poleSelectSpiDevice(uint8_t dev) {
   static_assert(!IS_FLASH_PIN(POLE_RELAY_F3_PIN),       "POLE_RELAY_F3_PIN in forbidden Flash range 6-11!");
   static_assert(!IS_FLASH_PIN(POLE_RELAY_F4_PIN),       "POLE_RELAY_F4_PIN in forbidden Flash range 6-11!");
   static_assert(!IS_FLASH_PIN(POLE_RELAY_F5_PIN),       "POLE_RELAY_F5_PIN in forbidden Flash range 6-11!");
+
+  // GPIO 13 Conflict Elimination: Relay vs Decoder Enable
+  static_assert(POLE_RELAY_F0_PIN != 13, "Feeder 1 cannot be on GPIO 13 (Decoder Enable)!");
+  static_assert(POLE_RELAY_F1_PIN != 13, "Feeder 2 cannot be on GPIO 13 (Decoder Enable)!");
+  static_assert(POLE_RELAY_F2_PIN != 13, "Feeder 3 cannot be on GPIO 13 (Decoder Enable)!");
+  static_assert(POLE_RELAY_F3_PIN != 13, "Feeder 4 cannot be on GPIO 13 (Decoder Enable)!");
+  static_assert(POLE_RELAY_F4_PIN != 13, "Feeder 5 cannot be on GPIO 13 (Decoder Enable)!");
+  static_assert(POLE_RELAY_F5_PIN != 13, "Feeder 6 cannot be on GPIO 13 (Decoder Enable)!");
 
   // Strapping pin elimination verification
   static_assert(POLE_DECODER_ENABLE_PIN != 12, "GPIO 12 flash voltage hazard!");

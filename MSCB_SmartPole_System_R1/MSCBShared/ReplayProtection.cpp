@@ -11,7 +11,7 @@ ReplayProtection replayProtector;
 
 ReplayProtection::ReplayProtection() :
   currentLocalSeq(0), activeCeiling(0), activeKeyEpoch(1),
-  nvsBank0(NULL), nvsBank1(NULL), transmitterStorageReady(false) {
+  nvsBank0(NULL), nvsBank1(NULL), transmitterStorageReady(false), reprovisionRequired(false) {
   reset();
 }
 
@@ -25,6 +25,7 @@ void ReplayProtection::reset() {
   activeCeiling = 0;
   activeKeyEpoch = 1;
   transmitterStorageReady = false;
+  reprovisionRequired = false;
 }
 
 uint32_t ReplayProtection::calculateCrc32(const uint8_t *data, size_t len) const {
@@ -38,6 +39,49 @@ uint32_t ReplayProtection::calculateCrc32(const uint8_t *data, size_t len) const
   return ~crc;
 }
 
+bool ReplayProtection::commitCeilingToNvs(uint32_t newCeiling) {
+  if (!nvsBank0 || !nvsBank1) return false;
+  size_t payloadLen = sizeof(PersistentNonceRecord) - sizeof(uint32_t);
+
+  uint32_t currentGen = 0;
+  if (nvsBank0->magic == 0x4E4F4E43 && nvsBank1->magic == 0x4E4F4E43) {
+    currentGen = (nvsBank0->generation > nvsBank1->generation) ?
+                  nvsBank0->generation : nvsBank1->generation;
+  }
+
+  // Phase 1: Write target ceiling to Bank 0 in PREPARED state
+  PersistentNonceRecord prepRec;
+  prepRec.magic = 0x4E4F4E43;
+  prepRec.generation = currentGen + 1;
+  prepRec.persistentCeiling = newCeiling;
+  prepRec.keyEpoch = activeKeyEpoch;
+  prepRec.commitState = NONCE_STATE_PREPARED;
+  prepRec.crc32 = calculateCrc32((const uint8_t*)&prepRec, payloadLen);
+  *nvsBank0 = prepRec;
+
+  // Phase 2: Durably commit target ceiling to Bank 1 in COMMITTED state
+  PersistentNonceRecord commRec1;
+  commRec1.magic = 0x4E4F4E43;
+  commRec1.generation = currentGen + 2;
+  commRec1.persistentCeiling = newCeiling;
+  commRec1.keyEpoch = activeKeyEpoch;
+  commRec1.commitState = NONCE_STATE_COMMITTED;
+  commRec1.crc32 = calculateCrc32((const uint8_t*)&commRec1, payloadLen);
+  *nvsBank1 = commRec1;
+
+  // Phase 3: Durably finalize commit in Bank 0 in COMMITTED state
+  PersistentNonceRecord commRec0;
+  commRec0.magic = 0x4E4F4E43;
+  commRec0.generation = currentGen + 3;
+  commRec0.persistentCeiling = newCeiling;
+  commRec0.keyEpoch = activeKeyEpoch;
+  commRec0.commitState = NONCE_STATE_COMMITTED;
+  commRec0.crc32 = calculateCrc32((const uint8_t*)&commRec0, payloadLen);
+  *nvsBank0 = commRec0;
+
+  return true;
+}
+
 bool ReplayProtection::initTransmitterStorage(PersistentNonceRecord *flashBank0, PersistentNonceRecord *flashBank1) {
   if (!flashBank0 || !flashBank1) return false;
   nvsBank0 = flashBank0;
@@ -45,7 +89,6 @@ bool ReplayProtection::initTransmitterStorage(PersistentNonceRecord *flashBank0,
 
   bool bank0Valid = false;
   bool bank1Valid = false;
-
   size_t payloadLen = sizeof(PersistentNonceRecord) - sizeof(uint32_t);
 
   if (nvsBank0->magic == 0x4E4F4E43 &&
@@ -58,92 +101,136 @@ bool ReplayProtection::initTransmitterStorage(PersistentNonceRecord *flashBank0,
     bank1Valid = true;
   }
 
-  uint32_t highestCeiling = 0;
-  uint32_t highestGen = 0;
-  uint32_t activeEpoch = 1;
-
-  if (bank0Valid && bank1Valid) {
-    if (nvsBank0->generation >= nvsBank1->generation) {
-      highestCeiling = nvsBank0->persistentCeiling;
-      highestGen = nvsBank0->generation;
-      activeEpoch = nvsBank0->keyEpoch;
-    } else {
-      highestCeiling = nvsBank1->persistentCeiling;
-      highestGen = nvsBank1->generation;
-      activeEpoch = nvsBank1->keyEpoch;
-    }
-  } else if (bank0Valid) {
-    highestCeiling = nvsBank0->persistentCeiling;
-    highestGen = nvsBank0->generation;
-    activeEpoch = nvsBank0->keyEpoch;
-  } else if (bank1Valid) {
-    highestCeiling = nvsBank1->persistentCeiling;
-    highestGen = nvsBank1->generation;
-    activeEpoch = nvsBank1->keyEpoch;
-  } else {
-    // Both invalid / fresh blank storage
-    highestCeiling = 0;
-    highestGen = 0;
-    activeEpoch = 1;
+  // STRICT FAIL-CLOSED RULE:
+  // If EITHER bank is corrupt, missing, or has invalid CRC:
+  // We CANNOT determine whether nonces from a newer ceiling were already issued!
+  // Falling back to a single intact older bank could silently roll back counters.
+  // Therefore: Fail Closed immediately!
+  if (!bank0Valid || !bank1Valid) {
+    transmitterStorageReady = false;
+    reprovisionRequired = true;
+    return false;
   }
 
-  // Pre-allocate next lease block
-  activeCeiling = highestCeiling + NVS_COUNTER_BLOCK_SIZE;
-  activeKeyEpoch = activeEpoch;
-  currentLocalSeq = highestCeiling; // Starts from last ceiling
+  // Both records have valid CRC. Now verify dual durable commit status:
+  // Both records MUST have commitState == NONCE_STATE_COMMITTED,
+  // matching persistentCeiling, and matching keyEpoch.
+  if (nvsBank0->commitState != NONCE_STATE_COMMITTED ||
+      nvsBank1->commitState != NONCE_STATE_COMMITTED ||
+      nvsBank0->persistentCeiling != nvsBank1->persistentCeiling ||
+      nvsBank0->keyEpoch != nvsBank1->keyEpoch) {
+    // Interrupted commit or ceiling mismatch: Latest ceiling is uncertain!
+    // STRICT FAIL CLOSED!
+    transmitterStorageReady = false;
+    reprovisionRequired = true;
+    return false;
+  }
 
-  // Write new lease to the alternate bank
-  PersistentNonceRecord nextRec;
-  nextRec.magic = 0x4E4F4E43;
-  nextRec.generation = highestGen + 1;
-  nextRec.persistentCeiling = activeCeiling;
-  nextRec.keyEpoch = activeKeyEpoch;
-  nextRec.crc32 = calculateCrc32((const uint8_t*)&nextRec, payloadLen);
+  uint32_t confirmedCeiling = nvsBank0->persistentCeiling;
+  activeKeyEpoch = nvsBank0->keyEpoch;
 
-  if (highestGen % 2 == 0) {
-    *nvsBank0 = nextRec;
-  } else {
-    *nvsBank1 = nextRec;
+  // Advance to next block
+  activeCeiling = confirmedCeiling + NVS_COUNTER_BLOCK_SIZE;
+  currentLocalSeq = confirmedCeiling;
+
+  // Commit new leased ceiling to BOTH banks before issuing any sequence numbers!
+  if (!commitCeilingToNvs(activeCeiling)) {
+    transmitterStorageReady = false;
+    reprovisionRequired = true;
+    return false;
   }
 
   transmitterStorageReady = true;
+  reprovisionRequired = false;
   return true;
 }
 
-bool ReplayProtection::commitCeilingToNvs(uint32_t newCeiling) {
-  if (!nvsBank0 || !nvsBank1) return false;
+bool ReplayProtection::reprovisionStorage(uint32_t newKeyEpoch, PersistentNonceRecord *flashBank0, PersistentNonceRecord *flashBank1) {
+  if (!flashBank0 || !flashBank1) return false;
+  nvsBank0 = flashBank0;
+  nvsBank1 = flashBank1;
+
+  activeKeyEpoch = newKeyEpoch;
+  activeCeiling = NVS_COUNTER_BLOCK_SIZE;
+  currentLocalSeq = 0;
+
   size_t payloadLen = sizeof(PersistentNonceRecord) - sizeof(uint32_t);
 
-  uint32_t currentGen = (nvsBank0->generation > nvsBank1->generation) ?
-                         nvsBank0->generation : nvsBank1->generation;
+  // Phase 1: Bank 0 PREPARED
+  PersistentNonceRecord prepRec;
+  prepRec.magic = 0x4E4F4E43;
+  prepRec.generation = 1;
+  prepRec.persistentCeiling = activeCeiling;
+  prepRec.keyEpoch = activeKeyEpoch;
+  prepRec.commitState = NONCE_STATE_PREPARED;
+  prepRec.crc32 = calculateCrc32((const uint8_t*)&prepRec, payloadLen);
+  *nvsBank0 = prepRec;
 
-  PersistentNonceRecord nextRec;
-  nextRec.magic = 0x4E4F4E43;
-  nextRec.generation = currentGen + 1;
-  nextRec.persistentCeiling = newCeiling;
-  nextRec.keyEpoch = activeKeyEpoch;
-  nextRec.crc32 = calculateCrc32((const uint8_t*)&nextRec, payloadLen);
+  // Phase 2: Bank 1 COMMITTED
+  PersistentNonceRecord commRec1;
+  commRec1.magic = 0x4E4F4E43;
+  commRec1.generation = 2;
+  commRec1.persistentCeiling = activeCeiling;
+  commRec1.keyEpoch = activeKeyEpoch;
+  commRec1.commitState = NONCE_STATE_COMMITTED;
+  commRec1.crc32 = calculateCrc32((const uint8_t*)&commRec1, payloadLen);
+  *nvsBank1 = commRec1;
 
-  if (nextRec.generation % 2 == 0) {
-    *nvsBank0 = nextRec;
-  } else {
-    *nvsBank1 = nextRec;
-  }
+  // Phase 3: Bank 0 COMMITTED
+  PersistentNonceRecord commRec0;
+  commRec0.magic = 0x4E4F4E43;
+  commRec0.generation = 3;
+  commRec0.persistentCeiling = activeCeiling;
+  commRec0.keyEpoch = activeKeyEpoch;
+  commRec0.commitState = NONCE_STATE_COMMITTED;
+  commRec0.crc32 = calculateCrc32((const uint8_t*)&commRec0, payloadLen);
+  *nvsBank0 = commRec0;
+
+  transmitterStorageReady = true;
+  reprovisionRequired = false;
   return true;
 }
 
 uint32_t ReplayProtection::getNextMonotonicSeq() {
-  if (!transmitterStorageReady) {
-    return currentLocalSeq++;
+  if (!transmitterStorageReady || reprovisionRequired) {
+    return 0; // Refuses to generate nonces when storage cannot guarantee uniqueness!
+  }
+
+  // Counter overflow protection:
+  // If sequence number reaches saturation boundary, FAIL CLOSED immediately.
+  // Never wrap around or reuse sequence numbers under the same key/epoch!
+  if (currentLocalSeq >= 0xFFFFFFFFUL - NVS_COUNTER_BLOCK_SIZE) {
+    transmitterStorageReady = false;
+    reprovisionRequired = true;
+    return 0;
   }
 
   // If we have exhausted the current leased ceiling, pre-commit next block
   if (currentLocalSeq >= activeCeiling) {
+    if (activeCeiling > 0xFFFFFFFFUL - NVS_COUNTER_BLOCK_SIZE) {
+      transmitterStorageReady = false;
+      reprovisionRequired = true;
+      return 0;
+    }
     activeCeiling += NVS_COUNTER_BLOCK_SIZE;
-    commitCeilingToNvs(activeCeiling);
+    if (!commitCeilingToNvs(activeCeiling)) {
+      transmitterStorageReady = false;
+      reprovisionRequired = true;
+      return 0;
+    }
   }
 
   return currentLocalSeq++;
+}
+
+void ReplayProtection::constructGcmNonce96(uint16_t senderNodeId, uint16_t keyEpoch, uint64_t monotonicSeq, uint8_t outNonce[12]) {
+  outNonce[0] = (uint8_t)(senderNodeId >> 8);
+  outNonce[1] = (uint8_t)(senderNodeId & 0xFF);
+  outNonce[2] = (uint8_t)(keyEpoch >> 8);
+  outNonce[3] = (uint8_t)(keyEpoch & 0xFF);
+  for (int i = 0; i < 8; ++i) {
+    outNonce[4 + i] = (uint8_t)((monotonicSeq >> (56 - i * 8)) & 0xFF);
+  }
 }
 
 void ReplayProtection::simulatePowerLoss() {

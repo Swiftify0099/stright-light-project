@@ -16,9 +16,21 @@
  *    - Session transitions require explicit authenticated handshake / JOIN protocol.
  *    - Sliding window (64-bit mask) tracks sequence order strictly within an authenticated session.
  * 
- * 3. AES-GCM NONCE SAFETY:
- *    - Nonces are constructed as [NodeID (2B) | PersistentCeiling (4B) | IntraBlockSeq (4B) | Reserved (2B)].
+ * 3. AES-GCM NONCE SAFETY & ROLLBACK BOUNDARY:
+ *    - Nonces are constructed as [NodeID (2B) | KeyEpoch (2B) | MonotonicCounter (8B)].
  *    - Guarantees zero nonce reuse under the same cryptographic key.
+ *    - CRITICAL SECURITY PROOF (SNAPSHOT RESTORE BOUNDARY):
+ *      Restoring both NVS banks, key epoch, and key from an old SPI flash snapshot
+ *      CANNOT be detected by local microcontroller storage alone, because all local
+ *      fields (magic, CRC, commit states, ceilings) appear perfectly valid and consistent.
+ *      Therefore, local storage alone CANNOT prevent nonce reuse upon flash restore.
+ *      To prevent catastrophic nonce reuse, the system mandates:
+ *      (a) External Monotonic Authority: The receiver (Gateway) anti-replay sliding window
+ *          tracks max_seq and strictly rejects rolled-back sequences (REPLAY_ERR_TOO_OLD);
+ *          OR hardware-enforced one-way eFuse counters (e.g. ESP32 anti-rollback eFuses).
+ *      (b) Mandatory New Key Provisioning: Any node restored from backup or re-flashed
+ *          must undergo reprovisionStorage() with an incremented KeyEpoch and fresh AES key.
+ *      (c) Counter Overflow Fail-Closed: If counter reaches saturation, transmission halts.
  */
 
 #ifndef MSCB_REPLAY_PROTECTION_H
@@ -38,13 +50,20 @@
 #define MSCB_REPLAY_WINDOW_BITS      64
 #define NVS_COUNTER_BLOCK_SIZE       1000UL
 
-// Storage record for persistent counter leasing (ping-pong double buffered)
+// Explicit durable 2-Phase Commit states for redundant NVS banks
+enum NonceCommitState : uint32_t {
+  NONCE_STATE_PREPARED  = 0x50524550, // "PREP" (Phase 1: Prepared in primary bank)
+  NONCE_STATE_COMMITTED = 0x434F4D4D  // "COMM" (Phase 2: Durably committed in both banks)
+};
+
+// Storage record for persistent counter leasing (redundant dual-bank durable commit)
 #pragma pack(push, 1)
 struct PersistentNonceRecord {
   uint32_t magic;                    // 0x4E4F4E43 ("NONC")
-  uint32_t generation;               // Monotonic write generation
+  uint32_t generation;               // Monotonic write generation counter
   uint32_t persistentCeiling;        // Leased ceiling committed to NVS
-  uint32_t keyEpoch;                 // Active key epoch
+  uint32_t keyEpoch;                 // Active cryptographic key epoch
+  uint32_t commitState;              // NonceCommitState: COMMITTED (0x434F4D4D) or PREPARED (0x50524550)
   uint32_t crc32;                    // Record CRC-32 integrity
 };
 #pragma pack(pop)
@@ -79,9 +98,15 @@ public:
 
   // Transmitter: Persistent Monotonic Counter Leasing
   bool initTransmitterStorage(PersistentNonceRecord *flashBank0, PersistentNonceRecord *flashBank1);
+  bool reprovisionStorage(uint32_t newKeyEpoch, PersistentNonceRecord *flashBank0, PersistentNonceRecord *flashBank1);
   uint32_t getNextMonotonicSeq();
   uint32_t getCurrentCeiling() const { return activeCeiling; }
   uint32_t getCurrentLocalSeq() const { return currentLocalSeq; }
+  bool isTransmitterStorageReady() const { return transmitterStorageReady; }
+  bool requiresKeyReprovisioning() const { return reprovisionRequired; }
+
+  // NIST SP 800-38D Deterministic 96-bit AES-GCM Nonce Construction
+  static void constructGcmNonce96(uint16_t senderNodeId, uint16_t keyEpoch, uint64_t monotonicSeq, uint8_t outNonce[12]);
 
   // Receiver: Anti-Replay Sliding Window & Session Management
   ReplayCheckResult checkPacket(uint16_t nodeId, uint32_t sessionId, uint32_t keyEpoch, uint32_t seq);
@@ -110,6 +135,7 @@ private:
   PersistentNonceRecord *nvsBank0;
   PersistentNonceRecord *nvsBank1;
   bool     transmitterStorageReady;
+  bool     reprovisionRequired;
 };
 
 extern ReplayProtection replayProtector;

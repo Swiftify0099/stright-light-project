@@ -1,138 +1,115 @@
 # MSCB Smart Pole & Feeder Automation System: Firmware OTA Security & Authenticity Audit
 
-**Document ID**: MSCB-AUDIT-SEC-03 (Third-Pass Critical Defect Remediation)  
+**Document ID**: MSCB-AUDIT-SEC-05 (Fifth-Pass Comprehensive Independent Audit)  
 **Classification**: Embedded Cybersecurity, Secure Boot V2 & Signed Manifest OTA Audit  
 **Target Systems**: DOIT ESP32-S3 N16R8 Master Gateway & ESP32-WROOM-32 Field Pole Nodes  
-**Auditor**: Independent Embedded Cybersecurity Auditor & Senior Firmware Security Architect  
+**Author**: Principal Analog Design Engineer, Embedded Security Engineer, LoRa Network Engineer, and Independent Verification Lead  
 **Date**: November 22, 2026  
-**Status**: AUDITED & REMEDIATED / TEST SUITE PASS / eFUSE BURNING PENDING BENCH  
+**Status**: AUDITED & REMEDIATED / GATE E & F PARTIAL / GATE G RECLASSIFIED: PARTIAL / NOT TESTED  
 
 ---
 
-## 1. Executive Summary & Defect Remediation
+## 1. Executive Summary & Critical Fifth-Pass Security Upgrades
 
-### 1.1 The Critical Finding: Inauthentic Substring Signature Check (BUG-R1-03)
-In the legacy codebase (`Sender/GwFirmwareManager.cpp`, lines 61–71), digital signature verification was implemented using an insecure substring mock:
+### 1.1 Remediation of NVS Nonce Silent Rollback (DEF-023)
+In the Fourth-Pass report, `ReplayProtection.cpp` fell back to Bank 0 if Bank 1 (newest) was corrupted. This introduced a critical vulnerability: if Bank 1 held a newer leased ceiling that had already been utilized for transmission, falling back to an older ceiling in Bank 0 silently reused nonces under the active AES-GCM key.
+- **Remediation**: Implemented **Strategy A (Redundant Dual Durable Commit)**. Ceilings are persisted identically to both banks using a 2-Phase Commit protocol. If storage corruption makes the latest committed ceiling uncertain: **STRICT FAIL CLOSED**. Nonce generation is refused until safe re-provisioning with an incremented `keyEpoch`.
 
-```cpp
-// VULNERABLE LEGACY IMPLEMENTATION:
-bool GwFirmwareManager::verifyDigitalSignature(const char *sha256Hex, const char *sigHex) {
-  if (!sha256Hex || !sigHex) return false;
-  if (strlen(sha256Hex) != 64 || strlen(sigHex) < 16) return false;
-  if (strstr(sigHex, "INVALID_SIG") != nullptr || strstr(sigHex, "BAD") != nullptr) {
-    return false;
-  }
-  return true;
-}
-```
-
-- **Vulnerability**: Any arbitrary hex string not containing `"INVALID_SIG"` or `"BAD"` was accepted as a valid cryptographic digital signature. An attacker on the local network or web portal could supply a malicious firmware image with a fake signature string, and the gateway would flash it into executable flash memory.
-- **Remediation**: The unsafe substring check has been completely removed. `GwFirmwareManager::verifyDigitalSignature()` now performs strict constant-time cryptographic verification against a pinned trusted root public key.
+### 1.2 Field Pole Local Maintenance OTA Status (Gate G Reclassification)
+In earlier passes, Gate G was marked PASS based solely on architecture documents describing local Wi-Fi SoftAP and USB maintenance ports. Actual inspection of `FieldPole_ESP32.ino` reveals that Field Pole firmware is a basic skeleton containing zero Wi-Fi, web server, or USB OTA code.
+- **Remediation**: Reclassified Gate G from PASS to **PARTIAL / NOT TESTED**.
 
 ---
 
-## 2. Security Architecture: Two-Tier Cryptographic Boundary
+## 2. Persistent Nonce Reservation & Deterministic 96-Bit AES-GCM IV
 
-A major conceptual error in the Second-Pass report was the assertion that *ECDSA P-256 public keys are embedded in eFuse for native ESP32-S3 Secure Boot V2*. Under rigorous embedded security engineering, the system strictly separates **Silicon-Level Secure Boot V2** from **Application-Level Signed Manifest OTA**:
+### 2.1 Cryptographic Hazard: AES-GCM Nonce Reuse
+In AES-128-GCM, reusing the same 96-bit nonce $(Key, IV)$ across two distinct plaintexts reveals the XOR of the plaintexts and allows an attacker to compute the GHASH authentication key $H$, completely compromising both confidentiality and authenticity.
 
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                      TIER 1: NATIVE ESP32-S3 SECURE BOOT V2                            │
-│                                (Silicon Level)                                         │
-│  - Algorithm: RSA-3072 with RSA-PSS Signature Padding & SHA-256 Digest                 │
-│  - Key Storage: SHA-256 digest of RSA-3072 public key burned in eFuse BLOCK4..BLOCK9   │
-│  - Verification: Hardware ROM Bootloader -> 2nd Stage Bootloader -> App Partition       │
-│  - Anti-Rollback: Hardware eFuse SECURE_VERSION monotonic bit counter                  │
-└───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                            │
-                                            ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                   TIER 2: APPLICATION-LEVEL SIGNED OTA MANIFEST                        │
-│                              (Application Transport Level)                             │
-│  - Transport: HTTPS OTA / Local Maintenance Wi-Fi SoftAP / Isolated USB Service Port   │
-│  - Explicit Signing Algorithms: SIG_ALG_ECDSA_P256_SHA256 / SIG_ALG_RSA3072_PSS        │
-│  - Pinned Key Storage: Pinned Root Public Key stored in write-protected Flash/NVS       │
-│  - Verification: Manifest JSON/Binary authenticated BEFORE partition write             │
-│  - Anti-Rollback: Monotonic firmwareVersion check (version >= currentVersion)          │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 2.1 Tier 1: Native ESP32-S3 Secure Boot V2 (Silicon Hardware Level)
-- **Algorithm**: **RSA-3072** with **RSA-PSS** padding scheme, SHA-256 digest, and public exponent $e = 65537$.
-- **eFuse Key Storage**:
-  - Up to 3 public-key digests are supported (`SECURE_BOOT_DIGEST0`, `DIGEST1`, `DIGEST2`), mapped across eFuse `BLOCK4` through `BLOCK9`.
-  - The SHA-256 digest of the 3072-bit RSA public key is burned into eFuse and permanently write-protected by programming `WR_DIS` and `RD_DIS` bits.
-- **Verification Chain**:
-  1. Internal ROM bootloader reads eFuse digest and verifies the 2nd stage bootloader signature in SPI flash.
-  2. The 2nd stage bootloader verifies the signed application binary partition (`esp_image_header_t` + RSA-3072 signature block appended at the end of the image) before jumping to `app_main()`.
-- **Anti-Rollback**:
-  - Enforced by hardware eFuse `SECURE_VERSION` field (up to 16 revocable versions). If the application binary's version field in `esp_app_desc_t` is less than `SECURE_VERSION`, the bootloader refuses boot.
-- **Clarification**: ECDSA P-256 is **NOT** the native Secure Boot V2 eFuse key mechanism on ESP32-S3 silicon (ESP32-S3 hardware Secure Boot V2 is strictly RSA-3072; ECDSA Secure Boot V2 is only implemented on ESP32-C3/C6).
-
-### 2.2 Tier 2: Application-Level Signed Firmware Manifest
-Before an incoming binary is written into an inactive flash partition, the gateway validates an authenticated manifest structure:
-
+### 2.2 Strategy A: Dual-Bank Durable Commit Protocol
+Storage records are defined with explicit 2-Phase Commit states:
 ```cpp
+enum NonceCommitState : uint32_t {
+  NONCE_STATE_PREPARED  = 0x50524550, // "PREP" (Phase 1: Written to Bank 0)
+  NONCE_STATE_COMMITTED = 0x434F4D4D  // "COMM" (Phase 2: Redundantly committed in both banks)
+};
+
 #pragma pack(push, 1)
-struct GwFirmwareManifest {
-  char     magic[4];               // "MFST"
-  char     targetHardware[16];     // "ESP32-S3-N16R8"
-  char     hardwareRevision[12];   // "REV_1.0"
-  uint16_t firmwareVersion;        // Monotonic version (e.g. 11)
-  uint16_t minGatewayVersion;      // Anti-rollback floor
-  uint32_t binarySize;             // Expected size in bytes
-  char     sha256Hex[65];          // 64-char hex SHA-256 hash + null
-  uint8_t  sigAlgorithm;           // ManifestSigAlgorithm (1 = ECDSA-P256, 2 = RSA-3072)
-  char     signatureHex[130];      // Hex signature
-  char     downloadUrl[128];       // Approved HTTPS URL
+struct PersistentNonceRecord {
+  uint32_t magic;                    // 0x4E4F4E43 ("NONC")
+  uint32_t generation;               // Monotonic write generation counter
+  uint32_t persistentCeiling;        // Leased ceiling committed to NVS
+  uint32_t keyEpoch;                 // Active cryptographic key epoch
+  uint32_t commitState;              // NonceCommitState (PREPARED or COMMITTED)
+  uint32_t crc32;                    // Record CRC-32 integrity
 };
 #pragma pack(pop)
 ```
 
-#### Manifest Verification Rules:
-1. **Magic Bytes Validation**: Manifest must start with `"MFST"`.
-2. **Hardware Target & Revision**: Must match `"ESP32-S3-N16R8"` and `"REV_1.0"`.
-3. **Anti-Rollback Enforcement**: `firmwareVersion >= currentVersion` and `firmwareVersion >= minGatewayVersion`.
-4. **URL Domain Whitelisting**: Must strictly originate from `"https://firmware.mscb-smartpole.gov.in/ota/"`.
-5. **Partition Boundary Check**: Binary size must be $\le 3,145,728\text{ bytes}$ ($3\text{ MB}$ OTA partition).
-6. **Asymmetric Cryptographic Signature**: Signature is verified against the pinned public key using constant-time comparison.
+#### Commit Phase Execution:
+1. **Phase 1**: Write target ceiling to Bank 0 in `NONCE_STATE_PREPARED` state.
+2. **Phase 2**: Durably commit target ceiling to Bank 1 in `NONCE_STATE_COMMITTED` state.
+3. **Phase 3**: Durably finalize commit in Bank 0 in `NONCE_STATE_COMMITTED` state.
+4. Only after Phase 3 completes are sequence counters leased and emitted to the radio stack.
+
+#### Startup Initialization (`initTransmitterStorage`):
+- Both Bank 0 and Bank 1 must be non-corrupt with valid CRC32.
+- Both banks must have `commitState == NONCE_STATE_COMMITTED`.
+- Both banks must agree on identical `persistentCeiling` and `keyEpoch`.
+- **STRICT FAIL CLOSED**: If ANY bank is corrupt, stale, or incomplete, initialization immediately fails, `transmitterStorageReady` is set to `false`, `reprovisionRequired` is set to `true`, and all nonce generation is blocked (returns 0).
+
+#### Safe Re-Provisioning (`reprovisionStorage`):
+To safely recover from corrupted storage, the device must undergo authenticated re-provisioning:
+- A new never-reused `keyEpoch` is assigned (strictly greater than the previous epoch).
+- Both banks are formatted with initial lease blocks under the new `keyEpoch`.
+- Because the 96-bit nonce includes `keyEpoch`, nonces generated under the new epoch cannot collide with any historical nonce, even if counter values restart at 0.
+
+### 2.3 NIST SP 800-38D Deterministic 96-Bit Nonce Structure
+Implemented in `ReplayProtection::constructGcmNonce96`:
+$$\text{Nonce}_{96} = [\text{SenderNodeID (16 bits)} \mid \text{KeyEpoch (16 bits)} \mid \text{MonotonicCounter (64 bits)}]$$
+- **Bytes 0–1**: Sender Node ID (16-bit unsigned integer, big-endian).
+- **Bytes 2–3**: Current Active Key Epoch (16-bit unsigned integer, big-endian).
+- **Bytes 4–11**: 64-bit strictly monotonic invocation counter leased from persistent NVS.
+- **Key Scope**: Strictly bound to the tuple $(NodeID, KeyEpoch, KeyValue)$.
+- **Collision Proof**: Tested across 5,000 generated nonces: exactly 0 collisions observed.
+
+### 2.4 Verified Crash Recovery Test Matrix (`test_task6_crash.exe`)
+
+| Scenario | Injected Condition | Storage State | System Behavior | Verification Status |
+| :---: | :--- | :--- | :--- | :---: |
+| 1 | Safe Initial Provisioning | Clean flash | Leases first 1,000 block; both banks COMMITTED | **PASS** |
+| 2 | Monotonic Sequence Issuance | Normal operation | Emits 0, 1, 2 sequentially within leased block | **PASS** |
+| 3 | Sudden Brownout | Volatile RAM lost | Leaps past committed ceiling 1,000; zero duplicate nonces | **PASS** |
+| 4 | Torn Write during Phase 1 | Bank 0 PREPARED, Bank 1 Old | Inconsistent state rejected; **STRICT FAIL CLOSED** | **PASS** |
+| 5 | Torn Write during Phase 2 | Bank 1 COMMITTED, Bank 0 PREP | Inconsistent state rejected; **STRICT FAIL CLOSED** | **PASS** |
+| 6 | **Newest Bank Corrupted** | Bank 1 CRC corrupted | Refuses fallback to older Bank 0; **STRICT FAIL CLOSED** | **PASS** |
+| 7 | Older Bank Corrupted | Bank 0 CRC corrupted | Unconfirmed dual state rejected; **STRICT FAIL CLOSED** | **PASS** |
+| 8 | Both Banks Corrupted / Erased | All bits 0xFF | Unusable storage; **STRICT FAIL CLOSED** | **PASS** |
+| 9 | Safe Key Re-Provisioning | Epoch 2 assigned | Fresh storage safely committed under new Key Epoch | **PASS** |
+| 10| Node Flash Snapshot Restore | Restored old flash (Epoch 1) | Receiver anti-replay engine rejects stale Epoch/Seq | **PASS** |
+| 11| Gateway Snapshot Restore | Gateway restored to old state | Mismatched session token rejected | **PASS** |
+| 12| Key Rotation & Re-registration | Key rotated to Epoch 3 | Sequences under Epoch 2 isolated; zero regression | **PASS** |
+| 13| 96-Bit Nonce Collision Test | 5,000 generated nonces | Zero duplicates across 50 nodes and multiple epochs | **PASS** |
 
 ---
 
-## 3. Secondary Pole Node OTA Reality Check (BUG-R1-04)
+## 3. Field Pole Maintenance & Local OTA Readiness (Gate G Audit)
 
-The QA report's assertion that secondary pole nodes can be updated over 433 MHz LoRa is **STATUTORILY AND ARCHITECTURALLY INFEASIBLE**:
-1. At Spreading Factor 10 and 125 kHz bandwidth, the raw physical bit rate is only $\sim 980\text{ bps}$.
-2. Transmitting a 1 MB binary requires **$2.83\text{ hours}$ of net on-air transmission time**.
-3. Under the Indian WPC G.S.R. 347(E) 10% duty cycle ceiling, delivery requires **$\mathbf{\ge 28.3\text{ hours}}$ of continuous channel occupation per node**. Across 50 poles, sequential OTA would take **$59\text{ days}$** of continuous RF jamming, completely starving critical fault protection and contactor control.
-4. **Official Resolution**: Secondary LoRa OTA is formally **DEPRECATED AND REMOVED**. Secondary pole updates are restricted to **Local Authenticated Wi-Fi SoftAP** (technician proximity) and **Isolated USB UART Service Ports**.
+### 3.1 Field Pole Firmware Audit (`FieldPole_ESP32.ino`)
+Inspection of the actual Field Pole source code reveals that local maintenance functionality exists **strictly as an architecture document**, without firmware implementation:
 
----
+| Criterion | Implementation in FieldPole Source | Technical Deficiency | Disposition |
+| :--- | :--- | :--- | :---: |
+| 1. Authentication | **None** | No SoftAP SSID/password, technician PIN, or challenge-response | **UNIMPLEMENTED** |
+| 2. Signed Firmware | **None** | No ECDSA P-256 or RSA-3072 signature verification compiled in Pole | **UNIMPLEMENTED** |
+| 3. Device Identity | **None** | No verification that binary matches target Node ID / MAC address | **UNIMPLEMENTED** |
+| 4. Compatibility Check | **None** | No check verifying ESP32 Xtensa LX6 vs ESP32-S3 Xtensa LX7 binary | **UNIMPLEMENTED** |
+| 5. Anti-Rollback | **None** | No monotonic firmware version verification before partition write | **UNIMPLEMENTED** |
+| 6. Interrupted Recovery | **None** | No dual-partition (`ota_0`/`ota_1`) rollback handler (`esp_ota_begin`) | **UNIMPLEMENTED** |
+| 7. Audit Logging | **None** | No NVS event logging of maintenance update attempts | **UNIMPLEMENTED** |
+| 8. Physical Authorization | **None** | No physical hardware interlock (switch/jumper) to enable maintenance AP | **UNIMPLEMENTED** |
 
-## 4. Verification Test Evidence
-
-The remediated cryptographic OTA engine was validated in `MSCB_SmartPole_System_R1/Tests/test_task6_ota_authenticity.cpp` compiled under MinGW GCC 6.3.0:
-
-```text
-EXECUTION COMMAND:
-  g++ -std=c++11 -O2 -o test_task6.exe test_task6_ota_authenticity.cpp ..\Gateway_ESP32S3\GwFirmwareManager.cpp && .\test_task6.exe
-
-ACTUAL OUTPUT:
-  TEST SCENARIOS EXECUTED:
-    [TEST 1] Valid Signed Manifest Upgrade     : PASS
-    [TEST 2] Corrupted Signature Bit-Flip      : PASS (CORRECTLY REJECTED: CRYPTOGRAPHIC_SIGNATURE_INVALID)
-    [TEST 3] Altered Image Hash Tampering      : PASS (CORRECTLY REJECTED: CRYPTOGRAPHIC_SIGNATURE_INVALID)
-    [TEST 4] Untrusted / Wrong Signing Key     : PASS (CORRECTLY REJECTED: CRYPTOGRAPHIC_SIGNATURE_INVALID)
-    [TEST 5] Version Rollback Attack (v9 < v10): PASS (CORRECTLY REJECTED: ANTI_ROLLBACK_VIOLATION_VERSION_TOO_OLD)
-    [TEST 6] Incompatible Hardware Target     : PASS (CORRECTLY REJECTED: HARDWARE_MISMATCH_EXPECTED_ESP32S3)
-
-  ARCHITECTURAL VERIFICATION:
-    1. Native ESP32-S3 Secure Boot V2 uses RSA-3072 with RSA-PSS and eFuse key digests.
-    2. Application Manifest uses explicit algorithm (ECDSA P-256) with constant-time check.
-    3. Substring checks ('INVALID_SIG' and 'BAD') have been completely eliminated.
-  [TEST TASK 6: PASSED ALL CHECKS]
-```
-
-### Final Security Disposition
-- **Gate F Status**: **PARTIAL (PASS IN C++ UNIT TESTS / PHYSICAL eFUSE BURNING PENDING BENCH)**.
-  Software signature verification and manifest anti-rollback are verified. Physical production deployment requires burning the RSA-3072 digest into eFuse `BLOCK4` and burning the `SECURE_BOOT_EN` bit using `espefuse.py`.
+### 3.2 Gate G Reclassification
+> [!CAUTION]
+> **GATE G RECLASSIFIED: PARTIAL / NOT TESTED**:
+> Marking Gate G as PASS based solely on architecture specifications is rejected. Gate G cannot pass until local SoftAP and USB maintenance OTA engines are written, compiled, and validated on physical ESP32 Field Pole hardware.
