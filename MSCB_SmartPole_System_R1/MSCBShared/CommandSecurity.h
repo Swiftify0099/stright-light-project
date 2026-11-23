@@ -73,7 +73,8 @@ enum CommandAuthResult : uint8_t {
   AUTH_ERR_COMMAND_EXPIRED     = 5, // Absolute expiry timestamp exceeded
   AUTH_ERR_REPLAY_DETECTED     = 6, // Sequence number already seen or outside sliding window
   AUTH_ERR_HMAC_INVALID        = 7, // Cryptographic signature mismatch
-  AUTH_ERR_OVERFLOW_SATURATION = 8  // Sequence counter reached 32-bit limit
+  AUTH_ERR_OVERFLOW_SATURATION = 8, // Sequence counter reached 32-bit limit
+  AUTH_ERR_TIME_UNSYNCED       = 9  // Unsynchronized clock: real epoch unavailable
 };
 
 inline const char* commandAuthResultToString(CommandAuthResult res) {
@@ -87,6 +88,7 @@ inline const char* commandAuthResultToString(CommandAuthResult res) {
     case AUTH_ERR_REPLAY_DETECTED:     return "REPLAY_DETECTED_OR_OUT_OF_WINDOW";
     case AUTH_ERR_HMAC_INVALID:        return "HMAC_INTEGRITY_MISMATCH";
     case AUTH_ERR_OVERFLOW_SATURATION: return "NONCE_COUNTER_SATURATED";
+    case AUTH_ERR_TIME_UNSYNCED:       return "TIME_UNSYNCED_FAIL_CLOSED";
     default:                           return "UNKNOWN_AUTH_ERROR";
   }
 }
@@ -118,6 +120,10 @@ public:
     uint16_t localNodeId,
     uint32_t currentEpochSec // Absolute UTC Unix timestamp (NEVER millis()!)
   );
+
+  // Authenticated Time Synchronization
+  bool createTimeSyncPacket(uint32_t epochSec, PktTimeSyncPayload &outPkt);
+  bool verifyTimeSyncPacket(const PktTimeSyncPayload &pkt);
 
   // Cryptographic HMAC-SHA256
   static void computeHmacSha256(

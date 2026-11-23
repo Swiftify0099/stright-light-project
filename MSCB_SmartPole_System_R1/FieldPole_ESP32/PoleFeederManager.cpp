@@ -5,6 +5,7 @@
  */
 
 #include "PoleFeederManager.h"
+#include "PoleTimeManager.h"
 #include <string.h>
 
 PoleFeederManager poleFeederMgr;
@@ -12,6 +13,9 @@ PoleFeederManager poleFeederMgr;
 // MCP23S17 SPI Register Map
 #define MCP23S17_IODIRA   0x00
 #define MCP23S17_IODIRB   0x01
+#define MCP23S17_IOCON    0x0A
+#define MCP23S17_GPPUA    0x0C
+#define MCP23S17_GPPUB    0x0D
 #define MCP23S17_GPIOA    0x12
 #define MCP23S17_GPIOB    0x13
 #define MCP23S17_OLATA    0x14
@@ -29,16 +33,50 @@ PoleFeederManager::PoleFeederManager() :
 
 bool PoleFeederManager::detectMcp23s17() {
 #if defined(ARDUINO)
+  // Step 1: Write verification pattern 0x55 to GPPUA
   poleSelectSpiDevice(POLE_SPI_DEV_MCP23S17);
-  // Read IODIRA (Control Byte: 0x41 Read, Addr 0x00)
-  SPI.transfer(0x41);
-  SPI.transfer(MCP23S17_IODIRA);
-  uint8_t iodira = SPI.transfer(0x00);
+  SPI.transfer(0x40); // Opcode Write (A2=A1=A0=0)
+  SPI.transfer(MCP23S17_GPPUA);
+  SPI.transfer(0x55);
   poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
 
-  // If responding and not floating bus (0xFF or 0x00)
-  if (iodira != 0xFF && iodira != 0x00) {
+  // Step 2: Read back to confirm physical presence on SPI bus
+  poleSelectSpiDevice(POLE_SPI_DEV_MCP23S17);
+  SPI.transfer(0x41); // Opcode Read
+  SPI.transfer(MCP23S17_GPPUA);
+  uint8_t readback = SPI.transfer(0x00);
+  poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
+
+  if (readback == 0x55) {
     auxHardwareDetected = true;
+
+    // Step 3: Configure Port A (MCB aux) and Port B (Contactor aux) as inputs
+    poleSelectSpiDevice(POLE_SPI_DEV_MCP23S17);
+    SPI.transfer(0x40);
+    SPI.transfer(MCP23S17_IODIRA);
+    SPI.transfer(0xFF); // All inputs
+    poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
+
+    poleSelectSpiDevice(POLE_SPI_DEV_MCP23S17);
+    SPI.transfer(0x40);
+    SPI.transfer(MCP23S17_IODIRB);
+    SPI.transfer(0xFF); // All inputs
+    poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
+
+    // Step 4: Enable internal 100k pull-ups on all input pins
+    poleSelectSpiDevice(POLE_SPI_DEV_MCP23S17);
+    SPI.transfer(0x40);
+    SPI.transfer(MCP23S17_GPPUA);
+    SPI.transfer(0xFF);
+    poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
+
+    poleSelectSpiDevice(POLE_SPI_DEV_MCP23S17);
+    SPI.transfer(0x40);
+    SPI.transfer(MCP23S17_GPPUB);
+    SPI.transfer(0xFF);
+    poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
+
+    Serial.println(F("[FEEDER_MGR] ✅ MCP23S17 I/O Expander verified on SPI bus (Pull-ups active)."));
     return true;
   }
 #endif
@@ -99,30 +137,44 @@ FeederCommandAckState PoleFeederManager::executeFeederSwitch(uint8_t feederId1Ba
   }
   uint8_t chIdx = feederId1Based - 1;
 
-  // 0. Permanent Revocation Lock: switching strictly prohibited when revoked
+  // 1. All OFF commands must remain safe and idempotent
+  if (action == 0) {
+    bool offOk = poleActuators.requestRelayOff(chIdx, "COMMAND_OFF");
+    if (!offOk) return FEEDER_ACK_REJECTED_FAULT;
+    // Check contactor auxiliary if present
+    if (!auxHardwareDetected) return FEEDER_ACK_FEEDBACK_NOT_CONNECTED;
+    uint8_t auxMask = readContactorAuxMask();
+    bool auxClosed = (auxMask & (1 << chIdx)) != 0;
+    return (!auxClosed) ? FEEDER_ACK_COMPLETED : FEEDER_ACK_FEEDBACK_UNAVAILABLE;
+  }
+
+  // 2. Permanent Revocation Lock: switching ON strictly prohibited when revoked
   if (poleStorage.isRevokedLocked()) {
     return FEEDER_ACK_REJECTED_LOCKED;
   }
 
-  // 1. Safety Interlock: MSCB_RELAYS_LOCKED_DISABLED
-  if (poleActuators.areRelaysLockedDisabled() && !benchTestMode) {
+  // 3. Unregistered Pole: reject ON
+  if (!poleStorage.isRegistered()) {
     return FEEDER_ACK_REJECTED_LOCKED;
   }
 
-  // 2. Drive Relay Output
-  bool success = false;
-  if (action == 1) {
-    success = poleActuators.requestRelayOn(chIdx, "COMMAND");
-  } else {
-    success = poleActuators.requestRelayOff(chIdx, "COMMAND");
+  // 4. Actuator Driver Diagnostic Fault: reject ON
+  if (!poleActuators.isDiagnosticPassed() || poleActuators.getDriverState() != ACTUATOR_STATE_READY) {
+    return FEEDER_ACK_REJECTED_FAULT;
   }
 
+  // 5. Centralized Safety Lock (MSCB_RELAYS_LOCKED_DISABLED)
+  if (poleActuators.areRelaysLockedDisabled()) {
+    return FEEDER_ACK_REJECTED_LOCKED;
+  }
+
+  // 6. Drive Relay Output ON
+  bool success = poleActuators.requestRelayOn(chIdx, "COMMAND_ON");
   if (!success) {
     return FEEDER_ACK_REJECTED_FAULT;
   }
 
-  // State: OUTPUT_CHANGED
-  // 3. Verify Auxiliary Feedback Hardware
+  // 7. Verify Auxiliary Feedback Hardware
   // Strictly NEVER treat GPIO output readback as proof of contactor state!
   if (!auxHardwareDetected) {
     return FEEDER_ACK_FEEDBACK_NOT_CONNECTED;
@@ -131,13 +183,7 @@ FeederCommandAckState PoleFeederManager::executeFeederSwitch(uint8_t feederId1Ba
   // If auxiliary hardware is present, verify contactor closure
   uint8_t auxMask = readContactorAuxMask();
   bool auxClosed = (auxMask & (1 << chIdx)) != 0;
-  bool expectedClosed = (action == 1);
-
-  if (auxClosed == expectedClosed) {
-    return FEEDER_ACK_COMPLETED;
-  } else {
-    return FEEDER_ACK_FEEDBACK_UNAVAILABLE;
-  }
+  return auxClosed ? FEEDER_ACK_COMPLETED : FEEDER_ACK_FEEDBACK_UNAVAILABLE;
 }
 
 bool PoleFeederManager::processCommandPayload(const PktFeederCmdPayload &cmd) {
@@ -158,11 +204,27 @@ bool PoleFeederManager::processCommandPayload(const PktFeederCmdPayload &cmd) {
   env.keyEpoch = 1;
   memcpy(env.hmacTag, cmd.hmacTag, sizeof(env.hmacTag));
 
-  uint32_t nowEpoch = millis() / 1000;
-  CommandAuthResult authRes = cmdSecurity.verifyCommand(env, nowEpoch, poleStorage.getAssignedPoleId());
+  // Derive current UTC epoch from authenticated mesh time anchor
+  uint32_t nowEpoch = poleTimeMgr.getCurrentEpoch();
+
+  // If time is not synchronized and command is time-sensitive ON, reject with explicit status!
+  if (cmd.commandAction != 0 && !poleTimeMgr.isTimeSynced()) {
+    sendAckUplink(cmd.feederId, cmd.sequenceNumber, FEEDER_ACK_REJECTED_TIME_UNSYNCED);
+    return false;
+  }
+
+  // Destination node ID: poleStorage.getAssignedPoleId()
+  // Current UTC Epoch: nowEpoch
+  CommandAuthResult authRes = cmdSecurity.verifyCommand(
+    env,
+    poleStorage.getAssignedPoleId(),
+    nowEpoch
+  );
   if (authRes != AUTH_SUCCESS) {
     if (authRes == AUTH_ERR_COMMAND_EXPIRED) {
       sendAckUplink(cmd.feederId, cmd.sequenceNumber, FEEDER_ACK_REJECTED_STALE);
+    } else if (authRes == AUTH_ERR_TIME_UNSYNCED) {
+      sendAckUplink(cmd.feederId, cmd.sequenceNumber, FEEDER_ACK_REJECTED_TIME_UNSYNCED);
     } else {
       sendAckUplink(cmd.feederId, cmd.sequenceNumber, FEEDER_ACK_REJECTED_FAULT);
     }

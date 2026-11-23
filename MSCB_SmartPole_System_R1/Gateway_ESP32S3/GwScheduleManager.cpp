@@ -70,7 +70,21 @@ void GwScheduleManager::getIstTimeStr(char* outBuf, size_t maxLen) const {
 }
 
 void GwScheduleManager::broadcastMeshTimeSync() {
+  if (!isTimeSynced()) {
+    #if defined(ARDUINO)
+    Serial.println(F("[SCHEDULE] Cannot broadcast time sync: Gateway NTP not synced yet."));
+    #endif
+    return;
+  }
   uint32_t epoch = getEpoch();
+  PktTimeSyncPayload syncPkt;
+  if (!cmdSecurity.createTimeSyncPacket(epoch, syncPkt)) {
+    #if defined(ARDUINO)
+    Serial.println(F("[SCHEDULE] Failed to create authenticated time sync packet (key not provisioned)."));
+    #endif
+    return;
+  }
+
   MeshWireFrame frame;
   memset(&frame, 0, sizeof(MeshWireFrame));
 
@@ -81,16 +95,16 @@ void GwScheduleManager::broadcastMeshTimeSync() {
   frame.header.priority = PRIO_ROUTINE;
   frame.header.hopCount = 0;
   frame.header.maxHops = GW_MESH_MAX_HOPS;
-  frame.header.seqNumber = 0;
+  frame.header.seqNumber = (uint16_t)(syncPkt.sequenceNumber & 0xFFFF);
   frame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
   frame.header.dstAddress = MSCB_BROADCAST_NODE_ID;
   frame.header.nextHop = MSCB_BROADCAST_NODE_ID;
-  frame.header.payloadLen = sizeof(uint32_t);
-  memcpy(frame.payload, &epoch, sizeof(uint32_t));
+  frame.header.payloadLen = sizeof(PktTimeSyncPayload);
+  memcpy(frame.payload, &syncPkt, sizeof(PktTimeSyncPayload));
 
   gwRadio.sendPacket(frame);
   #if defined(ARDUINO)
-  Serial.printf("[SCHEDULE] Broadcasted mesh time sync epoch: %lu\n", (unsigned long)epoch);
+  Serial.printf("[SCHEDULE] Broadcasted authenticated mesh time sync UTC epoch: %lu\n", (unsigned long)epoch);
   #endif
 }
 

@@ -29,8 +29,8 @@ void PoleHeartbeatSender::sendHeartbeat() {
   hb.rank = poleMesh.getMyRank();
   hb.healthState = (poleActuators.getDriverState() == ACTUATOR_STATE_READY) ? NODE_HEALTH_OK : NODE_HEALTH_WARNING;
   hb.feederStateMask = poleActuators.getActiveRelayMask();
-  hb.auxFeedbackMask = 0; // Filled from MCP23S17 if present
-  hb.mcbStatusMask = 0;
+  hb.auxFeedbackMask = poleFeederMgr.readContactorAuxMask();
+  hb.mcbStatusMask = poleFeederMgr.readMcbTripMask();
   hb.uptimeSec = millis() / 1000;
   hb.busVoltageV = poleMetrology.getBusVoltageR();
   hb.totalCurrentA = 0.0f;

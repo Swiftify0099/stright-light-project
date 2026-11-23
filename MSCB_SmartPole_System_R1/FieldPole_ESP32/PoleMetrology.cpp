@@ -418,7 +418,56 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
   return true;
 }
 
+void PoleMetrology::acquireRawSamples() {
+#if defined(ARDUINO) && defined(ESP32)
+  if (!allAdcsDetected) return;
+
+  // DRDY lines are active-low when conversion frame is ready
+  if (digitalRead(POLE_ADC1_DRDY_PIN) == LOW ||
+      digitalRead(POLE_ADC2_DRDY_PIN) == LOW ||
+      digitalRead(POLE_ADC3_DRDY_PIN) == LOW) {
+
+    int32_t rawSamples[METROLOGY_TOTAL_RAW_CH];
+    memset(rawSamples, 0, sizeof(rawSamples));
+
+    const uint8_t devSelectors[METROLOGY_NUM_ADC_CHIPS] = {
+      POLE_SPI_DEV_ADC1, POLE_SPI_DEV_ADC2, POLE_SPI_DEV_ADC3
+    };
+
+    for (uint8_t c = 0; c < METROLOGY_NUM_ADC_CHIPS; c++) {
+      if (!chipDetected[c]) continue;
+      poleSelectSpiDevice(devSelectors[c]);
+      // Discard 16-bit status word
+      SPI.transfer16(0x0000);
+      for (uint8_t ch = 0; ch < METROLOGY_CHANNELS_PER_ADC; ch++) {
+        uint8_t b0 = SPI.transfer(0x00);
+        uint8_t b1 = SPI.transfer(0x00);
+        uint8_t b2 = SPI.transfer(0x00);
+        int32_t val = ((int32_t)b0 << 16) | ((int32_t)b1 << 8) | (int32_t)b2;
+        rawSamples[c * METROLOGY_CHANNELS_PER_ADC + ch] = val;
+      }
+      poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
+    }
+
+    // Invalid zero frame check: if all channels are zero, reject as disconnected/floating
+    bool allZero = true;
+    for (uint8_t r = 0; r < METROLOGY_TOTAL_RAW_CH; r++) {
+      if (rawSamples[r] != 0) {
+        allZero = false;
+        break;
+      }
+    }
+
+    if (!allZero) {
+      processRawAdcFrame(rawSamples, millis());
+    }
+  }
+#endif
+}
+
 void PoleMetrology::service() {
+  acquireRawSamples();
+
 #if defined(ARDUINO)
   uint32_t now = millis();
 #else
@@ -468,7 +517,8 @@ float PoleMetrology::getGridFrequency() const {
   if (channelStates[0] != CHANNEL_STATE_OK && channelStates[0] != CHANNEL_UNCALIBRATED) {
     return NAN;
   }
-  return isnan(measuredFrequency) ? 50.0f : measuredFrequency;
+  // NEVER return synthetic 50.0f! Return measured value or NAN
+  return measuredFrequency;
 }
 
 float PoleMetrology::getFeederCurrent(uint8_t feederIdx0Based, uint8_t phaseIdx0Based) const {

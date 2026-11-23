@@ -22,6 +22,7 @@
 #include "PoleMeshRouter.h"
 #include "PoleActuators.h"
 #include "PoleMetrology.h"
+#include "PoleFeederManager.h"
 #if __has_include("../MSCBShared/Protocol.h")
   #include "../MSCBShared/Protocol.h"
 #elif __has_include(<Protocol.h>)

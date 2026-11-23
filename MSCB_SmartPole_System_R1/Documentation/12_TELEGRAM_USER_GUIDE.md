@@ -35,24 +35,27 @@ The Master Gateway provides an encrypted, mobile-accessible administrative user 
 - Press the `📊 Dashboard` button.
 - Displays network summary: Total Nodes Registered, Online/Offline count, Active Feeders (out of 300), and Global Alarm status.
 
-### Workflow 4: Discovering New Poles
+### Workflow 4: Discovering New Poles & Pending Queue
 - When an unprovisioned pole powers on, it transmits `JOIN_REQ`.
 - The Gateway automatically sends a Telegram alert:
-  `🆕 UNREGISTERED POLE DETECTED! Hardware ID: A4:CF:12:89:BC:01`
+  `🆕 UNREGISTERED POLE DETECTED! MAC: A4:CF:12:89:BC:01 | RSSI: -65 dBm`
 - Navigate to `📋 Registrations` from the main menu.
 
-### Workflow 5: Approving or Rejecting a Device
-- In the Registration menu, view the pending hardware list.
-- Press `[✅ Approve]` to grant a logical ID (`POLE-xxxx`), assign 6 feeders, and provision mesh cryptographic keys.
-- Press `[❌ Reject]` to drop the request and purge the pending queue.
+### Workflow 5: Interactive 4-Step Pole Registration Wizard
+Approval strictly enforces mandatory non-empty Display Name and Installation Location:
+1. Tap `[🚀 Register]` next to the pending device.
+2. **Step 1: Custom Pole Name** — Send text `/reg_name <Custom Name>` (e.g. `/reg_name North Gate High Mast`).
+3. **Step 2: Physical Location** — Send text `/reg_loc <Location>` (e.g. `/reg_loc Ring Road Km 14 Junction`).
+4. **Step 3: Area & Landmark** — Send text `/reg_area <Area> | <Landmark>` (e.g. `/reg_area Sector 9 | Opp. Substation`) or `/reg_skip`.
+5. **Step 4: Review & Final Approval** — Review the summary card with custom feeder names and press `[✅ Confirm & Approve]`. The Gateway allocates a unique Pole ID, binds 6 feeders, provisions cryptographic keys, and issues `JOIN_ACCEPT`.
 
 ### Workflow 6: Viewing Pole Directory
 - Press `💡 Poles` on the dashboard.
 - Browse through registered poles using paginated navigation buttons: `[◀ Prev]` and `[Next ▶]`.
 
 ### Workflow 7: Inspecting Detailed Pole Status
-- Tap any specific pole (e.g., `[📍 POLE-0001]`).
-- Displays: Operational State, Active Feeder Count, Last Heard Time, Signal Strength (RSSI/SNR), and Mesh Hop Rank.
+- Tap any specific pole (e.g., `[📍 North Gate High Mast (POLE_02)]`).
+- Displays: Custom Display Name, String ID, Installation Location, Area, Landmark, Operational State, Active Feeder Count, Last Heard Time, Signal Strength (RSSI/SNR), and Mesh Hop Rank.
 
 ### Workflow 8: Viewing Network Topology
 - Press `🕸️ Network Topology`.
@@ -65,19 +68,37 @@ The Master Gateway provides an encrypted, mobile-accessible administrative user 
 
 ### Workflow 10: Monitoring 3-Phase Bus Voltage
 - Tap `⚡ Voltage Dashboard`.
-- Displays real-time True-RMS bus voltage for Phase R, Phase Y, Phase B, grid frequency (Hz), and phase sequence status (`RYB_NORMAL`).
+- Displays real-time True-RMS bus voltage for Phase R, Phase Y, Phase B, grid frequency (Hz), and phase sequence status (`RYB_NORMAL`). If sensors are offline, displays `DISCONNECTED` (zero synthetic 50Hz/230V data).
 
 ### Workflow 11: Monitoring 18-Channel Feeder Current
 - Tap `📈 Current Dashboard`.
 - Select pole to view all 18 current channels (6 Feeders $\times$ 3 Phases R/Y/B). Values display with 0.01A precision.
 
-### Workflow 12: Inspecting Feeder Status
-- Tap `🔌 Feeder Management`.
-- Displays status of all 6 feeders on the selected pole: Relay State (ON/OFF), Contactor Auxiliary Feedback, and MCB Status.
+### Workflow 12: Inspecting Feeder Dashboard & Explicit Control
+- Navigate to `🔌 Feeders` -> `Select Pole` -> Choose pole from directory.
+- Displays all 6 feeders (F1 through F6) belonging exclusively to that pole:
+  - Custom Feeder Name (e.g. `High Bay LED 1`)
+  - Commanded Output State (`⚡ ON` or `⭕ OFF`)
+  - Contactor Auxiliary Dry-Contact Feedback (`CLOSED` or `OPEN`)
+  - MCB Auxiliary Status (`OK` or `TRIP`)
+- Dedicated explicit buttons:
+  - `[F1: ON]` / `[F1: OFF]` through `[F6: ON]` / `[F6: OFF]`
+  - Immediate Telegram pending status sent upon dispatch.
+  - Final confirmation sent ONLY upon receiving the cryptographic Field Pole ACK.
 
-### Workflow 13: Controlling an Individual Feeder
-- Select target feeder (e.g., `[FDR-0001: Feeder 1]`).
-- Press `[⚡ Turn ON]` or `[⭕ Turn OFF]`.
+### Workflow 13: Per-Pole ALL Feeders Sequential Stagger Control
+- On the selected pole's Feeder Dashboard, press `[⚡ Pole ALL ON]` or `[⭕ Pole ALL OFF]`.
+- The Field Pole switches feeders F1 through F6 sequentially with 500 ms inrush intervals.
+- The Gateway aggregates all 6 expected responses (Mask `0x3F`).
+- Telegram truthfully displays per-feeder outcome and overall verdict (`ALL 6 CONFIRMED` or `PARTIAL SUCCESS (X/6)`).
+
+### Workflow 14: Network-Wide ALL Feeders Control (Up to 50 Poles)
+- From the main Feeder Menu, press `[⚡ ALL POLES ALL ON]` or `[⭕ ALL POLES ALL OFF]`.
+- The Gateway initiates a rate-limited batch queue (`GwNetworkQueue`):
+  - Up to 50 poles (300 feeders) tracked.
+  - At most 3 concurrent in-flight commands.
+  - Periodic progress updates sent to Telegram.
+  - Comprehensive final summary: Total targeted, fully confirmed, partial, and failed poles.
 - Option to select timed auto-off countdown: `[1 Hour]`, `[2 Hours]`, `[4 Hours]`.
 
 ### Workflow 14: Executing Group Control

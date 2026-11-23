@@ -41,7 +41,8 @@
 
 #define MSCB_REG_SCHEMA_V1           1
 #define MSCB_REG_SCHEMA_V2           2
-#define MSCB_CURRENT_REG_SCHEMA      MSCB_REG_SCHEMA_V2
+#define MSCB_REG_SCHEMA_V3           3
+#define MSCB_CURRENT_REG_SCHEMA      MSCB_REG_SCHEMA_V3
 
 enum PoleRegistrationStatus : uint8_t {
   POLE_STATUS_EMPTY    = 0,
@@ -78,6 +79,15 @@ struct RegisteredPole {
   uint8_t  mac[6];
   uint16_t poleId;              // e.g. 0x0002
   char     stringId[16];        // e.g. "POLE_02"
+  char     displayName[32];     // Mandatory custom user-facing name
+  char     location[48];        // Mandatory installation location / address
+  char     area[32];            // Area / Sector
+  char     landmark[32];        // Landmark
+  float    latitude;
+  float    longitude;
+  bool     hasGps;
+  char     adminId[24];         // Approving admin
+  char     feederNames[6][24];  // Custom feeder names F1..F6
   uint8_t  status;              // PoleRegistrationStatus
   uint16_t firmwareVersion;
   uint16_t primaryParent;
@@ -104,6 +114,15 @@ struct PendingRegistration {
   int8_t   snr;
   uint32_t requestTimestamp;
   bool     notifiedAdmin;
+  uint8_t  wizardStep;          // 0=Not started, 1=Awaiting Name, 2=Awaiting Location, 3=Awaiting Area, 4=Review
+  char     draftDisplayName[32];
+  char     draftLocation[48];
+  char     draftArea[32];
+  char     draftLandmark[32];
+  float    draftLatitude;
+  float    draftLongitude;
+  bool     draftHasGps;
+  char     draftFeederNames[6][24];
 };
 
 class GwNodeRegistry {
@@ -117,8 +136,20 @@ public:
                             int16_t rssi, int8_t snr,
                             PktRegisterResponsePayload &outResp);
 
-  bool approvePending(const uint8_t mac[6], uint16_t &outAssignedId);
+  bool approvePending(const uint8_t mac[6], uint16_t &outAssignedId, const char* displayName = nullptr, const char* location = nullptr, const char* adminId = nullptr);
   bool rejectPending(const uint8_t mac[6]);
+
+  // Pole Metadata & Feeder Naming
+  bool updatePoleMetadata(uint16_t poleId, const char* displayName, const char* location, const char* area = nullptr, const char* landmark = nullptr);
+  bool setPoleFeederName(uint16_t poleId, uint8_t feederId, const char* name);
+  const char* getPoleFeederName(uint16_t poleId, uint8_t feederId) const;
+
+  // Interactive Registration Wizard Helpers
+  PendingRegistration* getPendingByMac(const uint8_t mac[6]);
+  bool setPendingWizardName(const uint8_t mac[6], const char* name);
+  bool setPendingWizardLocation(const uint8_t mac[6], const char* loc);
+  bool setPendingWizardAreaLandmark(const uint8_t mac[6], const char* area, const char* landmark);
+  bool setPendingWizardFeederName(const uint8_t mac[6], uint8_t feederId, const char* name);
 
   // Node Deletion & Permanent Revocation
   PoleDeleteResult deleteAndRevokePoleEx(uint16_t poleId, const char* adminId, const char* reason);

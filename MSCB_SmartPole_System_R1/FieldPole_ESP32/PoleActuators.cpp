@@ -162,11 +162,15 @@ ActuatorDriverState PoleActuators::getDriverState() const {
 }
 
 bool PoleActuators::areRelaysLockedDisabled() const {
+#if defined(MSCB_BENCH_TEST_PROFILE_ENABLED) && (MSCB_BENCH_TEST_PROFILE_ENABLED != 0)
+    // Isolated low-voltage DC bench testing profile: allow override if explicitly enabled
     if (benchTestOverride) return false;
+#endif
 #if defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
+    // Production safety lock permanently enforced: Relay ON strictly blocked
     return true;
 #else
-    return relaysLockedDisabled;
+    return relaysLockedDisabled && !benchTestOverride;
 #endif
 }
 

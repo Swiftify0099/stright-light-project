@@ -98,7 +98,8 @@ public:
 
   // Raw Sample Processing & Frame Validation
   bool processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_RAW_CH], uint32_t timestampMs);
-  void service(); // Timeouts & Freshness watchdog
+  void acquireRawSamples();
+  void service(); // Continuous acquisition, timeouts & freshness watchdog
 
   // Channel Status & Measurements
   ChannelDataState getChannelState(uint8_t logicalChId1Based) const;

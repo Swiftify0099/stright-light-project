@@ -98,3 +98,50 @@ The system maintains an operational distinction between deactivating a feeder an
 | **Removed** | De-provisioned | Hidden from Dashboard | Excluded from Telemetry| Re-commissioning required |
 
 - **Deactivation Use Case**: Seasonal irrigation feeders (e.g. pumps offline during harvest) or street lights undergoing physical cable maintenance. Deactivated feeders reject all scheduled or group switching commands.
+
+---
+
+## 5. R3 Real Hardware Feeder Actuation Mapping & Pin Integrity
+
+The Field Pole (ESP32-WROOM-32) utilizes an authoritative, single source of truth pin map defined in `PoleBoardPins.h` (`POLE_FEEDER_RELAY_PINS`). Duplicate arrays (such as legacy `SAFE_RELAY_PINS`) have been excised.
+
+### 5.1 Relay Output Hardware Pin Table
+| Feeder Channel | Physical Pin Header Position | Board Silkscreen Label | ESP32 GPIO | Active Electrical Level | Output Type |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Feeder 1** | **24** | **D26** | **GPIO 26** | LOW (0V) | Optocoupled Relay Pilot Driver |
+| **Feeder 2** | **23** | **D25** | **GPIO 25** | LOW (0V) | Optocoupled Relay Pilot Driver |
+| **Feeder 3** | **25** | **D27** | **GPIO 27** | LOW (0V) | Optocoupled Relay Pilot Driver |
+| **Feeder 4** | **6** | **RX2** | **GPIO 16** | LOW (0V) | Optocoupled Relay Pilot Driver |
+| **Feeder 5** | **7** | **TX2** | **GPIO 17** | LOW (0V) | Optocoupled Relay Pilot Driver |
+| **Feeder 6** | **21** | **D32** | **GPIO 32** | LOW (0V) | Optocoupled Relay Pilot Driver |
+
+> [!IMPORTANT]
+> **Physical Position 24 vs Silicon GPIO 24**: Feeder 1 is connected to Physical Header Pin 24, which maps to ESP32 silicon **GPIO 26** (Board silkscreen **D26**). Silicon GPIO 24 does not exist on classic ESP32 chips and must NEVER be referenced in firmware.
+
+---
+
+## 6. Centralized Actuation Safety & Isolated Low-Voltage Bench Profile
+
+1. **Production Relay Lockout**: `MSCB_RELAYS_LOCKED_DISABLED 1` in `MSCBShared/BuildConfig.h` permanently blocks production relay activation until physical switchgear commissioning is formally certified.
+2. **Dedicated Bench Test Profile**: `MSCB_BENCH_TEST_PROFILE_ENABLED` (default `0`) provides an isolated test environment. It requires physical compile-time activation and local commissioning override. Remote Telegram commands CANNOT bypass or enable bench mode.
+3. **Mains Testing Ban**: Bench testing must exclusively use an isolated current-limited low-voltage DC source with loads disconnected from 230V/415V mains.
+4. **Boot Diagnostics**: `PoleActuators::validateStartupState()` reads back all 6 GPIO levels. If any channel is active at boot, the driver halts into `ACTUATOR_STATE_FAULT`.
+
+---
+
+## 7. Multi-Feeder Stagger & ACK Aggregation (Mask 0x3F)
+
+For per-pole ALL commands (`ALL ON` / `ALL OFF`):
+1. **Inrush Protection**: Feeders F1 through F6 are sequentially switched with a 500 ms inter-feeder delay.
+2. **Expected Response Mask (`0x3F`)**: The Gateway command tracker waits for terminal responses across all 6 bits (`0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20 = 0x3F`).
+3. **Truthful Reporting**: The Gateway marks the command completed ONLY when all 6 feeders confirm their state. If any feeder fails or times out, the result is reported as partial failure with exact per-feeder details.
+
+---
+
+## 8. Bounded Network-Wide Command Queue
+
+Network-wide operations (up to 50 poles, 300 feeders) are governed by `GwNetworkQueue`:
+1. **Rate Limiting**: Dispatches at most 3 in-flight commands simultaneously to avoid LoRa channel saturation and tracker overflow.
+2. **State Machine**: Tracks tasks through `QUEUED -> DISPATCHED -> CONFIRMED / PARTIAL / FAILED / TIMEOUT`.
+3. **Comprehensive Summary**: Reports total targeted poles, fully confirmed poles, partial poles, and failed poles back to Telegram.
+

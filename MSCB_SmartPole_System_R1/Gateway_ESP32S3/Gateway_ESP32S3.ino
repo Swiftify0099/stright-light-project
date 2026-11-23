@@ -27,6 +27,7 @@
 #include "GwTelegramBot.h"
 #include "GwFirmwareManager.h"
 #include "GwScheduleManager.h"
+#include "GwNetworkQueue.h"
 #include <CommandSecurity.h>
 
 // =====================================================================
@@ -145,6 +146,9 @@ void setup() {
 
   // Initialize Mesh Coordinator
   gwMesh.begin();
+
+  // Initialize Bounded Network-Wide Command Queue
+  gwNetworkQueue.begin();
 
   // Initialize Heartbeat & Offline Monitor
   gwHeartbeat.begin();

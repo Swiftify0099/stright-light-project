@@ -31,14 +31,17 @@
   #include "../MSCBShared/Protocol.h"
   #include "../MSCBShared/NetworkTypes.h"
   #include "../MSCBShared/CommandSecurity.h"
+  #include "../MSCBShared/ReplayProtection.h"
 #elif __has_include(<CommandSecurity.h>)
   #include <Protocol.h>
   #include <NetworkTypes.h>
   #include <CommandSecurity.h>
+  #include <ReplayProtection.h>
 #else
   #include "Protocol.h"
   #include "NetworkTypes.h"
   #include "CommandSecurity.h"
+  #include "ReplayProtection.h"
 #endif
 
 #define GW_MESH_MAX_HOPS             MSCB_DEFAULT_MAX_HOPS // 6
@@ -55,9 +58,16 @@ struct GwTrackedCommand {
   bool     inUse;
   uint32_t seqNumber;
   uint16_t poleId;
-  uint8_t  feederId;
-  uint8_t  action;
+  uint8_t  feederId;             // 1..6 for single feeder, 0x00 for ALL, 0xF0 for group
+  uint8_t  action;               // 0=OFF, 1=ON
   uint8_t  groupMask;
+  uint8_t  expectedMask;         // Bitmask of expected feeders (0x3F for all 6, (1<<(f-1)) for single)
+  uint8_t  receivedAckMask;      // Bitmask of feeders that returned an ACK
+  uint8_t  terminalAckMask;      // Bitmask of feeders with terminal ACK (COMPLETED/FAULT/LOCKED)
+  uint8_t  outputConfirmedMask;
+  uint8_t  auxConfirmedMask;
+  uint8_t  mcbFaultMask;
+  uint8_t  rejectedMask;
   int64_t  adminChatId;
   uint32_t sentMs;
   uint32_t timeoutMs;
@@ -65,7 +75,9 @@ struct GwTrackedCommand {
   uint8_t  currentRelayMask;
   uint8_t  currentAuxMask;
   uint8_t  currentMcbMask;
-  bool     completed;
+  bool     completed;            // True ONLY when ALL expected feeders have terminal response or timed out
+  bool     partialFailure;       // True if some feeders failed or timed out
+  bool     timedOut;             // True if overall timeout was reached
   bool     notified;
 };
 

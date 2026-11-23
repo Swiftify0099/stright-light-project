@@ -57,8 +57,10 @@ public:
   void showPolesMenu(int64_t chatId, uint8_t page = 0);
   void showPoleDetail(int64_t chatId, uint16_t poleId);
   void showVoltageDashboard(int64_t chatId, uint16_t poleId = 0);
+  void showFeederPoleSelectMenu(int64_t chatId, uint8_t page = 0);
   void showFeederDashboard(int64_t chatId, uint16_t poleId = 0);
   void showRegistrationsMenu(int64_t chatId, uint8_t page = 0);
+  void showWizardPrompt(int64_t chatId, const uint8_t mac[6]);
   void showDeleteMenu(int64_t chatId, uint8_t page = 0);
   void showDeleteConfirm(int64_t chatId, uint16_t poleId);
   void showConfirmAllPoles(int64_t chatId, uint8_t action);

@@ -5,6 +5,8 @@
  */
 
 #include "GwMeshCoordinator.h"
+#include "GwScheduleManager.h"
+#include "GwNetworkQueue.h"
 #include <string.h>
 
 GwMeshCoordinator gwMesh;
@@ -22,6 +24,13 @@ GwMeshCoordinator::GwMeshCoordinator() :
 
 bool GwMeshCoordinator::begin() {
   lastBeaconMs = millis();
+  static PersistentNonceRecord gwNvsBank0;
+  static PersistentNonceRecord gwNvsBank1;
+  if (!replayProtector.isTransmitterStorageReady()) {
+    if (!replayProtector.initTransmitterStorage(&gwNvsBank0, &gwNvsBank1)) {
+      replayProtector.reprovisionStorage(cmdSecurity.getActiveKeyEpoch() ? cmdSecurity.getActiveKeyEpoch() : 1, &gwNvsBank0, &gwNvsBank1);
+    }
+  }
   return true;
 }
 
@@ -94,6 +103,10 @@ void GwMeshCoordinator::service() {
     if (trackedCommands[i].inUse && !trackedCommands[i].completed) {
       if (now - trackedCommands[i].sentMs >= trackedCommands[i].timeoutMs) {
         trackedCommands[i].completed = true;
+        trackedCommands[i].timedOut = true;
+        if ((trackedCommands[i].terminalAckMask & trackedCommands[i].expectedMask) != trackedCommands[i].expectedMask) {
+          trackedCommands[i].partialFailure = true;
+        }
       }
     }
   }
@@ -102,6 +115,9 @@ void GwMeshCoordinator::service() {
   if (feederAckPending && (now - pendingAckStartMs > 5000)) {
     feederAckPending = false;
   }
+
+  // 4. Service Network-Wide Command Queue
+  gwNetworkQueue.service();
 }
 
 bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int16_t rssi, int8_t snr) {
@@ -158,21 +174,24 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           PktHeartbeatPingPayload hb;
           memcpy(&hb, frame.payload, sizeof(PktHeartbeatPingPayload));
 
-          // Check if pole is actively registered
+          // Check if pole is actively registered and not revoked
           RegisteredPole* p = gwRegistry.findPoleById(hb.poleId);
-          if (p == nullptr) {
+          bool isRevoked = (p != nullptr && gwRegistry.isMacRevoked(p->mac));
+          if (p == nullptr || isRevoked) {
             // Check if pole was revoked
             const PermanentRevocationRecord* rev = gwRegistry.findRevokedByPoleId(hb.poleId);
-            if (rev != nullptr) {
+            if (rev != nullptr || isRevoked) {
               // Trigger security alert for revoked pole trying to send heartbeat
               uint8_t revMac[6] = {0};
-              if (strlen(rev->hwId) >= 12) {
+              if (p != nullptr) {
+                memcpy(revMac, p->mac, 6);
+              } else if (rev != nullptr && strlen(rev->hwId) >= 12) {
                 for (int i = 0; i < 6; i++) {
                   char byteStr[3] = { rev->hwId[i*2], rev->hwId[i*2 + 1], '\0' };
                   revMac[i] = (uint8_t)strtoul(byteStr, NULL, 16);
                 }
               }
-              gwRegistry.setReappearedRevokedAlert(revMac, rev->logicalId, hb.poleId);
+              gwRegistry.setReappearedRevokedAlert(revMac, rev ? rev->logicalId : (p ? p->stringId : "REVOKED"), hb.poleId);
               Serial.printf("[SECURITY] 🚨 Heartbeat from REVOKED pole 0x%04X rejected!\n", hb.poleId);
             } else {
               Serial.printf("[MESH] Heartbeat from unregistered pole 0x%04X rejected.\n", hb.poleId);
@@ -195,9 +214,9 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
 
             PktHeartbeatAckPayload ack;
             ack.poleId = hb.poleId;
-            ack.gatewayTimeEpoch = millis() / 1000;
+            ack.gatewayTimeEpoch = gwSchedule.getEpoch();
             ack.configVersion = 0;
-            ack.ackStatus = (rev != nullptr) ? HB_ACK_REVOKED_LOCKED : HB_ACK_RE_REGISTER_REQUIRED;
+            ack.ackStatus = (rev != nullptr || isRevoked) ? HB_ACK_REVOKED_LOCKED : HB_ACK_RE_REGISTER_REQUIRED;
 
             ackFrame.header.payloadLen = sizeof(PktHeartbeatAckPayload);
             memcpy(ackFrame.payload, &ack, sizeof(PktHeartbeatAckPayload));
@@ -227,7 +246,7 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
 
           PktHeartbeatAckPayload ack;
           ack.poleId = hb.poleId;
-          ack.gatewayTimeEpoch = millis() / 1000;
+          ack.gatewayTimeEpoch = gwSchedule.getEpoch();
           ack.configVersion = 1;
           ack.ackStatus = HB_ACK_OK;
 
@@ -297,7 +316,7 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           PktFeederAckPayload ack;
           memcpy(&ack, frame.payload, sizeof(PktFeederAckPayload));
 
-          if (feederAckPending && ack.sequenceNumber == pendingAckSeq) {
+          if (feederAckPending && ack.sequenceNumber == pendingAckSeq && ack.poleId == pendingAckPole) {
             lastAckState = ack.ackState;
             lastAckPole = ack.poleId;
             if (ack.ackState == FEEDER_ACK_COMPLETED ||
@@ -310,21 +329,64 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
 
           // Update non-blocking tracked command record
           for (uint8_t i = 0; i < GW_MAX_TRACKED_COMMANDS; i++) {
-            if (trackedCommands[i].inUse && trackedCommands[i].seqNumber == ack.sequenceNumber) {
+            if (trackedCommands[i].inUse &&
+                trackedCommands[i].seqNumber == ack.sequenceNumber &&
+                trackedCommands[i].poleId == ack.poleId) {
+
+              uint8_t fBit = 0;
+              if (ack.feederId >= 1 && ack.feederId <= 6) {
+                fBit = (1 << (ack.feederId - 1));
+              } else if (ack.feederId == 0) {
+                fBit = trackedCommands[i].expectedMask;
+              }
+
+              trackedCommands[i].receivedAckMask |= fBit;
               trackedCommands[i].lastAckState = ack.ackState;
               trackedCommands[i].currentRelayMask = ack.currentRelayMask;
               trackedCommands[i].currentAuxMask = ack.currentAuxMask;
               trackedCommands[i].currentMcbMask = ack.currentMcbMask;
 
+              // Classify response
               if (ack.ackState == FEEDER_ACK_COMPLETED ||
+                  ack.ackState == FEEDER_ACK_OUTPUT_CHANGED ||
                   ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
-                  ack.ackState >= FEEDER_ACK_REJECTED_STALE ||
                   ack.ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) {
+                trackedCommands[i].outputConfirmedMask |= fBit;
+                if (ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED) {
+                  trackedCommands[i].auxConfirmedMask |= fBit;
+                }
+              }
+
+              if ((ack.currentMcbMask & fBit) != 0) {
+                trackedCommands[i].mcbFaultMask |= fBit;
+              }
+              if (ack.ackState >= FEEDER_ACK_REJECTED_STALE) {
+                trackedCommands[i].rejectedMask |= fBit;
+              }
+
+              // Terminal state check for this feeder
+              if (ack.ackState == FEEDER_ACK_COMPLETED ||
+                  ack.ackState == FEEDER_ACK_OUTPUT_CHANGED ||
+                  ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
+                  ack.ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED ||
+                  ack.ackState >= FEEDER_ACK_REJECTED_STALE) {
+                trackedCommands[i].terminalAckMask |= fBit;
+              }
+
+              // Mark completed ONLY when ALL expected feeders have a terminal ACK
+              if ((trackedCommands[i].terminalAckMask & trackedCommands[i].expectedMask) == trackedCommands[i].expectedMask) {
                 trackedCommands[i].completed = true;
+                if (trackedCommands[i].rejectedMask != 0 ||
+                    (trackedCommands[i].outputConfirmedMask & trackedCommands[i].expectedMask) != trackedCommands[i].expectedMask) {
+                  trackedCommands[i].partialFailure = true;
+                }
               }
               break;
             }
           }
+
+          // Forward to network queue if active batch
+          gwNetworkQueue.onFeederAck(ack);
 
           // Also update registry relay mask
           RegisteredPole* p = gwRegistry.findPoleById(ack.poleId);
@@ -396,8 +458,10 @@ bool GwMeshCoordinator::sendDownlinkPacket(uint16_t targetPoleId, uint8_t packet
 }
 
 bool GwMeshCoordinator::sendFeederCommand(uint16_t poleId, uint8_t feederId, uint8_t action, uint8_t groupMask, uint32_t &outSeqNumber, int64_t adminChatId) {
+  uint32_t currentUtc = gwSchedule.getEpoch();
+  uint32_t expiryEpoch = (currentUtc > 0) ? (currentUtc + 60) : ((millis() / 1000) + 60); // 60 seconds validity
+
   AuthenticatedCommandEnvelope env;
-  uint32_t expiryEpoch = (millis() / 1000) + 60; // 60 seconds validity
   bool ok = cmdSecurity.createCommand(MSCB_GATEWAY_NODE_ID, poleId, feederId,
                                       PKT_CMD_FEEDER_SWITCH, action, expiryEpoch, env);
   if (!ok) {
@@ -421,29 +485,58 @@ bool GwMeshCoordinator::sendFeederCommand(uint16_t poleId, uint8_t feederId, uin
   pendingAckStartMs = millis();
   lastAckState = FEEDER_ACK_SENT;
 
+  uint8_t expMask = 0;
+  if (feederId >= 1 && feederId <= 6) {
+    expMask = (1 << (feederId - 1));
+  } else if (feederId == 0x00) {
+    expMask = 0x3F;
+  } else {
+    expMask = groupMask & 0x3F;
+  }
+  if (expMask == 0) expMask = 0x3F;
+
   // Enqueue in non-blocking tracked commands
+  int8_t slotIdx = -1;
   for (uint8_t i = 0; i < GW_MAX_TRACKED_COMMANDS; i++) {
     if (!trackedCommands[i].inUse) {
+      slotIdx = i;
       trackedCommands[i].inUse = true;
       trackedCommands[i].seqNumber = env.sequenceNumber;
       trackedCommands[i].poleId = poleId;
       trackedCommands[i].feederId = feederId;
       trackedCommands[i].action = action;
       trackedCommands[i].groupMask = groupMask;
+      trackedCommands[i].expectedMask = expMask;
+      trackedCommands[i].receivedAckMask = 0;
+      trackedCommands[i].terminalAckMask = 0;
+      trackedCommands[i].outputConfirmedMask = 0;
+      trackedCommands[i].auxConfirmedMask = 0;
+      trackedCommands[i].mcbFaultMask = 0;
+      trackedCommands[i].rejectedMask = 0;
       trackedCommands[i].adminChatId = adminChatId;
       trackedCommands[i].sentMs = millis();
-      trackedCommands[i].timeoutMs = 4500;
+      trackedCommands[i].timeoutMs = (expMask == 0x3F || feederId == 0x00) ? 12000 : 5000;
       trackedCommands[i].lastAckState = FEEDER_ACK_SENT;
       trackedCommands[i].currentRelayMask = 0;
       trackedCommands[i].currentAuxMask = 0;
       trackedCommands[i].currentMcbMask = 0;
       trackedCommands[i].completed = false;
+      trackedCommands[i].partialFailure = false;
+      trackedCommands[i].timedOut = false;
       trackedCommands[i].notified = false;
       break;
     }
   }
 
-  return sendDownlinkPacket(poleId, PKT_CMD_FEEDER_SWITCH, (const uint8_t*)&cmd, sizeof(PktFeederCmdPayload), PRIO_COMMAND);
+  bool sendOk = sendDownlinkPacket(poleId, PKT_CMD_FEEDER_SWITCH, (const uint8_t*)&cmd, sizeof(PktFeederCmdPayload), PRIO_COMMAND);
+  if (!sendOk) {
+    if (slotIdx >= 0) {
+      trackedCommands[slotIdx].inUse = false;
+    }
+    feederAckPending = false;
+    return false;
+  }
+  return true;
 }
 
 bool GwMeshCoordinator::sendRegisterResponse(const uint8_t mac[6], uint16_t assignedPoleId, uint16_t assignedParent, uint8_t status) {

@@ -53,7 +53,8 @@ enum FeederCommandAckState : uint8_t {
   FEEDER_ACK_REJECTED_LOCKED             = 7,
   FEEDER_ACK_REJECTED_FAULT              = 8,
   FEEDER_ACK_FEEDBACK_NOT_CONNECTED      = 9,
-  FEEDER_ACK_FEEDBACK_UNAVAILABLE        = 10
+  FEEDER_ACK_FEEDBACK_UNAVAILABLE        = 10,
+  FEEDER_ACK_REJECTED_TIME_UNSYNCED      = 11
 };
 
 inline const char* feederAckStateToString(FeederCommandAckState st) {
@@ -69,6 +70,7 @@ inline const char* feederAckStateToString(FeederCommandAckState st) {
     case FEEDER_ACK_REJECTED_FAULT:              return "REJECTED_FAULT";
     case FEEDER_ACK_FEEDBACK_NOT_CONNECTED:      return "FEEDBACK_NOT_CONNECTED";
     case FEEDER_ACK_FEEDBACK_UNAVAILABLE:        return "FEEDBACK_UNAVAILABLE";
+    case FEEDER_ACK_REJECTED_TIME_UNSYNCED:      return "REJECTED_TIME_UNSYNCED";
     default:                                     return "UNKNOWN";
   }
 }

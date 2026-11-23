@@ -28,6 +28,10 @@
 #include "PoleFeederManager.h"
 #include "PoleFirmwareManager.h"
 #include <CommandSecurity.h>
+#if __has_include("PoleSecrets.h")
+  #include "PoleSecrets.h"
+#endif
+#include "PoleTimeManager.h"
 
 // =====================================================================
 //  GLOBAL STATE & TIMING VARIABLES
@@ -163,9 +167,18 @@ void setup() {
   // Print diagnostic audit
   printPoleDiagnosticBanner();
 
+  // Initialize Mesh Time Synchronization Manager
+  poleTimeMgr.begin();
+
   // Security & Key Provisioning Audit
+#if defined(MSCB_PROVISIONED_AES_KEY)
+  const uint8_t provKey[MSCB_KEY_LEN_BYTES] = MSCB_PROVISIONED_AES_KEY;
+  cmdSecurity.provisionKey(provKey, sizeof(provKey), MSCB_PROVISIONED_KEY_EPOCH);
+#endif
   if (!cmdSecurity.isKeyProvisioned()) {
     Serial.println(F("[SECURITY] ⚠️ No secure key provisioned. Operating in Fail-Closed mode."));
+  } else {
+    Serial.println(F("[SECURITY] ✅ Network security key provisioned (HMAC-SHA256 active)."));
   }
 
   s_bootTimeMs = millis();
@@ -232,6 +245,14 @@ void loop() {
               PktFeederCmdPayload cmd;
               memcpy(&cmd, inFrame.payload, sizeof(PktFeederCmdPayload));
               poleFeederMgr.processCommandPayload(cmd);
+            }
+            break;
+          }
+          case PKT_CMD_TIME_SYNC: {
+            if (inFrame.header.payloadLen >= sizeof(PktTimeSyncPayload)) {
+              PktTimeSyncPayload syncPkt;
+              memcpy(&syncPkt, inFrame.payload, sizeof(PktTimeSyncPayload));
+              poleTimeMgr.processTimeSyncPayload(syncPkt);
             }
             break;
           }

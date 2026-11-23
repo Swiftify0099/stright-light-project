@@ -63,6 +63,9 @@
 // =====================================================================
 #define MSCB_SAFE_BOOT_MODE               1     // 1 = Safe startup mode enabled
 #define MSCB_RELAYS_LOCKED_DISABLED       1     // 1 = Relay drive strictly prohibited by default (isolated DC bench test only when unlocked)
+#ifndef MSCB_BENCH_TEST_PROFILE_ENABLED
+#define MSCB_BENCH_TEST_PROFILE_ENABLED   0     // 0 = Production locked; 1 = Isolated low-voltage bench test profile compiled
+#endif
 #define MSCB_SIMULATION_TELEMETRY_ONLY    0     // 0 = Real physical ADC sampling enforced; zero synthetic data allowed!
 
 // =====================================================================

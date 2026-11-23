@@ -129,6 +129,9 @@ CommandAuthResult CommandSecurity::verifyCommand(
   }
 
   // 5. Absolute Expiry Timestamp Check (Never millis()!)
+  if (currentEpochSec < 1700000000UL) {
+    return AUTH_ERR_TIME_UNSYNCED;
+  }
   if (currentEpochSec > envelope.expiryEpochSec) {
     return AUTH_ERR_COMMAND_EXPIRED;
   }
@@ -159,4 +162,39 @@ CommandAuthResult CommandSecurity::verifyCommand(
   );
 
   return AUTH_SUCCESS;
+}
+
+bool CommandSecurity::createTimeSyncPacket(uint32_t epochSec, PktTimeSyncPayload &outPkt) {
+  if (!keyProvisioned) return false;
+  if (epochSec < 1700000000UL) return false;
+
+  outPkt.networkId = MSCB_CMD_NETWORK_MAGIC;
+  outPkt.gatewayNodeId = MSCB_GATEWAY_NODE_ID;
+  outPkt.epochSec = epochSec;
+  outPkt.sequenceNumber = replayProtector.getNextMonotonicSeq();
+  outPkt.keyEpoch = activeKeyEpoch;
+
+  computeHmacSha256(
+    provisionedKey, MSCB_KEY_LEN_BYTES,
+    reinterpret_cast<const uint8_t*>(&outPkt), MSCB_TIME_SYNC_HEADER_BYTES,
+    outPkt.hmacTag
+  );
+  return true;
+}
+
+bool CommandSecurity::verifyTimeSyncPacket(const PktTimeSyncPayload &pkt) {
+  if (!keyProvisioned) return false;
+  if (pkt.networkId != MSCB_CMD_NETWORK_MAGIC) return false;
+  if (pkt.gatewayNodeId != MSCB_GATEWAY_NODE_ID) return false;
+  if (pkt.keyEpoch != activeKeyEpoch) return false;
+  if (pkt.epochSec < 1700000000UL) return false;
+
+  uint8_t expectedTag[MSCB_HMAC_TAG_BYTES];
+  computeHmacSha256(
+    provisionedKey, MSCB_KEY_LEN_BYTES,
+    reinterpret_cast<const uint8_t*>(&pkt), MSCB_TIME_SYNC_HEADER_BYTES,
+    expectedTag
+  );
+
+  return constantTimeCompare(expectedTag, pkt.hmacTag, MSCB_HMAC_TAG_BYTES);
 }

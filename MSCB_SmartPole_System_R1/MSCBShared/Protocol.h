@@ -159,6 +159,17 @@ struct PktRevokedReappearPayload {
   uint32_t timestamp;
 };
 
+#define MSCB_TIME_SYNC_HEADER_BYTES  16
+
+struct PktTimeSyncPayload {
+  uint16_t networkId;       // 0x4D53 ("MS")
+  uint16_t gatewayNodeId;   // 0x0001 (MSCB_GATEWAY_NODE_ID)
+  uint32_t epochSec;        // Real UTC Unix Epoch from Gateway NTP
+  uint32_t sequenceNumber;  // Monotonic sequence number
+  uint32_t keyEpoch;        // Active key epoch
+  uint8_t  hmacTag[32];     // 256-bit HMAC tag computed over the 16 bytes above
+};
+
 struct PktFeederCmdPayload {
   uint16_t targetPoleId;
   uint8_t  feederId;             // 1..6 or 0 for ALL
