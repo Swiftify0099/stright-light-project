@@ -24,7 +24,7 @@ enum PacketPriority : uint8_t {
 };
 
 // =====================================================================
-//  FEEDER RELAY & MCB STATUS
+//  FEEDER RELAY & MCB STATUS & COMMAND STATE PROGRESSION
 // =====================================================================
 enum FeederRelayState : uint8_t {
   FEEDER_STATE_OFF         = 0, // Coil de-energized, contacts open
@@ -40,6 +40,39 @@ enum McbTripStatus : uint8_t {
   MCB_STATUS_UNKNOWN = 2  // Input line disconnected / unmonitored
 };
 
+// Section 7 Mandatory Command State Progression:
+// SENT -> RECEIVED -> ACCEPTED -> OUTPUT_CHANGED -> AUXILIARY_FEEDBACK_VERIFIED -> COMPLETED
+enum FeederCommandAckState : uint8_t {
+  FEEDER_ACK_SENT                        = 0,
+  FEEDER_ACK_RECEIVED                    = 1,
+  FEEDER_ACK_ACCEPTED                    = 2,
+  FEEDER_ACK_OUTPUT_CHANGED              = 3,
+  FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED = 4,
+  FEEDER_ACK_COMPLETED                   = 5,
+  FEEDER_ACK_REJECTED_STALE              = 6,
+  FEEDER_ACK_REJECTED_LOCKED             = 7,
+  FEEDER_ACK_REJECTED_FAULT              = 8,
+  FEEDER_ACK_FEEDBACK_NOT_CONNECTED      = 9,
+  FEEDER_ACK_FEEDBACK_UNAVAILABLE        = 10
+};
+
+inline const char* feederAckStateToString(FeederCommandAckState st) {
+  switch (st) {
+    case FEEDER_ACK_SENT:                        return "SENT";
+    case FEEDER_ACK_RECEIVED:                    return "RECEIVED";
+    case FEEDER_ACK_ACCEPTED:                    return "ACCEPTED";
+    case FEEDER_ACK_OUTPUT_CHANGED:              return "OUTPUT_CHANGED";
+    case FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED: return "AUXILIARY_FEEDBACK_VERIFIED";
+    case FEEDER_ACK_COMPLETED:                   return "COMPLETED";
+    case FEEDER_ACK_REJECTED_STALE:              return "REJECTED_STALE";
+    case FEEDER_ACK_REJECTED_LOCKED:             return "REJECTED_LOCKED";
+    case FEEDER_ACK_REJECTED_FAULT:              return "REJECTED_FAULT";
+    case FEEDER_ACK_FEEDBACK_NOT_CONNECTED:      return "FEEDBACK_NOT_CONNECTED";
+    case FEEDER_ACK_FEEDBACK_UNAVAILABLE:        return "FEEDBACK_UNAVAILABLE";
+    default:                                     return "UNKNOWN";
+  }
+}
+
 // =====================================================================
 //  NODE OPERATIONAL HEALTH & CHANNEL AVAILABILITY
 // =====================================================================
@@ -53,24 +86,34 @@ enum NodeHealthState : uint8_t {
 
 enum ChannelDataState : uint8_t {
   CHANNEL_STATE_OK              = 0, // Sampling active, within valid range
+  CHANNEL_VALID                 = 0, // Alias for CHANNEL_STATE_OK
   CHANNEL_ADC_NOT_CONNECTED     = 1, // Underlying ADC chip missing / not detected on SPI
-  CHANNEL_SENSOR_FAULT          = 2, // Sensor open, short, or invalid impedance
-  CHANNEL_DATA_UNAVAILABLE      = 3, // Measurement unavailable (hardware offline)
-  CHANNEL_DATA_STALE            = 4, // Sampling stopped / timed out; values preserved
-  CHANNEL_ZERO_FRAME_REJECTED   = 5, // All-zero or all-one dead bus frame rejected
-  CHANNEL_OVER_RANGE_CLIPPING   = 6  // Waveform clipped or saturated
+  CHANNEL_SENSOR_NOT_CONNECTED  = 2, // Sensor open / disconnected (when reliably detectable)
+  CHANNEL_SENSOR_STATE_UNKNOWN  = 3, // Sensor state cannot be confirmed
+  CHANNEL_DATA_UNAVAILABLE      = 4, // Measurement unavailable (hardware offline / uninitialized)
+  CHANNEL_UNCALIBRATED          = 5, // Channel lacks valid calibration
+  CHANNEL_DATA_STALE            = 6, // Sampling stopped / timed out; values preserved
+  CHANNEL_ZERO_FRAME_REJECTED   = 7, // All-zero or all-one dead bus frame rejected
+  CHANNEL_OUT_OF_RANGE          = 8, // Signal outside permissible dynamic range
+  CHANNEL_OVER_RANGE_CLIPPING   = 9, // Waveform clipped or saturated (+/- 1.2V FSR)
+  CHANNEL_CLIPPED               = 9, // Alias for CHANNEL_OVER_RANGE_CLIPPING
+  CHANNEL_SENSOR_FAULT          = 10 // Hardware transducer fault
 };
 
 inline const char* channelDataStateToString(ChannelDataState st) {
   switch (st) {
-    case CHANNEL_STATE_OK:            return "OK";
-    case CHANNEL_ADC_NOT_CONNECTED:   return "ADC_NOT_CONNECTED";
-    case CHANNEL_SENSOR_FAULT:        return "SENSOR_FAULT";
-    case CHANNEL_DATA_UNAVAILABLE:    return "DATA_UNAVAILABLE";
-    case CHANNEL_DATA_STALE:          return "DATA_STALE";
-    case CHANNEL_ZERO_FRAME_REJECTED: return "ZERO_FRAME_REJECTED";
-    case CHANNEL_OVER_RANGE_CLIPPING: return "OVER_RANGE_CLIPPING";
-    default:                          return "UNKNOWN";
+    case CHANNEL_STATE_OK:             return "VALID";
+    case CHANNEL_ADC_NOT_CONNECTED:    return "ADC_NOT_CONNECTED";
+    case CHANNEL_SENSOR_NOT_CONNECTED: return "SENSOR_NOT_CONNECTED";
+    case CHANNEL_SENSOR_STATE_UNKNOWN: return "SENSOR_STATE_UNKNOWN";
+    case CHANNEL_DATA_UNAVAILABLE:     return "DATA_UNAVAILABLE";
+    case CHANNEL_UNCALIBRATED:         return "UNCALIBRATED";
+    case CHANNEL_DATA_STALE:           return "DATA_STALE";
+    case CHANNEL_ZERO_FRAME_REJECTED:  return "ZERO_FRAME_REJECTED";
+    case CHANNEL_OUT_OF_RANGE:         return "OUT_OF_RANGE";
+    case CHANNEL_OVER_RANGE_CLIPPING:  return "CLIPPED";
+    case CHANNEL_SENSOR_FAULT:         return "SENSOR_FAULT";
+    default:                           return "UNKNOWN";
   }
 }
 

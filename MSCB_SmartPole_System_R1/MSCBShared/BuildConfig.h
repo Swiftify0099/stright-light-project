@@ -45,7 +45,7 @@
 #define MSCB_LORA_SPREADING_FACTOR        10          // SF10 for robust long-range link
 #define MSCB_LORA_CODING_RATE             5           // CR 4/5
 #define MSCB_LORA_SYNC_WORD               0x12        // Private mesh synchronization word
-#define MSCB_LORA_TX_POWER_DBM            10          // 10 dBm conducted (+10 mW ERP WPC limit)
+#define MSCB_LORA_TX_POWER_DBM            8           // +8 dBm conducted (resolves BUG-R1-07: 8 dBm + 3 dBi antenna - 0.5 dB cable loss = 8.35 dBm ERP <= 10.0 mW WPC ceiling)
 #define MSCB_LORA_PREAMBLE_LEN            8           // Preamble symbol length
 
 // =====================================================================
@@ -62,8 +62,8 @@
 //  SAFETY LOCKS & HARDWARE EXECUTION ENFORCEMENT
 // =====================================================================
 #define MSCB_SAFE_BOOT_MODE               1     // 1 = Safe startup mode enabled
-#define MSCB_RELAYS_LOCKED_DISABLED       1     // 1 = Relay drive strictly prohibited in this phase
-#define MSCB_SIMULATION_TELEMETRY_ONLY    1     // 1 = ADC physical sampling decoupled
+#define MSCB_RELAYS_LOCKED_DISABLED       1     // 1 = Relay drive strictly prohibited by default (isolated DC bench test only when unlocked)
+#define MSCB_SIMULATION_TELEMETRY_ONLY    0     // 0 = Real physical ADC sampling enforced; zero synthetic data allowed!
 
 // =====================================================================
 //  BUILD COMPILER VALIDATION CHECKS

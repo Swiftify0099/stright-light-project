@@ -13,6 +13,9 @@
 #ifdef ARDUINO
   #include <Arduino.h>
   #include <mbedtls/sha256.h>
+  #include <mbedtls/ecdsa.h>
+  #include <mbedtls/ecp.h>
+  #include <mbedtls/bignum.h>
   #include <esp_ota_ops.h>
   #include <esp_partition.h>
 #endif
@@ -46,17 +49,33 @@ void GwFirmwareManager::init(uint16_t currentFwVersion) {
   state = GW_OTA_IDLE;
   progressPct = 0;
   currentVersion = currentFwVersion;
+}
 
-#ifdef ARDUINO
+bool GwFirmwareManager::performBootSelfTest(bool psramOk, bool radioOk) {
+#if defined(ARDUINO) && defined(ESP32)
   const esp_partition_t *running = esp_ota_get_running_partition();
   esp_ota_img_states_t ota_state;
   if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
     if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-      Serial.println(F("[GW][OTA] New OTA partition booted. Self-tests starting..."));
-      markAppValid();
+      Serial.println(F("[GW][OTA] New OTA image booted. Executing post-update health self-tests..."));
+      if (psramOk && radioOk) {
+        Serial.println(F("[GW][OTA] ✅ Self-tests PASSED (PSRAM + LoRa healthy). Marking application valid."));
+        markAppValid();
+        return true;
+      } else {
+        Serial.println(F("[GW][OTA] ❌ Self-tests FAILED! Hardware check failure. Triggering automatic rollback..."));
+        triggerRollback();
+        return false;
+      }
     }
   }
+#else
+  if (!psramOk || !radioOk) {
+    state = GW_OTA_FAILED;
+    return false;
+  }
 #endif
+  return true;
 }
 
 void GwFirmwareManager::setPinnedPublicKey(const uint8_t *keyBytes, size_t keyLen) {
@@ -115,12 +134,52 @@ bool GwFirmwareManager::verifyDigitalSignature(const char *sha256Hex, const char
   // 5. Cryptographic verification
   // NOTE: Zero substring checks (eliminated "INVALID_SIG" and "BAD" mock patterns).
   // On physical ESP32 target with mbedtls, call asymmetric verification:
-#ifdef ARDUINO
-  // In ESP32 production builds, invoke mbedTLS ECDSA / RSA-PSS verification:
-  // e.g. mbedtls_ecdsa_verify or mbedtls_pk_verify against pinned root key.
-  // When running on device with valid configured keys:
+#if defined(ARDUINO) && defined(ESP32)
   if (!hasPinnedKey) return false;
-  return true; // Production mbedtls hook
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_point Q;
+  mbedtls_mpi r, s;
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_ecp_point_init(&Q);
+  mbedtls_mpi_init(&r);
+  mbedtls_mpi_init(&s);
+
+  int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+  if (ret != 0) {
+    mbedtls_ecp_group_free(&grp);
+    return false;
+  }
+
+  // Read pinned uncompressed public key (65 bytes: 0x04 || X || Y)
+  ret = mbedtls_ecp_point_read_binary(&grp, &Q, pinnedPublicKey, 65);
+  if (ret != 0) {
+    mbedtls_ecp_group_free(&grp);
+    mbedtls_ecp_point_free(&Q);
+    return false;
+  }
+
+  uint8_t sigBytes[64];
+  for (int i = 0; i < 64; i++) {
+    char bs[3] = { sigHex[i*2], sigHex[i*2 + 1], '\0' };
+    sigBytes[i] = (uint8_t)strtoul(bs, NULL, 16);
+  }
+  mbedtls_mpi_read_binary(&r, sigBytes, 32);
+  mbedtls_mpi_read_binary(&s, sigBytes + 32, 32);
+
+  uint8_t hashBytes[32];
+  for (int i = 0; i < 32; i++) {
+    char bs[3] = { sha256Hex[i*2], sha256Hex[i*2 + 1], '\0' };
+    hashBytes[i] = (uint8_t)strtoul(bs, NULL, 16);
+  }
+
+  ret = mbedtls_ecdsa_verify(&grp, hashBytes, 32, &Q, &r, &s);
+
+  mbedtls_ecp_group_free(&grp);
+  mbedtls_ecp_point_free(&Q);
+  mbedtls_mpi_free(&r);
+  mbedtls_mpi_free(&s);
+
+  return (ret == 0);
 #else
   // Host simulation & test runner cryptographic validation:
   // Decodes hex signature and verifies deterministic signature tag for test harness
@@ -281,7 +340,40 @@ bool GwFirmwareManager::applyUpdate(const uint8_t *imageBuffer, size_t imageLen,
   }
 
   state = GW_OTA_FLASHING;
-  // Flashing steps
+#if defined(ARDUINO) && defined(ESP32)
+  const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+  if (!update_partition) {
+    outError = "OTA_PARTITION_NOT_FOUND";
+    state = GW_OTA_FAILED;
+    return false;
+  }
+  esp_ota_handle_t ota_handle;
+  esp_err_t err = esp_ota_begin(update_partition, imageLen, &ota_handle);
+  if (err != ESP_OK) {
+    outError = "ESP_OTA_BEGIN_FAILED";
+    state = GW_OTA_FAILED;
+    return false;
+  }
+  err = esp_ota_write(ota_handle, imageBuffer, imageLen);
+  if (err != ESP_OK) {
+    esp_ota_abort(ota_handle);
+    outError = "ESP_OTA_WRITE_FAILED";
+    state = GW_OTA_FAILED;
+    return false;
+  }
+  err = esp_ota_end(ota_handle);
+  if (err != ESP_OK) {
+    outError = "ESP_OTA_END_FAILED";
+    state = GW_OTA_FAILED;
+    return false;
+  }
+  err = esp_ota_set_boot_partition(update_partition);
+  if (err != ESP_OK) {
+    outError = "ESP_OTA_SET_BOOT_PARTITION_FAILED";
+    state = GW_OTA_FAILED;
+    return false;
+  }
+#endif
   state = GW_OTA_AWAITING_REBOOT;
   return true;
 }

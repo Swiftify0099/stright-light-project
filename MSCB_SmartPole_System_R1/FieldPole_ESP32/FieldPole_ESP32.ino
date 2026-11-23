@@ -17,8 +17,16 @@
 #include <SPI.h>
 #include <esp_chip_info.h>
 #include "PoleConfig.h"
+#include "PoleBoardPins.h"
 #include "PoleActuators.h"
 #include "PoleMetrology.h"
+#include "PoleRadioDriver.h"
+#include "PoleStorageManager.h"
+#include "PoleMeshRouter.h"
+#include "PoleRegistrationClient.h"
+#include "PoleHeartbeatSender.h"
+#include "PoleFeederManager.h"
+#include "PoleFirmwareManager.h"
 #include "CommandSecurity.h"
 
 // =====================================================================
@@ -121,6 +129,27 @@ void setup() {
   SPI.begin(POLE_SPI_SCK_PIN, POLE_SPI_MISO_PIN, POLE_SPI_MOSI_PIN);
   bool metrologyOk = poleMetrology.begin();
 
+  // Initialize Persistent Storage
+  poleStorage.begin();
+
+  // Initialize SX1278 RA-02 LoRa Radio
+  bool radioOk = poleRadio.begin();
+
+  // Initialize Mesh Router
+  poleMesh.begin();
+
+  // Initialize Registration Client
+  poleRegClient.begin();
+
+  // Initialize Heartbeat Sender
+  poleHeartbeat.begin();
+
+  // Initialize Feeder Actuator & Feedback Manager
+  poleFeederMgr.begin();
+
+  // Initialize Firmware Manager
+  poleFwMgr.init(10);
+
   // Configure Status LED
   pinMode(POLE_STATUS_LED_PIN, OUTPUT);
   digitalWrite(POLE_STATUS_LED_PIN, LOW);
@@ -151,6 +180,9 @@ void setup() {
       Serial.println(F("[SYSTEM_INIT] ⚠️ Metrology: ADS131M08 hardware absent. Zero-simulation enforced: ADC_NOT_CONNECTED."));
     }
   }
+
+  // Execute post-boot OTA self-tests if pending verification
+  poleFwMgr.performBootSelfTest(metrologyOk, radioOk);
 }
 
 // =====================================================================
@@ -159,13 +191,78 @@ void setup() {
 void loop() {
   uint32_t currentMs = millis();
 
-  // Service Metrology Subsystem Watchdog & Freshness
+  // 1. Process Inbound LoRa Radio Packets & Multi-Hop Forwarding
+  if (poleRadio.hasPacket()) {
+    MeshWireFrame inFrame;
+    int16_t rssi = 0;
+    int8_t snr = 0;
+    if (poleRadio.receivePacket(inFrame, rssi, snr)) {
+      MeshWireFrame actionFrame;
+      bool sendAction = false;
+      bool forMe = poleMesh.handleReceivedWireFrame(inFrame, rssi, snr, actionFrame, sendAction);
+
+      // Multi-Hop Packet Forwarding
+      if (sendAction) {
+        poleRadio.sendPacket(actionFrame);
+      }
+
+      // Local Packet Dispatch
+      if (forMe) {
+        switch (inFrame.header.type) {
+          case PKT_REGISTER_RESPONSE: {
+            if (inFrame.header.payloadLen >= sizeof(PktRegisterResponsePayload)) {
+              PktRegisterResponsePayload resp;
+              memcpy(&resp, inFrame.payload, sizeof(PktRegisterResponsePayload));
+              poleRegClient.handleRegisterResponse(resp);
+            }
+            break;
+          }
+          case PKT_HEARTBEAT_ACK: {
+            if (inFrame.header.payloadLen >= sizeof(PktHeartbeatAckPayload)) {
+              PktHeartbeatAckPayload ack;
+              memcpy(&ack, inFrame.payload, sizeof(PktHeartbeatAckPayload));
+              poleHeartbeat.handleHeartbeatAck(ack);
+            }
+            break;
+          }
+          case PKT_CMD_FEEDER_SWITCH: {
+            if (inFrame.header.payloadLen >= sizeof(PktFeederCmdPayload)) {
+              PktFeederCmdPayload cmd;
+              memcpy(&cmd, inFrame.payload, sizeof(PktFeederCmdPayload));
+              poleFeederMgr.processCommandPayload(cmd);
+            }
+            break;
+          }
+          case PKT_CMD_EMERGENCY_SHUTDOWN: {
+            poleFeederMgr.emergencyShutdownAll("EMERGENCY_LORA_PKT");
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    }
+  }
+
+  // 2. Service Multi-Hop Mesh Router (parent discovery, failover, beacons)
+  poleMesh.service();
+
+  // 3. Service Registration Client (retry if unregistered)
+  poleRegClient.service();
+
+  // 4. Service Periodic Heartbeat Sender
+  poleHeartbeat.service();
+
+  // 5. Service Feeder Staggering Queue
+  poleFeederMgr.service();
+
+  // 6. Service Metrology Subsystem Watchdog & Freshness
   poleMetrology.service();
 
-  // Periodic Output Verification
+  // 7. Periodic Output Verification
   poleActuators.verifyAllOutputs();
 
-  // Periodic Heartbeat Status Flash (1 Hz non-blocking)
+  // 8. Periodic Heartbeat Status Flash (1 Hz non-blocking)
   if (currentMs - s_lastHeartbeatMs >= MSCB_STATUS_BLINK_INTERVAL_MS) {
     s_lastHeartbeatMs = currentMs;
     
@@ -176,11 +273,12 @@ void loop() {
     static uint8_t s_logDivider = 0;
     if (++s_logDivider >= 10) {
       s_logDivider = 0;
-      Serial.printf("[POLE_HEARTBEAT] Uptime: %lu s | Free Heap: %u B | Feeders: 6 %s | ADC: %s | Sec: %s\n", 
+      Serial.printf("[POLE_HEARTBEAT] Uptime: %lu s | Heap: %u B | Reg: %s | Mesh: %s (Par: 0x%04X, Rank: %u) | ADC: %s\n", 
                     (currentMs - s_bootTimeMs) / 1000UL, ESP.getFreeHeap(),
-                    poleActuators.areRelaysLockedDisabled() ? "LOCKED_OFF" : "OPERATIONAL",
-                    poleMetrology.areAllAdcsDetected() ? "3_CHIPS_OK" : "ADC_NOT_CONNECTED",
-                    cmdSecurity.isKeyProvisioned() ? "KEY_PROVISIONED" : "FAIL_CLOSED");
+                    regClientStateToString(poleRegClient.getState()),
+                    routingStateToString(poleMesh.getState()),
+                    poleMesh.getPrimaryParent(), poleMesh.getMyRank(),
+                    poleMetrology.areAllAdcsDetected() ? "3_CHIPS_OK" : "ADC_NOT_CONNECTED");
     }
   }
 

@@ -67,6 +67,90 @@ struct MeshPacketHeader {
   uint16_t nextHop;      // Immediate recipient address
   uint16_t payloadLen;   // Payload length in bytes (excluding header and CRC)
 };
+#pragma pack(pop)
+
+// =====================================================================
+//  STRUCTURED WIRE PAYLOAD DEFINITIONS
+// =====================================================================
+#pragma pack(push, 1)
+struct PktRegisterRequestPayload {
+  uint8_t  macAddress[6];
+  uint8_t  nodeType;             // e.g. 1 = FIELD_POLE
+  uint16_t firmwareVersion;
+  uint32_t sessionToken;
+  uint16_t candidateParent1;
+  uint16_t candidateParent2;
+  int16_t  rssiToParent1;
+  int8_t   snrToParent1;
+  uint32_t nonce;
+  uint8_t  authTag[16];
+};
+
+enum RegisterResponseCode : uint8_t {
+  REG_RESP_APPROVED              = 0,
+  REG_RESP_REJECTED_CAPACITY     = 1,
+  REG_RESP_REJECTED_REVOKED      = 2,
+  REG_RESP_REJECTED_UNAUTHORIZED = 3,
+  REG_RESP_PENDING_APPROVAL      = 4
+};
+
+struct PktRegisterResponsePayload {
+  uint8_t  macAddress[6];
+  uint8_t  status;               // RegisterResponseCode
+  uint16_t assignedPoleId;
+  uint16_t assignedParent;
+  uint16_t heartbeatIntervalSec;
+  uint32_t networkKeyEpoch;
+};
+
+struct PktHeartbeatPingPayload {
+  uint16_t poleId;
+  uint16_t primaryParent;
+  uint16_t backupParent;
+  uint8_t  rank;
+  uint8_t  healthState;
+  uint8_t  feederStateMask;      // bits 0..5
+  uint8_t  auxFeedbackMask;      // bits 0..5 contactor aux
+  uint8_t  mcbStatusMask;        // bits 0..5 mcb aux
+  uint32_t uptimeSec;
+  float    busVoltageV;          // R-phase bus voltage or avg
+  float    totalCurrentA;        // aggregate current
+};
+
+struct PktHeartbeatAckPayload {
+  uint16_t poleId;
+  uint32_t gatewayTimeEpoch;
+  uint16_t configVersion;
+  uint8_t  ackStatus;            // 0 = OK, 1 = CONFIG_OUTDATED, 2 = RE_REGISTER_REQUIRED
+};
+
+struct PktFeederCmdPayload {
+  uint16_t targetPoleId;
+  uint8_t  feederId;             // 1..6 or 0 for ALL
+  uint8_t  commandAction;        // 0=OFF, 1=ON, 2=TOGGLE
+  uint8_t  groupMask;            // bitmask for group control (bits 0..5)
+  uint32_t sequenceNumber;
+  uint32_t expiryEpochSec;
+  uint8_t  hmacTag[32];          // 256-bit HMAC
+};
+
+struct PktFeederAckPayload {
+  uint16_t poleId;
+  uint8_t  feederId;
+  uint32_t sequenceNumber;
+  uint8_t  ackState;             // FeederCommandAckState
+  uint8_t  currentRelayMask;     // Bitmask of physical relay coils
+  uint8_t  currentAuxMask;       // Bitmask of contactor auxiliary contacts
+  uint8_t  currentMcbMask;       // Bitmask of MCB auxiliary contacts
+};
+
+struct PktBeaconAnnouncePayload {
+  uint16_t senderId;
+  uint8_t  rank;
+  uint16_t primaryParent;
+  uint8_t  capacitySlotsFree;
+  uint32_t beaconTimestamp;
+};
 
 /**
  * @brief Raw Wire Frame with Pre-allocated Payload Buffer

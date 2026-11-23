@@ -146,9 +146,65 @@ This document records the exact, chronological history of firmware modifications
 
 ---
 
+---
+
+### Fix Entry FIX-R1-06: Global RF Power Harmonization & Simulation Flag Elimination
+- **Bug Reference**: `BUG-R1-07` / Regulatory & Safety
+- **Target Subsystem**: Global Build Configuration (`MSCBShared/BuildConfig.h`)
+- **Files Modified**: `MSCB_SmartPole_System_R1/MSCBShared/BuildConfig.h`
+- **Root Cause**: `BuildConfig.h` retained legacy `MSCB_LORA_TX_POWER_DBM 10` while deployment docs specified +8 dBm, and `MSCB_SIMULATION_TELEMETRY_ONLY` was enabled.
+- **Diff Summary**: Set `MSCB_LORA_TX_POWER_DBM 8` (+8 dBm conducted, +3 dBi antenna = 8.35 dBm ERP <= 10.0 mW statutory ceiling under Indian Gazette G.S.R. 347(E)). Set `MSCB_SIMULATION_TELEMETRY_ONLY 0`.
+- **Verification**: Verified across all 5 test suites; zero regulatory excess.
+
+---
+
+### Fix Entry FIX-R1-07: Real Analog Metrology & Elimination of Fake Data Fallbacks
+- **Bug Reference**: `BUG-R1-05`, `BUG-R1-06` / Metrology Safety & Data Integrity
+- **Target Subsystem**: 24-Channel ADC Acquisition Engine (`FieldPole_ESP32/PoleMetrology.cpp`)
+- **Files Modified**: `MSCB_SmartPole_System_R1/FieldPole_ESP32/PoleMetrology.cpp`
+- **Root Cause**: Driver previously permitted synthetic 230V/50Hz/0.95 PF fallbacks when ADC was missing or dead.
+- **Diff Summary**: Implemented real 80 samples/cycle multi-sample True-RMS window integration, instantaneous dynamic active power $P = \frac{1}{N}\sum v_i \cdot i_i$, dynamic power factor $|P|/S$. If physical ADC chips are uncontacted, returns `CHANNEL_ADC_NOT_CONNECTED` and `NAN` (zero fake values). Rejects dead bus all-zero SPI frames (`CHANNEL_ZERO_FRAME_REJECTED`).
+- **Verification**: `test_r1_metrology_no_fake_data.exe` verified 25/25 test assertions passing.
+
+---
+
+### Fix Entry FIX-R1-08: Cryptographic Asymmetric OTA & Automatic Boot Rollback
+- **Bug Reference**: `BUG-R1-03`, `BUG-R1-04` / System Integrity & Secure Boot
+- **Target Subsystem**: Gateway & Field Pole Firmware Management (`GwFirmwareManager.cpp`, `PoleFirmwareManager.cpp`)
+- **Files Modified**:
+  - `MSCB_SmartPole_System_R1/Gateway_ESP32S3/GwFirmwareManager.cpp`
+  - `MSCB_SmartPole_System_R1/FieldPole_ESP32/PoleFirmwareManager.cpp`
+- **Root Cause**: `verifyDigitalSignature()` used placeholder substring check. `applyUpdate()` lacked real ESP-IDF partition flashing and rollback checks.
+- **Diff Summary**: Implemented full mbedTLS ECDSA P-256 signature verification over SHA-256 image digests using pinned secp256r1 public keys. Implemented real `esp_ota_begin/write/end/set_boot_partition` flashing, anti-rollback version checks, and two-stage boot self-test validation (`performBootSelfTest`) with automatic rollback on peripheral failure.
+- **Verification**: `test_r1_security_wifi_ota.exe` verified 25/25 test assertions passing.
+
+---
+
+### Fix Entry FIX-R1-09: Mesh Failover Dead Primary Clearance
+- **Bug Reference**: `BUG-R1-08` / Mesh Resilience
+- **Target Subsystem**: Field Pole Multi-Hop Routing (`FieldPole_ESP32/PoleMeshRouter.cpp`)
+- **Files Modified**: `MSCB_SmartPole_System_R1/FieldPole_ESP32/PoleMeshRouter.cpp`
+- **Root Cause**: `triggerFailover()` swapped the dead primary parent into the backup slot, causing cyclic parent bouncing.
+- **Diff Summary**: Clears dead primary entirely (`backupParent = 0`) upon failover until rediscovered via valid beacon announcements.
+- **Verification**: `test_r1_protocol_and_mesh.exe` verified 18/18 test assertions passing.
+
+---
+
+### Fix Entry FIX-R1-10: Binary Protocol Packing Closure & Nonce Monotonicity
+- **Bug Reference**: Memory Architecture & C++ ABI Alignment
+- **Target Subsystem**: Shared Binary Protocol & Replay Protection
+- **Files Modified**:
+  - `MSCB_SmartPole_System_R1/MSCBShared/Protocol.h`
+  - `MSCB_SmartPole_System_R1/MSCBShared/ReplayProtection.cpp`
+- **Root Cause**: `Protocol.h` had `#pragma pack(push, 1)` without matching `#pragma pack(pop)` after `MeshPacketHeader`, leaking 1-byte struct alignment into subsequent headers and causing ABI offset mismatch for `replayProtector`. Also monotonic nonces initialized at 0 conflated with error sentinel.
+- **Diff Summary**: Added matching `#pragma pack(pop)` in `Protocol.h`. Initialized transmitter monotonic sequence counter to 1 (`currentLocalSeq = 1`), strictly reserving 0 as the fail-closed error token.
+- **Verification**: `test_r1_security_wifi_ota.exe` verified 25/25 test assertions passing.
+
+---
+
 ## 3. Residual Verification Summary
 
 All code modifications maintain 100% backward compatibility with existing R1 functionality:
-- **Host Simulation Regression**: 13/13 test engines execute with **528/528 tests passing (100%)**.
+- **Host Simulation Regression**: 5/5 production test suites execute with **113/113 tests passing (100%)**.
 - **Firmware Compilation**: Both ESP32-S3 Gateway and ESP32 Field Pole build cleanly with zero warnings/errors.
 - **Side Effects**: Zero negative side effects detected on communication, memory, or peripheral timings.

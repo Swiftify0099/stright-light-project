@@ -1,23 +1,26 @@
 /**
  * @file PoleMetrology.h
  * @brief MSCB Smart Pole Node - 21-Channel Metrology & 3x ADS131M08 Driver
- * @version 1.1.0
+ * @version 1.2.0
  * 
  * AUTHORITATIVE METROLOGY & ADC SAFETY ARCHITECTURE:
  * 1. 21 ACTIVE CHANNELS + 3 BALANCED SPARES (24 TOTAL RAW CHANNELS):
  *    - 3x Texas Instruments ADS131M08 (24-bit simultaneous sampling delta-sigma)
  *    - Device 0 (ADC #1, CS /1Y0): Feeders 1..3 Currents (Ch 04..11)
- *    - Device 1 (ADC #2, CS /1Y1): Feeders 3..5 Currents (Ch 12..18) + Spare 1
+ *    - Device 1 (ADC #2, CS /1Y1): Feeders 4..5 Currents (Ch 12..18) + Spare 1
  *    - Device 2 (ADC #3, CS /1Y2): Feeder 6 Currents (Ch 19..21) + Bus Voltages R,Y,B (Ch 01..03) + Spares 2,3
  * 
- * 2. ZERO-SIMULATION & HARDWARE DETECTION MANDATE:
+ * 2. ZERO-SIMULATION & HARDWARE DETECTION MANDATE (NO FAKE DATA):
  *    - Never switch to simulated readings when ADC hardware is missing.
  *    - Hardware presence verified via SPI register readback on all 3 chips.
- *    - If ANY ADC chip is missing, begin() fails and channels report ADC_NOT_CONNECTED.
+ *    - If ANY ADC chip is missing, channels depending on it report CHANNEL_ADC_NOT_CONNECTED.
+ *    - For unverified / disconnected states, readings return NAN or invalid status.
  * 
- * 3. ZERO-FRAME & STALE FRAME REJECTION:
- *    - All-zero (dead bus / disconnected MISO) or all-one frames are rejected.
- *    - Sampling timeouts enforce CHANNEL_DATA_STALE freshness transitions.
+ * 3. REAL WINDOW-BASED METROLOGY:
+ *    - True-RMS computed over real sample windows: sqrt( (1/N) * sum( (x[n] - offset)^2 ) ).
+ *    - Real Active Power computed from synchronized instantaneous v[n] * i[n] integration.
+ *    - Real Power Factor computed from |P| / S (strictly NO hardcoded 0.95!).
+ *    - Real Grid Frequency computed from zero-crossing intervals.
  * 
  * 4. CALIBRATION & ACCURACY:
  *    - 21 independent ChannelCalibRecord structures.
@@ -30,6 +33,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <math.h>
 
 #if defined(ARDUINO) && defined(ESP32)
   #include <Arduino.h>
@@ -45,8 +49,10 @@
 #include "PoleConfig.h"
 #if __has_include("../MSCBShared/StorageTypes.h")
   #include "../MSCBShared/StorageTypes.h"
+  #include "../MSCBShared/NetworkTypes.h"
 #elif __has_include(<StorageTypes.h>)
   #include <StorageTypes.h>
+  #include <NetworkTypes.h>
 #endif
 
 #define METROLOGY_TOTAL_RAW_CH       24
@@ -55,6 +61,7 @@
 #define METROLOGY_CHANNELS_PER_ADC   8
 #define METROLOGY_NUM_FEEDERS        6
 #define METROLOGY_NUM_PHASES         3
+#define METROLOGY_WINDOW_SIZE        80 // Nominal 1 cycle at 4 kSPS / 50 Hz
 
 #define ADS131M08_REG_ID             0x00
 #define ADS131M08_REG_STATUS         0x01
@@ -76,7 +83,6 @@ struct RawAdcChannelMap {
   bool        isSpare;        // true for balanced spares
 };
 
-// Authoritative mapping table (24 raw channels)
 extern const RawAdcChannelMap AUTHORITATIVE_ADC_MAP[METROLOGY_TOTAL_RAW_CH];
 
 class PoleMetrology {
@@ -88,6 +94,7 @@ public:
   bool detectHardware();
   bool areAllAdcsDetected() const { return allAdcsDetected; }
   bool isAdcChipDetected(uint8_t chipIdx) const;
+  void setAdcChipDetected(uint8_t chipIdx, bool detected); // Test harness control
 
   // Raw Sample Processing & Frame Validation
   bool processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_RAW_CH], uint32_t timestampMs);
@@ -98,11 +105,11 @@ public:
   MeasurementFreshness getChannelFreshness(uint8_t logicalChId1Based) const;
   float getChannelValue(uint8_t logicalChId1Based) const;
 
-  // Voltage Readings (Logical Ch 1..3)
+  // Voltage Readings (Logical Ch 1..3: R, Y, B)
   float getBusVoltageR() const;
   float getBusVoltageY() const;
   float getBusVoltageB() const;
-  float getGridFrequency() const { return nominalFrequency; }
+  float getGridFrequency() const;
 
   // Feeder Current & Power (Logical Ch 4..21)
   float getFeederCurrent(uint8_t feederIdx0Based, uint8_t phaseIdx0Based) const;
@@ -115,7 +122,7 @@ public:
   void resetCalibrationToDefaults();
 
   // Accuracy Certification Status
-  bool isClass1_0Certified() const { return false; } // Strictly FALSE without Fluke 6100A laboratory bench report
+  bool isClass1_0Certified() const { return false; } // Strictly FALSE without physical calibration certificate
 
   // Diagnostic Report
   void printMetrologyAuditReport() const;
@@ -123,11 +130,12 @@ public:
 private:
   bool checkZeroFrame(const int32_t rawSamples[METROLOGY_TOTAL_RAW_CH]) const;
   int findRawIndexForLogicalCh(uint8_t logicalChId1Based) const;
+  void resetWindowAccumulators();
 
   bool               allAdcsDetected;
   bool               chipDetected[METROLOGY_NUM_ADC_CHIPS];
   uint32_t           lastFrameTimestampMs;
-  float              nominalFrequency;
+  float              measuredFrequency;
 
   // 21 Active Logical Channel States
   ChannelDataState     channelStates[METROLOGY_TOTAL_ACTIVE_CH];
@@ -135,9 +143,17 @@ private:
   float                channelRmsValues[METROLOGY_TOTAL_ACTIVE_CH];
   ChannelCalibRecord   calibrationTable[METROLOGY_TOTAL_ACTIVE_CH];
 
-  // Derived Metrology
+  // Derived Metrology per Feeder
   float feederActivePower[METROLOGY_NUM_FEEDERS];
   float feederPowerFactor[METROLOGY_NUM_FEEDERS];
+
+  // True-RMS & Instantaneous Power Window Accumulators
+  uint16_t sampleCountInWindow;
+  double   sumSqVoltage[3];               // R, Y, B
+  double   sumSqCurrent[18];              // 6 feeders * 3 phases
+  double   sumInstPower[6][3];            // Instantaneous v[p] * i[f,p] products
+  uint16_t zeroCrossings;
+  int32_t  lastZeroCrossVal;
 };
 
 extern PoleMetrology poleMetrology;
