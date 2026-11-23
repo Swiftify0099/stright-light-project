@@ -264,7 +264,7 @@ bool PoleFirmwareManager::performBootSelfTest(bool metrologyHardwareOk, bool rad
   }
 #else
   if (!radioOk) {
-    triggerRollback();
+    state = GW_OTA_FAILED;
     return false;
   }
 #endif
@@ -284,3 +284,4 @@ void PoleFirmwareManager::triggerRollback() {
 #endif
   state = GW_OTA_ROLLBACK_DONE;
 }
+

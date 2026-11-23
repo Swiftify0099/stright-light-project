@@ -71,7 +71,7 @@ bool GwFirmwareManager::performBootSelfTest(bool psramOk, bool radioOk) {
   }
 #else
   if (!psramOk || !radioOk) {
-    triggerRollback();
+    state = GW_OTA_FAILED;
     return false;
   }
 #endif

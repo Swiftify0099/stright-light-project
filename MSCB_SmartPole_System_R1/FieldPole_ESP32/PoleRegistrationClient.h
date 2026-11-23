@@ -57,9 +57,6 @@ public:
   bool handleRegisterResponse(const PktRegisterResponsePayload &resp);
   void triggerRegistrationRequest();
 
-  void setMacAddress(const uint8_t m[6]) { memcpy(myMac, m, 6); }
-  bool isRegistered() const { return state == REG_CLIENT_REGISTERED; }
-  uint16_t getAssignedId() const { return poleStorage.getAssignedPoleId(); }
   NodeRegClientState getState() const { return state; }
   const uint8_t* getMacAddress() const { return myMac; }
 
@@ -76,3 +73,4 @@ private:
 extern PoleRegistrationClient poleRegClient;
 
 #endif // POLE_REGISTRATION_CLIENT_H
+

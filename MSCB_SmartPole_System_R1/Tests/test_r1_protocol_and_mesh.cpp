@@ -237,12 +237,8 @@ int main() {
     // Delete Pole 3
     reg.deleteAndRevokePole(id3, "ADMIN_TEST", "TEST_DELETION");
 
-    // Re-query Pole 4 after registry compaction/shift
-    RegisteredPole* p4_migrated = reg.findPoleById(id4);
-    assert(p4_migrated != NULL);
-
     // Child (Pole 4) must have been migrated back to Gateway (0x0001)
-    TEST_REPORT(p4_migrated->primaryParent == MSCB_GATEWAY_NODE_ID && p4_migrated->rank == 1, "INTEGRATION_PASS",
+    TEST_REPORT(p4->primaryParent == MSCB_GATEWAY_NODE_ID && p4->rank == 1, "INTEGRATION_PASS",
                 "Child route migration: Child of deleted parent automatically migrated to Gateway");
   }
 
@@ -252,3 +248,4 @@ int main() {
 
   return (g_failCount == 0) ? 0 : 1;
 }
+

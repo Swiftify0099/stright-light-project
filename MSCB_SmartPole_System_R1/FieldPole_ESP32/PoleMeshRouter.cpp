@@ -142,8 +142,9 @@ bool PoleMeshRouter::selectBestParents() {
 
 void PoleMeshRouter::triggerFailover() {
   if (backupParent != 0 && backupParent != primaryParent) {
+    uint16_t oldPrimary = primaryParent;
     primaryParent = backupParent;
-    backupParent = 0; // Promoted backup; old primary is dead until rediscovered
+    backupParent = oldPrimary;
     state = ROUTING_FAILOVER;
     lastParentPacketMs = millis();
     poleStorage.saveRouting(primaryParent, backupParent, myRank);
@@ -313,3 +314,4 @@ const MeshNeighbor* PoleMeshRouter::getNeighbor(uint8_t idx) const {
   if (idx >= neighborCount) return NULL;
   return &neighbors[idx];
 }
+
