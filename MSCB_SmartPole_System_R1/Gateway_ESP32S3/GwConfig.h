@@ -54,6 +54,10 @@
 //  SECURITY & CREDENTIAL PLACEHOLDERS
 //  (STRICT EMBEDDED POLICY: NEVER COMMIT RAW PASSWORDS OR TOKENS)
 // =====================================================================
+#if __has_include("GwSecrets.h")
+  #include "GwSecrets.h"
+#endif
+
 #ifndef MSCB_WIFI_SSID
   #define MSCB_WIFI_SSID              "CONFIGURE_YOUR_SSID_IN_PRIVATE_CONFIG"
 #endif
@@ -68,6 +72,11 @@
 
 #ifndef MSCB_TELEGRAM_CHAT_ID
   #define MSCB_TELEGRAM_CHAT_ID       "CONFIGURE_YOUR_CHAT_ID"
+#endif
+
+#ifndef MSCB_TELEGRAM_ADMIN_ALLOWLIST
+  #define MSCB_TELEGRAM_ADMIN_ALLOWLIST { 0LL }
+  #define MSCB_TELEGRAM_ADMIN_COUNT     0
 #endif
 
 // =====================================================================

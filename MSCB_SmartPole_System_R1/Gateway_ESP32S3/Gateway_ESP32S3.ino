@@ -18,6 +18,13 @@
 #include <WiFi.h>
 #include <esp_chip_info.h>
 #include "GwConfig.h"
+#include "GwBoardPins.h"
+#include "GwRadioDriver.h"
+#include "GwNodeRegistry.h"
+#include "GwMeshCoordinator.h"
+#include "GwHeartbeatMonitor.h"
+#include "GwWiFiManager.h"
+#include "GwTelegramBot.h"
 #include "GwFirmwareManager.h"
 #include "CommandSecurity.h"
 
@@ -25,6 +32,7 @@
 //  GLOBAL STATE & TIMING VARIABLES
 // =====================================================================
 static uint32_t s_lastHeartbeatMs = 0;
+static uint32_t s_lastHealthCheckMs = 0;
 static uint32_t s_bootTimeMs = 0;
 static bool     s_hardwareAuditPassed = false;
 
@@ -113,9 +121,38 @@ void setup() {
   gwFwMgr.init(10);
 
   // Security & Key Provisioning Audit
+#if defined(MSCB_PROVISIONED_AES_KEY)
+  const uint8_t provKey[MSCB_KEY_LEN_BYTES] = MSCB_PROVISIONED_AES_KEY;
+  cmdSecurity.provisionKey(provKey, sizeof(provKey), MSCB_PROVISIONED_KEY_EPOCH);
+#endif
   if (!cmdSecurity.isKeyProvisioned()) {
     Serial.println(F("[SECURITY] ⚠️ No secure key provisioned. Operating in Fail-Closed mode."));
   }
+
+  // Initialize Persistent Node Registry
+  gwRegistry.begin();
+  Serial.printf("[REGISTRY] Loaded %u active poles, %u revoked poles from storage.\n",
+                gwRegistry.getActiveCount(), gwRegistry.getRevokedCount());
+
+  // Initialize LoRa SX1278 RF Subsystem
+  bool radioOk = gwRadio.begin();
+  if (radioOk) {
+    Serial.println(F("[LORA] ✅ SX1278 RA-02 initialized @ 433.920 MHz (+8 dBm conducted, WPC compliant)."));
+  } else {
+    Serial.println(F("[LORA] ❌ SX1278 transceiver not detected on FSPI bus!"));
+  }
+
+  // Initialize Mesh Coordinator
+  gwMesh.begin();
+
+  // Initialize Heartbeat & Offline Monitor
+  gwHeartbeat.begin();
+
+  // Initialize Wi-Fi Manager
+  gwWifi.begin();
+
+  // Initialize Telegram Bot Interface
+  gwTelegram.begin();
 
   // Network Interface Readiness Check
   if (strcmp(MSCB_WIFI_SSID, "CONFIGURE_YOUR_SSID_IN_PRIVATE_CONFIG") == 0) {
@@ -124,6 +161,7 @@ void setup() {
 
   s_bootTimeMs = millis();
   s_lastHeartbeatMs = s_bootTimeMs;
+  s_lastHealthCheckMs = s_bootTimeMs;
 
   // Never mark hardwareAuditPassed unconditionally! Check actual PSRAM and memory health
   bool psramOk = psramFound();
@@ -134,6 +172,9 @@ void setup() {
     s_hardwareAuditPassed = true;
     Serial.println(F("[SYSTEM_INIT] Gateway initialized successfully in SAFE_STANDBY mode."));
   }
+
+  // Execute post-boot OTA self-tests if pending verification
+  gwFwMgr.performBootSelfTest(psramOk, radioOk);
 }
 
 // =====================================================================
@@ -142,7 +183,22 @@ void setup() {
 void loop() {
   uint32_t currentMs = millis();
 
-  // Periodic Heartbeat Status Flash (1 Hz non-blocking)
+  // 1. Service Mesh Coordinator & Radio Packet Dispatch
+  gwMesh.service();
+
+  // 2. Service Wi-Fi Connection, Credential Testing & Rollback
+  gwWifi.service();
+
+  // 3. Service Telegram Admin Bot (polling & alert dispatch)
+  gwTelegram.service();
+
+  // 4. Periodic Pole Heartbeat & Offline State Check (every 5 seconds)
+  if (currentMs - s_lastHealthCheckMs >= 5000) {
+    s_lastHealthCheckMs = currentMs;
+    gwHeartbeat.checkHealth(currentMs / 1000);
+  }
+
+  // 5. Periodic Heartbeat Status Flash (1 Hz non-blocking)
   if (currentMs - s_lastHeartbeatMs >= MSCB_STATUS_BLINK_INTERVAL_MS) {
     s_lastHeartbeatMs = currentMs;
     
@@ -153,11 +209,11 @@ void loop() {
     static uint8_t s_logDivider = 0;
     if (++s_logDivider >= 10) {
       s_logDivider = 0;
-      Serial.printf("[GW_HEARTBEAT] Uptime: %lu s | Heap: %u B | PSRAM Free: %u B | OTA: %s | Sec: %s\n", 
+      Serial.printf("[GW_HEARTBEAT] Uptime: %lu s | Heap: %u B | PSRAM Free: %u B | WiFi: %s | Active Poles: %u/50\n", 
                     (currentMs - s_bootTimeMs) / 1000UL, ESP.getFreeHeap(),
                     psramFound() ? ESP.getFreePsram() : 0,
-                    gwOtaStateToString(gwFwMgr.getState()),
-                    cmdSecurity.isKeyProvisioned() ? "KEY_PROVISIONED" : "FAIL_CLOSED");
+                    wifiStateToString(gwWifi.getState()),
+                    gwRegistry.getActiveCount());
     }
   }
 

@@ -95,7 +95,11 @@ public:
     void resetEmergencyState();
     bool isEmergencyActive() const;
 
-    // 7. GPIO 12 Strapping Risk Audit
+    // 7. Low-Voltage Isolated Bench Test Profile
+    void setBenchTestOverride(bool enabled) { benchTestOverride = enabled; }
+    bool isBenchTestOverride() const { return benchTestOverride; }
+
+    // 8. GPIO 12 Strapping Risk Audit
     bool auditStrappingPins();
     bool isGpio12Safe() const;
 
@@ -106,6 +110,7 @@ private:
     bool                emergencyActive;
     bool                gpio12HazardPresent;
     bool                relaysLockedDisabled;
+    bool                benchTestOverride;
 
     ActuatorChannelSpec channels[NUM_FEEDER_ACTUATORS];
 

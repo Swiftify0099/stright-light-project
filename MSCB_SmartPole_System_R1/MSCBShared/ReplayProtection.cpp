@@ -152,7 +152,7 @@ bool ReplayProtection::reprovisionStorage(uint32_t newKeyEpoch, PersistentNonceR
 
   activeKeyEpoch = newKeyEpoch;
   activeCeiling = NVS_COUNTER_BLOCK_SIZE;
-  currentLocalSeq = 0;
+  currentLocalSeq = 1;
 
   size_t payloadLen = sizeof(PersistentNonceRecord) - sizeof(uint32_t);
 

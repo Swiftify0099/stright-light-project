@@ -108,6 +108,8 @@ public:
   bool verifyImageSha256(const uint8_t *imageBuffer, size_t imageLen, const char *expectedSha256Hex);
   bool applyUpdate(const uint8_t *imageBuffer, size_t imageLen, String &outError);
 
+  // Post-Update Self-Test Validation & Boot Commitment
+  bool performBootSelfTest(bool psramOk, bool radioOk);
   void markAppValid();
   void triggerRollback();
 

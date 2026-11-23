@@ -1,0 +1,31 @@
+# MSCB Smart Pole System - Git Ignore Configuration
+
+# Local Secrets & Credentials (NEVER COMMIT PRODUCTION CREDENTIALS)
+*secrets*.h
+GwSecrets.h
+PoleSecrets.h
+private_config.h
+credentials.h
+
+# Compiled Binaries and Objects
+*.exe
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.elf
+*.bin
+*.hex
+
+# Build Directories
+build/
+.pio/
+.vscode/
+.idea/
+*.dSYM/
+
+# Test Outputs
+*.log
+*.tmp

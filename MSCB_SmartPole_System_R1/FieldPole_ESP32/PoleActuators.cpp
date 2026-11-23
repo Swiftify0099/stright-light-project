@@ -35,7 +35,8 @@ PoleActuators::PoleActuators() :
     diagnosticPassed(false),
     emergencyActive(false),
     gpio12HazardPresent(false),
-    relaysLockedDisabled(MSCB_RELAYS_LOCKED_DISABLED != 0)
+    relaysLockedDisabled(MSCB_RELAYS_LOCKED_DISABLED != 0),
+    benchTestOverride(false)
 {
     for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
         channels[i].pin = SAFE_RELAY_PINS[i];
@@ -179,6 +180,7 @@ ActuatorDriverState PoleActuators::getDriverState() const {
 }
 
 bool PoleActuators::areRelaysLockedDisabled() const {
+    if (benchTestOverride) return false;
 #if defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
     return true;
 #else
