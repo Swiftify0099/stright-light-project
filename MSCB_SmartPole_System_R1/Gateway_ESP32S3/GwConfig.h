@@ -63,31 +63,31 @@
 #endif
 
 #ifndef MSCB_WIFI_SSID
-  #define MSCB_WIFI_SSID              "CONFIGURE_YOUR_SSID_IN_PRIVATE_CONFIG"
+  #define MSCB_WIFI_SSID              "PS"
 #endif
 
 #ifndef MSCB_WIFI_PASS
-  #define MSCB_WIFI_PASS              "CONFIGURE_YOUR_PASSWORD_IN_PRIVATE_CONFIG"
+  #define MSCB_WIFI_PASS              "12345678"
 #endif
 
 #ifndef MSCB_TELEGRAM_BOT_TOKEN
-  #define MSCB_TELEGRAM_BOT_TOKEN     "CONFIGURE_YOUR_TELEGRAM_TOKEN"
+  #define MSCB_TELEGRAM_BOT_TOKEN     "9149585073:AAH86ZZCfoB069FBRH0WEwtCoCWB6sjG59o"
 #endif
 
 #ifndef MSCB_TELEGRAM_CHAT_ID
-  #define MSCB_TELEGRAM_CHAT_ID       "CONFIGURE_YOUR_CHAT_ID"
+  #define MSCB_TELEGRAM_CHAT_ID       "5505296197"
 #endif
 
 #ifndef MSCB_TELEGRAM_ADMIN_ALLOWLIST
-  #define MSCB_TELEGRAM_ADMIN_ALLOWLIST { 0LL }
-  #define MSCB_TELEGRAM_ADMIN_COUNT     0
+  #define MSCB_TELEGRAM_ADMIN_ALLOWLIST { 5505296197LL }
+  #define MSCB_TELEGRAM_ADMIN_COUNT     1
 #endif
 
 // =====================================================================
 //  TIMING & WATCHDOG CONFIGURATION
 // =====================================================================
 #define GW_WIFI_RECONNECT_INTERVAL_MS 15000UL
-#define GW_TELEGRAM_POLL_INTERVAL_MS  2000UL
+#define GW_TELEGRAM_POLL_INTERVAL_MS  500UL    // 500ms fast-polling for ultra-responsive bot
 #define GW_POLE_OFFLINE_TIMEOUT_MS    120000UL // 2 minutes without packet = pole offline
 #define GW_WATCHDOG_TIMEOUT_SEC       30
 

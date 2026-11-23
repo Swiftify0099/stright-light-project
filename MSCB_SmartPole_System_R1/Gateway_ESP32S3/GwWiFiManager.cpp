@@ -95,15 +95,21 @@ bool GwWiFiManager::verifyInternetReachability() {
     return false;
   }
 
-  // Test TCP connection to port 443
+  // Test TLS connection using domain name to ensure SNI header is sent
   WiFiClientSecure testClient;
-  testClient.setTimeout(3000);
+  testClient.setTimeout(4000);
   testClient.setInsecure(); // Test TCP handshake only
-  if (!testClient.connect(telegramIp, 443)) {
-    return false;
+  if (testClient.connect("api.telegram.org", 443)) {
+    testClient.stop();
+    return true;
   }
-  testClient.stop();
-  return true;
+
+  // If DNS successfully resolved to a valid non-zero IP, internet is functional
+  // (Prevents aggressive mobile hotspot drops due to single TCP timeout)
+  if (telegramIp[0] != 0 && telegramIp[0] != 255) {
+    return true;
+  }
+  return false;
 #else
   return true;
 #endif

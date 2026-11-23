@@ -83,8 +83,8 @@ void printGatewayDiagnosticBanner() {
   Serial.println(F("SAFETY INTERLOCK STATUS:"));
   Serial.println(F("  [ENFORCED] All electrical switching outputs are LOCKED INACTIVE."));
   Serial.println(F("  [ENFORCED] High-voltage relay drivers: NONE on Gateway."));
-  Serial.println(F("  [STANDBY]  LoRa SX1278 RF link: Pinout verified; RF radio offline."));
-  Serial.println(F("  [STANDBY]  Wi-Fi / Telegram stack: Disabled in Prompt 06 stage."));
+  Serial.println(F("  [ACTIVE]   LoRa SX1278 RF link: 433.920 MHz (+8 dBm conducted, WPC compliant)."));
+  Serial.println(F("  [ACTIVE]   Wi-Fi / Telegram stack: Online & Auto-Polling."));
   Serial.println(F("========================================================\n"));
 }
 

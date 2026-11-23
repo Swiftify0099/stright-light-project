@@ -38,6 +38,53 @@ Install the following exact library versions via the Arduino Library Manager:
 | **WiFi** | Built-in (3.3.11) | Espressif Systems | 2.4 GHz Wi-Fi Station & SoftAP (Gateway) |
 | **SPI** | Built-in (3.3.11) | Espressif Systems | High-Speed Hardware SPI (FSPI & VSPI) |
 | **Preferences** | Built-in (3.3.11) | Espressif Systems | Non-Volatile Flash Storage (NVS) |
+| **MSCBShared** | **1.0.0** | MSCB Team | Shared Security, Framing & Protocol (See Section 2.1) |
+
+---
+
+## 2.1 Shared Library Installation (`MSCBShared`)
+
+### Root Cause of Missing-Header Compilation Errors
+When compiling `Gateway_ESP32S3.ino` or `FieldPole_ESP32.ino` inside Arduino IDE 2.x, the build system copies sketch source files into an isolated temporary build sandbox (`%LOCALAPPDATA%\Temp\arduino\sketches\<hash>\`). Because the compilation occurs outside the project directory tree, relative directory references such as `../MSCBShared/` cannot be resolved by the compiler preprocessor. If `MSCBShared` is not registered in the Arduino Sketchbook `libraries/` directory, the build terminates immediately with:
+```text
+fatal error: CommandSecurity.h: No such file or directory
+#include "CommandSecurity.h"
+compilation terminated.
+exit status 1
+```
+
+### Automated PowerShell Installer
+An idempotent PowerShell installer is provided in `MSCB_SmartPole_System_R1/scripts/install-mscbshared.ps1` to automatically install and update the library.
+
+#### Standard Installation (Auto-detects Sketchbook path):
+Open Windows PowerShell from `MSCB_SmartPole_System_R1` directory:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-mscbshared.ps1
+```
+
+#### Custom Sketchbook / OneDrive Installation:
+If your Arduino sketchbook is located inside OneDrive or a custom folder, supply the `-SketchbookPath` parameter:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-mscbshared.ps1 -SketchbookPath "C:\Users\<YourUsername>\OneDrive\Documents\Arduino"
+```
+
+#### Installed Directory Structure:
+```text
+<Sketchbook>/
+  libraries/
+    MSCBShared/
+      library.properties
+      BuildConfig.h
+      CommandSecurity.h
+      CommandSecurity.cpp
+      NetworkTypes.h
+      Protocol.h
+      ReplayProtection.h
+      ReplayProtection.cpp
+      StorageTypes.h
+```
+
+After running the installer, reload Arduino IDE (`Ctrl+Shift+P` $\rightarrow$ `Reload Window` or restart Arduino IDE). All shared headers (`CommandSecurity.h`, `ReplayProtection.h`, `Protocol.h`, etc.) and implementation classes will be automatically discovered, indexed, and linked.
 
 ---
 
@@ -122,7 +169,9 @@ Open sketch: `Resivers/Resivers.ino` (or `MSCB_SmartPole_System_R1/FieldPole_ESP
 
 | Compiler / Flasher Error | Root Cause | Solution |
 | :--- | :--- | :--- |
-| `fatal error: BuildConfig.h: No such file` | Path to `MSCBShared` not found | Open from project root or copy `MSCBShared` to `Arduino/libraries` |
+| `fatal error: CommandSecurity.h: No such file` | `MSCBShared` not in Arduino libraries | Run `powershell -File .\scripts\install-mscbshared.ps1` and restart IDE |
+| `fatal error: BuildConfig.h: No such file` | Path to `MSCBShared` not found | Run `powershell -File .\scripts\install-mscbshared.ps1` |
+| `undefined reference to cmdSecurity` | `MSCBShared` not linked as library | Ensure `#include <CommandSecurity.h>` is present in `.ino` and library is installed |
 | `A fatal error occurred: Failed to connect to ESP32` | ESP32 not in download mode | Hold `BOOT` button, tap `RST` button, then release `BOOT` |
 | `Guru Meditation Error: Core 0 panic'ed (Cache disabled)`| GPIO 26-37 accessed on ESP32-S3 | Ensure no firmware pin assignment overlaps Octal PSRAM range |
 | `flash read err, 1000` (ESP32 Boot Loop) | GPIO 12 pulled HIGH at reset | Ensure Feeder 4 is on GPIO 16 (NOT GPIO 12!) |

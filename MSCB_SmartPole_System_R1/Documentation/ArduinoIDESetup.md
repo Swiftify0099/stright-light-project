@@ -83,43 +83,73 @@ The following external and core libraries have been audited in this environment:
 
 ## 4. Shared Header Discovery Architecture (`MSCBShared/`)
 
-In multi-project embedded workspaces developed in Arduino IDE, sharing common protocol definitions across multiple sketches presents a challenge because Arduino IDE restricts sketch tabs to the sketch folder.
+In multi-project embedded workspaces developed in Arduino IDE 2.x, sketches are compiled in an isolated temporary directory (`%LOCALAPPDATA%\Temp\arduino\sketches\<hash>\`). Because the compilation occurs outside the workspace directory tree, relative directory references such as `../MSCBShared/` cannot be resolved unless the shared library is installed in the Arduino Sketchbook `libraries/` directory.
 
-To achieve **100% compilation reliability without brittle symbolic links or code duplication**, `MSCB_SmartPole_System_R1` implements a **Dual-Mode Discovery Pattern**:
+To achieve **100% compilation reliability without code duplication**, `MSCB_SmartPole_System_R1` packages `MSCBShared` as a standard Arduino library with `library.properties`, installed directly into `<Sketchbook>/libraries/MSCBShared`.
 
+### 4.1 Automated PowerShell Installer (`install-mscbshared.ps1`)
+
+An idempotent installer script is provided at `MSCB_SmartPole_System_R1/scripts/install-mscbshared.ps1`.
+
+#### Standard Execution (Auto-detects Arduino Sketchbook):
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-mscbshared.ps1
+```
+
+#### Custom Sketchbook / OneDrive Execution:
+If your Arduino sketchbook is located in OneDrive or a custom location:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-mscbshared.ps1 -SketchbookPath "C:\Users\<YourUsername>\OneDrive\Documents\Arduino"
+```
+
+The installer verifies all 9 shared source and header files (`library.properties`, `BuildConfig.h`, `CommandSecurity.h`, `CommandSecurity.cpp`, `NetworkTypes.h`, `Protocol.h`, `ReplayProtection.h`, `ReplayProtection.cpp`, `StorageTypes.h`), copies them cleanly to `<Sketchbook>/libraries/MSCBShared`, and purges any accidental nested folders.
+
+### 4.2 Dual-Mode Header Discovery Pattern
+
+Headers in Gateway and Field Pole utilize automated dual-mode resolution:
 ```cpp
-// GwConfig.h and PoleConfig.h automated resolution
 #if __has_include("../MSCBShared/BuildConfig.h")
   #include "../MSCBShared/BuildConfig.h"
   #include "../MSCBShared/NetworkTypes.h"
   #include "../MSCBShared/Protocol.h"
+  #include "../MSCBShared/StorageTypes.h"
+  #include "../MSCBShared/CommandSecurity.h"
+  #include "../MSCBShared/ReplayProtection.h"
 #elif __has_include(<BuildConfig.h>)
   #include <BuildConfig.h>
   #include <NetworkTypes.h>
   #include <Protocol.h>
+  #include <StorageTypes.h>
+  #include <CommandSecurity.h>
+  #include <ReplayProtection.h>
 #else
   #error "MSCBShared headers not found! Ensure MSCBShared directory is adjacent to sketch or installed in Arduino/libraries."
 #endif
 ```
 
-### Discovery Mode 1: Relative Path (Default Workspace Mode)
-When opening `Gateway_ESP32S3/Gateway_ESP32S3.ino` or `FieldPole_ESP32/FieldPole_ESP32.ino` directly from the `MSCB_SmartPole_System_R1` workspace directory, GCC automatically resolves `../MSCBShared/` relative to the sketch path.
-
-### Discovery Mode 2: Standard Arduino Library Mode (Optional)
-The `MSCBShared/` directory includes a valid `library.properties` file. If desired, developers can create a directory link (or copy) `MSCBShared` into their local Arduino libraries folder:
-- **Windows**: `mklink /J "%USERPROFILE%\Documents\Arduino\libraries\MSCBShared" "C:\Users\...\PS\MSCB_SmartPole_System_R1\MSCBShared"`
-The `__has_include(<BuildConfig.h>)` fallback immediately discovers the headers globally.
-
 ---
 
 ## 5. Step-by-Step Compilation Verification
 
-1. Launch Arduino IDE 2.x.
-2. Open `MSCB_SmartPole_System_R1/Gateway_ESP32S3/Gateway_ESP32S3.ino`.
-3. Under **Tools -> Board**, select `ESP32S3 Dev Module`.
-4. Ensure **PSRAM** is set to `OPI PSRAM` and **Flash Size** to `16MB`.
-5. Click **Verify (Ctrl+R)**. Compilation must conclude with exit code 0.
-6. Open `MSCB_SmartPole_System_R1/FieldPole_ESP32/FieldPole_ESP32.ino`.
-7. Under **Tools -> Board**, select `ESP32 Dev Module`.
-8. Ensure **PSRAM** is set to `Disabled` and **Flash Size** to `4MB`.
-9. Click **Verify (Ctrl+R)**. Compilation must conclude with exit code 0.
+1. Run the installer: `powershell -ExecutionPolicy Bypass -File .\scripts\install-mscbshared.ps1`
+2. Launch Arduino IDE 2.x (or press `Ctrl+Shift+P` -> `Reload Window` if already open).
+3. **Verify Gateway Target**:
+   - Open `MSCB_SmartPole_System_R1/Gateway_ESP32S3/Gateway_ESP32S3.ino`.
+   - Under **Tools -> Board**, select `ESP32S3 Dev Module`.
+   - Ensure **PSRAM** is set to `OPI PSRAM` and **Flash Size** to `16MB`.
+   - Click **Verify (Ctrl+R)**. Compilation must conclude with exit code 0 (`Sketch uses ~990KB (75%) of program storage space`).
+4. **Verify Field Pole Target**:
+   - Open `MSCB_SmartPole_System_R1/FieldPole_ESP32/FieldPole_ESP32.ino`.
+   - Under **Tools -> Board**, select `ESP32 Dev Module`.
+   - Ensure **PSRAM** is set to `Disabled` and **Flash Size** to `4MB`.
+   - Click **Verify (Ctrl+R)**. Compilation must conclude with exit code 0 (`Sketch uses ~319KB (24%) of program storage space`).
+
+---
+
+## 6. Common Compilation Errors & Resolutions
+
+| Compiler Error | Root Cause | Permanent Resolution |
+| :--- | :--- | :--- |
+| `fatal error: CommandSecurity.h: No such file or directory` | `MSCBShared` not installed in Arduino libraries | Run `.\scripts\install-mscbshared.ps1` and restart Arduino IDE |
+| `undefined reference to cmdSecurity` | `#include <CommandSecurity.h>` not parsed by Arduino preprocessor | Ensure `#include <CommandSecurity.h>` is present in `.ino` and library is installed |
+| `fatal error: mbedtls/sha256.h: No such file or directory` | ESP32 Core upgraded to 4.x where MbedTLS paths changed | Downgrade ESP32 Board Package to verified Core **3.3.11** |
