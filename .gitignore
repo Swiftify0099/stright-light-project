@@ -21,6 +21,9 @@ credentials.h
 
 # Build Directories
 build/
+build*/
+build_gw/
+build_pole/
 .pio/
 .vscode/
 .idea/

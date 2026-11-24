@@ -65,6 +65,9 @@ public:
   void showDeleteConfirm(int64_t chatId, uint16_t poleId);
   void showConfirmAllPoles(int64_t chatId, uint8_t action);
   void showFeederScheduleMenu(int64_t chatId, uint8_t page = 0);
+  void showSchedulePoleSelect(int64_t chatId, uint8_t page = 0);
+  void showScheduleFeederSelect(int64_t chatId, uint16_t poleId);
+  void showScheduleActionSelect(int64_t chatId, uint16_t poleId, uint8_t feederId);
   void showMeshTimeSync(int64_t chatId);
   void showWifiSettings(int64_t chatId);
   void showFirmwareOta(int64_t chatId);

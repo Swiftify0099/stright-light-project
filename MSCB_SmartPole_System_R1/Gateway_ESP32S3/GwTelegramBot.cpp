@@ -395,14 +395,14 @@ void GwTelegramBot::cmdDeleteConfirm(int64_t chatId, uint16_t poleId) {
     // Attempt LoRa downlink notification to pole to lock down its relays and state
     gwMesh.sendRevokeCommand(poleId, targetMac, txId, "ADMIN_DELETED");
 
-    char buf[256];
+    char buf[320];
     snprintf(buf, sizeof(buf),
              "✅ *POLE DELETED & REVOKED*\n"
              "Pole ID: `POLE-%04d (0x%04X)`\n"
              "MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
              "Tx ID: `0x%08X`\n"
-             "NVS Status: Permanently Revoked & Verified\n"
-             "Downstream children migrated to Gateway.",
+             "NVS Status: REVOKED_IN_GATEWAY — DELIVERY_PENDING\n"
+             "Authenticated revocation dispatched over mesh. Route preserved until ACK.",
              poleId, poleId,
              targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5],
              txId);
@@ -435,12 +435,14 @@ void GwTelegramBot::cmdRevoked(int64_t chatId) {
   int offset = snprintf(buf, sizeof(buf), "🚫 *REVOKED POLES LIST (%u/%u)*\n━━━━━━━━━━━━━━━━━━━━━━\n",
                         count, MSCB_MAX_REVOCATION_RECORDS);
 
-  for (uint16_t i = 0; i < count && offset < (int)sizeof(buf) - 150; i++) {
+  for (uint16_t i = 0; i < count && offset < (int)sizeof(buf) - 180; i++) {
     const PermanentRevocationRecord* r = gwRegistry.getRevokedByIndex(i);
     if (r) {
+      const char* statusStr = (r->deliveryStatus == REVOKE_DELIVERY_CONFIRMED) ? "DELIVERY_CONFIRMED" :
+                              (r->deliveryStatus == REVOKE_STATUS_UNREVOKED) ? "RESTORED" : "DELIVERY_PENDING";
       offset += snprintf(buf + offset, sizeof(buf) - offset,
-                         "• MAC: `%s`\n  Former: `%s`\n  Reason: %s\n  Restore: `/restore_%s`\n\n",
-                         r->hwId, r->logicalId, r->reason, r->hwId);
+                         "• MAC: `%s`\n  Former: `%s` [%s]\n  Reason: %s\n  Restore: `/restore_%s`\n\n",
+                         r->hwId, r->logicalId, statusStr, r->reason, r->hwId);
     }
   }
   sendMessage(chatId, buf);
@@ -1114,12 +1116,14 @@ void GwTelegramBot::showDeleteMenu(int64_t chatId, uint8_t page) {
   for (uint8_t i = startIndex; i < total && count < pageSize; i++, count++) {
     const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
     if (!p) continue;
-    char btn[128];
-    snprintf(btn, sizeof(btn), "[{\"text\":\"🗑️ Delete %s (0x%04X)\",\"callback_data\":\"DEL_PROMPT:%u\"}],",
-             p->stringId, p->poleId, p->poleId);
+    const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+    const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned";
+    char btn[160];
+    snprintf(btn, sizeof(btn), "[{\"text\":\"🗑️ Delete %s (%s)\",\"callback_data\":\"DEL_PROMPT:%u\"}],",
+             dName, loc, p->poleId);
     kb += btn;
   }
-
+ 
   kb += "[";
   if (page > 0) {
     char prevBtn[48];
@@ -1132,10 +1136,10 @@ void GwTelegramBot::showDeleteMenu(int64_t chatId, uint8_t page) {
     kb += nextBtn;
   }
   kb += "{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
-
+ 
   sendMessageWithKeyboard(chatId, buf, kb.c_str());
 }
-
+ 
 void GwTelegramBot::showDeleteConfirm(int64_t chatId, uint16_t poleId) {
   RegisteredPole* p = gwRegistry.findPoleById(poleId);
   if (!p) {
@@ -1143,15 +1147,19 @@ void GwTelegramBot::showDeleteConfirm(int64_t chatId, uint16_t poleId) {
     return;
   }
 
-  char buf[420];
+  const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+  const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned Location";
+ 
+  char buf[480];
   snprintf(buf, sizeof(buf),
            "⚠️ *TWO-STEP DELETION WARNING*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "Are you sure you want to permanently delete and blacklist:\n"
-           "📍 *%s* (Logical ID: `0x%04X`)?\n"
+           "🏷️ *%s* (Logical ID: `POLE-%04d (0x%04X)`)\n"
+           "📍 Location: *%s*\n"
            "MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n\n"
            "🚨 *Permanent Action:* Its hardware MAC address will be permanently recorded in NVS Revocation Blacklist and dropped from the LoRa mesh!",
-           p->stringId, p->poleId,
+           dName, p->poleId, p->poleId, loc,
            p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5]);
 
   char kb[220];
@@ -1229,25 +1237,132 @@ void GwTelegramBot::showFeederScheduleMenu(int64_t chatId, uint8_t page) {
 
   // Action buttons
   String kb = "[";
-  uint8_t totalPoles = gwRegistry.getActiveCount();
-  if (totalPoles > 0) {
-    const RegisteredPole* p0 = gwRegistry.getPoleByIndex(0);
-    uint16_t pid = p0 ? p0->poleId : 2;
-    const char* dName = (p0 && strlen(p0->displayName) > 0) ? p0->displayName : "Active Pole";
-    char row1[180], row2[180];
-    snprintf(row1, sizeof(row1),
-             "[{\"text\":\"⏱️ %s 15m Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:0:15\"},{\"text\":\"⏱️ %s 30m Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:0:30\"}],",
-             dName, pid, dName, pid);
-    snprintf(row2, sizeof(row2),
-             "[{\"text\":\"⏱️ %s 1h Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:0:60\"},{\"text\":\"⏱️ %s 2h Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:0:120\"}],",
-             dName, pid, dName, pid);
-    kb += row1;
-    kb += row2;
+  kb += "[{\"text\":\"➕ Configure Schedule for a Pole\",\"callback_data\":\"SCHED:CHOOSE:0\"}],";
+  if (count > 0) {
+    kb += "[{\"text\":\"🗑️ Clear All Schedule Rules\",\"callback_data\":\"SCHED:CLEAR\"}],";
   }
   kb += "[{\"text\":\"🕒 Mesh Time Sync\",\"callback_data\":\"MENU:TIMESYNC\"},{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:SCHED:0\"}],";
   kb += "[{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
 
   sendMessageWithKeyboard(chatId, buf, kb.c_str());
+}
+
+void GwTelegramBot::showSchedulePoleSelect(int64_t chatId, uint8_t page) {
+  uint8_t total = gwRegistry.getActiveCount();
+  if (total == 0) {
+    sendMessage(chatId, "⚠️ No active poles available to schedule.");
+    showFeederScheduleMenu(chatId, 0);
+    return;
+  }
+  uint8_t pageSize = 5;
+  uint8_t totalPages = (total + pageSize - 1) / pageSize;
+  if (page >= totalPages) page = totalPages - 1;
+  uint8_t startIndex = page * pageSize;
+
+  char buf[300];
+  snprintf(buf, sizeof(buf),
+           "⏰ *SELECT POLE TO SCHEDULE (Page %u of %u)*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Choose a pole to configure timers or recurring daily schedules:",
+           page + 1, totalPages);
+
+  String kb = "[";
+  uint8_t count = 0;
+  for (uint8_t i = startIndex; i < total && count < pageSize; i++, count++) {
+    const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
+    if (!p) continue;
+    const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+    const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned";
+    char btn[160];
+    snprintf(btn, sizeof(btn), "[{\"text\":\"📍 %s (%s)\",\"callback_data\":\"SCHED:P:%u\"}],",
+             dName, loc, p->poleId);
+    kb += btn;
+  }
+
+  kb += "[";
+  if (page > 0) {
+    char prevBtn[48];
+    snprintf(prevBtn, sizeof(prevBtn), "{\"text\":\"◀ Prev\",\"callback_data\":\"SCHED:CHOOSE:%u\"},", page - 1);
+    kb += prevBtn;
+  }
+  if (page + 1 < totalPages) {
+    char nextBtn[48];
+    snprintf(nextBtn, sizeof(nextBtn), "{\"text\":\"Next ▶\",\"callback_data\":\"SCHED:CHOOSE:%u\"},", page + 1);
+    kb += nextBtn;
+  }
+  kb += "{\"text\":\"🔙 Cancel\",\"callback_data\":\"MENU:SCHED:0\"}]]";
+
+  sendMessageWithKeyboard(chatId, buf, kb.c_str());
+}
+
+void GwTelegramBot::showScheduleFeederSelect(int64_t chatId, uint16_t poleId) {
+  RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  if (!p) {
+    sendMessage(chatId, "❌ Pole not found in active registry.");
+    showFeederScheduleMenu(chatId, 0);
+    return;
+  }
+  const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+  const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned Location";
+
+  char buf[350];
+  snprintf(buf, sizeof(buf),
+           "⏰ *SELECT FEEDER TARGET: %s*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Pole ID: `POLE-%04d (0x%04X)`\n"
+           "Location: *%s*\n\n"
+           "Choose a feeder (or ALL Feeders) to set timer or schedule:",
+           dName, p->poleId, p->poleId, loc);
+
+  String kb = "[";
+  char allBtn[128];
+  snprintf(allBtn, sizeof(allBtn), "[{\"text\":\"⚡ ALL Feeders (F1-F6)\",\"callback_data\":\"SCHED:F:%u:0\"}],", p->poleId);
+  kb += allBtn;
+  for (uint8_t f = 1; f <= 6; f++) {
+    char fBtn[128];
+    snprintf(fBtn, sizeof(fBtn), "[{\"text\":\"• F%u: %s\",\"callback_data\":\"SCHED:F:%u:%u\"}],",
+             f, getFeederName(p->poleId, f), p->poleId, f);
+    kb += fBtn;
+  }
+  kb += "[{\"text\":\"🔙 Back\",\"callback_data\":\"SCHED:CHOOSE:0\"}]]";
+  sendMessageWithKeyboard(chatId, buf, kb.c_str());
+}
+
+void GwTelegramBot::showScheduleActionSelect(int64_t chatId, uint16_t poleId, uint8_t feederId) {
+  RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  if (!p) {
+    sendMessage(chatId, "❌ Pole not found.");
+    showFeederScheduleMenu(chatId, 0);
+    return;
+  }
+  const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+  const char* fName = (feederId == 0) ? "ALL Feeders" : getFeederName(p->poleId, feederId);
+
+  char buf[450];
+  snprintf(buf, sizeof(buf),
+           "⏰ *CONFIGURE SCHEDULE: %s*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Pole: *%s* (`0x%04X`)\n"
+           "Target: *%s*\n\n"
+           "Select an Auto-OFF timer duration or a recurring daily schedule:",
+           dName, dName, p->poleId, fName);
+
+  char kb[600];
+  snprintf(kb, sizeof(kb),
+           "["
+           "[{\"text\":\"⏱️ 15m Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:15\"},{\"text\":\"⏱️ 30m Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:30\"}],"
+           "[{\"text\":\"⏱️ 1 Hour Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:60\"},{\"text\":\"⏱️ 2 Hours Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:120\"}],"
+           "[{\"text\":\"🌅 Daily (18:30 - 06:00)\",\"callback_data\":\"SCHED:DAILY:%u:%u:18:30:6:0\"}],"
+           "[{\"text\":\"🌃 Daily (20:00 - 05:00)\",\"callback_data\":\"SCHED:DAILY:%u:%u:20:0:5:0\"}],"
+           "[{\"text\":\"🔙 Back\",\"callback_data\":\"SCHED:P:%u\"}]"
+           "]",
+           p->poleId, feederId, p->poleId, feederId,
+           p->poleId, feederId, p->poleId, feederId,
+           p->poleId, feederId,
+           p->poleId, feederId,
+           p->poleId);
+
+  sendMessageWithKeyboard(chatId, buf, kb);
 }
 
 void GwTelegramBot::showMeshTimeSync(int64_t chatId) {
