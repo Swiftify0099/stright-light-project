@@ -128,12 +128,25 @@ CommandAuthResult CommandSecurity::verifyCommand(
     return AUTH_ERR_KEY_EPOCH_MISMATCH;
   }
 
-  // 5. Absolute Expiry Timestamp Check (Never millis()!)
-  if (currentEpochSec < 1700000000UL) {
-    return AUTH_ERR_TIME_UNSYNCED;
-  }
-  if (currentEpochSec > envelope.expiryEpochSec) {
-    return AUTH_ERR_COMMAND_EXPIRED;
+  // 5. Action Authorization & Absolute Expiry Check
+  // Policy: ON commands strictly require synchronized UTC epoch (currentEpochSec >= 1700000000UL)
+  // Safe de-energizing (OFF: commandParam == 0, or emergency shutdown) is permitted when unsynced,
+  // protected by key provision check, valid HMAC tag, destination address, and monotonic anti-replay sequence!
+  bool isEnergizingOn = (envelope.command == PKT_CMD_FEEDER_SWITCH && envelope.commandParam != 0);
+
+  if (isEnergizingOn) {
+    if (currentEpochSec < 1700000000UL) {
+      return AUTH_ERR_TIME_UNSYNCED;
+    }
+    if (currentEpochSec > envelope.expiryEpochSec) {
+      return AUTH_ERR_COMMAND_EXPIRED;
+    }
+  } else {
+    // De-energizing OFF / Safe Shutdown:
+    // If clock is synchronized, verify that command is not expired
+    if (currentEpochSec >= 1700000000UL && currentEpochSec > envelope.expiryEpochSec) {
+      return AUTH_ERR_COMMAND_EXPIRED;
+    }
   }
 
   // 6. Sliding Window Anti-Replay Check
@@ -197,4 +210,132 @@ bool CommandSecurity::verifyTimeSyncPacket(const PktTimeSyncPayload &pkt) {
   );
 
   return constantTimeCompare(expectedTag, pkt.hmacTag, MSCB_HMAC_TAG_BYTES);
+}
+
+bool CommandSecurity::createRevokeCommand(
+    uint16_t targetPoleId,
+    const uint8_t mac[6],
+    const char* txId,
+    const char* reason,
+    uint32_t currentEpochSec,
+    uint32_t expiryEpochSec,
+    PktRevokeCmdPayload &outPkt) {
+  if (!keyProvisioned) return false;
+
+  outPkt.networkId = MSCB_CMD_NETWORK_MAGIC;
+  outPkt.gatewayNodeId = MSCB_GATEWAY_NODE_ID;
+  outPkt.targetPoleId = targetPoleId;
+  if (mac) {
+    memcpy(outPkt.macAddress, mac, 6);
+  } else {
+    memset(outPkt.macAddress, 0, 6);
+  }
+  outPkt.sequenceNumber = replayProtector.getNextMonotonicSeq();
+  outPkt.keyEpoch = activeKeyEpoch;
+  outPkt.timestamp = currentEpochSec;
+  outPkt.expiryEpoch = expiryEpochSec;
+  memset(outPkt.txId, 0, sizeof(outPkt.txId));
+  if (txId) {
+    strncpy(outPkt.txId, txId, sizeof(outPkt.txId) - 1);
+  }
+  memset(outPkt.reason, 0, sizeof(outPkt.reason));
+  if (reason) {
+    strncpy(outPkt.reason, reason, sizeof(outPkt.reason) - 1);
+  }
+
+  computeHmacSha256(
+    provisionedKey, MSCB_KEY_LEN_BYTES,
+    reinterpret_cast<const uint8_t*>(&outPkt), MSCB_REVOKE_AUTH_BYTES,
+    outPkt.hmacTag
+  );
+  return true;
+}
+
+CommandAuthResult CommandSecurity::verifyRevokeCommand(
+    const PktRevokeCmdPayload &pkt,
+    uint16_t localNodeId,
+    const uint8_t localMac[6],
+    uint32_t currentEpochSec) {
+  // 1. Fail-closed check
+  if (!keyProvisioned) {
+    return AUTH_ERR_NO_PROVISIONED_KEY;
+  }
+
+  // 2. Network ID check
+  if (pkt.networkId != MSCB_CMD_NETWORK_MAGIC) {
+    return AUTH_ERR_NETWORK_ID_MISMATCH;
+  }
+
+  // 3. Destination addressing check (Pole ID or MAC matching this node)
+  bool idMatch = (pkt.targetPoleId == localNodeId || pkt.targetPoleId == MSCB_BROADCAST_NODE_ID);
+  bool macMatch = (localMac != nullptr && memcmp(pkt.macAddress, localMac, 6) == 0);
+  if (!idMatch && !macMatch) {
+    return AUTH_ERR_DEST_MISMATCH;
+  }
+
+  // 4. Key Epoch Alignment
+  if (pkt.keyEpoch != activeKeyEpoch) {
+    return AUTH_ERR_KEY_EPOCH_MISMATCH;
+  }
+
+  // 5. Expiry Check (if clock is synchronized)
+  if (currentEpochSec >= 1700000000UL && pkt.expiryEpoch > 0 && currentEpochSec > pkt.expiryEpoch) {
+    return AUTH_ERR_COMMAND_EXPIRED;
+  }
+
+  // 6. Sliding Window Anti-Replay Check
+  ReplayCheckResult rRes = replayProtector.checkPacket(
+    pkt.gatewayNodeId, 0, pkt.keyEpoch, pkt.sequenceNumber
+  );
+  if (rRes != REPLAY_OK_NEW_PACKET) {
+    return AUTH_ERR_REPLAY_DETECTED;
+  }
+
+  // 7. HMAC Authenticity Check (Reject all-zeros or missing auth tag!)
+  bool allZero = true;
+  for (size_t i = 0; i < MSCB_HMAC_TAG_BYTES; i++) {
+    if (pkt.hmacTag[i] != 0) {
+      allZero = false;
+      break;
+    }
+  }
+  if (allZero) {
+    return AUTH_ERR_HMAC_INVALID;
+  }
+
+  uint8_t expectedTag[MSCB_HMAC_TAG_BYTES];
+  computeHmacSha256(
+    provisionedKey, MSCB_KEY_LEN_BYTES,
+    reinterpret_cast<const uint8_t*>(&pkt), MSCB_REVOKE_AUTH_BYTES,
+    expectedTag
+  );
+
+  if (!constantTimeCompare(expectedTag, pkt.hmacTag, MSCB_HMAC_TAG_BYTES)) {
+    return AUTH_ERR_HMAC_INVALID;
+  }
+
+  // 8. Commit Monotonic Sequence on Verification
+  replayProtector.commitPacket(
+    pkt.gatewayNodeId, 0, pkt.keyEpoch, pkt.sequenceNumber
+  );
+
+  return AUTH_SUCCESS;
+}
+
+void CommandSecurity::getKeyFingerprint(char* outBuf, size_t maxLen) const {
+  if (!outBuf || maxLen == 0) return;
+  if (!keyProvisioned) {
+    snprintf(outBuf, maxLen, "NOT_PROVISIONED");
+    return;
+  }
+  // Compute non-secret 16-bit CRC of the key bytes (never print raw key bytes!)
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < MSCB_KEY_LEN_BYTES; i++) {
+    crc ^= (uint16_t)provisionedKey[i];
+    for (uint8_t b = 0; b < 8; b++) {
+      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
+      else crc = (crc >> 1);
+    }
+  }
+  snprintf(outBuf, maxLen, "FP-%04X (Epoch %lu)", crc, (unsigned long)activeKeyEpoch);
 }

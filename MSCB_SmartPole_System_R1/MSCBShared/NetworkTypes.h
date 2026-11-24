@@ -120,6 +120,39 @@ inline const char* channelDataStateToString(ChannelDataState st) {
 }
 
 // =====================================================================
+//  HARDWARE FEEDBACK VALIDITY ENUMS (MCP23S17 CONTACT SUPERVISION)
+// =====================================================================
+enum AuxFeedbackState : uint8_t {
+  AUX_NOT_CONNECTED = 0,
+  AUX_UNKNOWN       = 1,
+  AUX_VALID         = 2
+};
+
+enum McbFeedbackState : uint8_t {
+  MCB_NOT_CONNECTED = 0,
+  MCB_UNKNOWN       = 1,
+  MCB_VALID         = 2
+};
+
+inline const char* auxFeedbackStateToString(AuxFeedbackState st) {
+  switch (st) {
+    case AUX_VALID:         return "VALID";
+    case AUX_UNKNOWN:       return "UNKNOWN";
+    case AUX_NOT_CONNECTED:
+    default:                return "NOT_CONNECTED";
+  }
+}
+
+inline const char* mcbFeedbackStateToString(McbFeedbackState st) {
+  switch (st) {
+    case MCB_VALID:         return "VALID";
+    case MCB_UNKNOWN:       return "UNKNOWN";
+    case MCB_NOT_CONNECTED:
+    default:                return "NOT_CONNECTED";
+  }
+}
+
+// =====================================================================
 //  ELECTRICAL MEASUREMENT DATA STRUCTURES (21 CHANNELS PER POLE)
 // =====================================================================
 

@@ -46,6 +46,8 @@
   #include "CommandSecurity.h"
 #endif
 
+#define POLE_FEEDER_STAGGER_INTERVAL_MS 500UL
+
 class PoleFeederManager {
 public:
   PoleFeederManager();

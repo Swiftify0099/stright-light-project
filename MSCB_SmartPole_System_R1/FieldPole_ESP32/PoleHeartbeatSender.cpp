@@ -5,6 +5,7 @@
  */
 
 #include "PoleHeartbeatSender.h"
+#include "PoleRegistrationClient.h"
 #include <string.h>
 
 PoleHeartbeatSender poleHeartbeat;
@@ -47,6 +48,21 @@ void PoleHeartbeatSender::sendHeartbeat() {
 void PoleHeartbeatSender::handleHeartbeatAck(const PktHeartbeatAckPayload &ack) {
   if (ack.poleId == poleStorage.getAssignedPoleId()) {
     acksReceived++;
+
+    if (ack.ackStatus == HB_ACK_REVOKED_LOCKED) {
+      Serial.println(F("[REVOCATION] 🚨 Field Pole locked down permanently due to Gateway revocation in Heartbeat ACK."));
+      poleStorage.setRevokedLocked("GATEWAY_HB_ACK_REVOKED");
+      poleActuators.emergencyShutdownAll("GATEWAY_REVOKED_HB_ACK");
+      poleActuators.setRelaysLockedDisabled(true);
+      poleRegClient.clearRegistration();
+      poleRegClient.setRevokedLockedState();
+    } else if (ack.ackStatus == HB_ACK_RE_REGISTER_REQUIRED) {
+      Serial.println(F("[REGISTRATION] ⚠️ Gateway requested re-registration. Clearing local registration."));
+      poleRegClient.clearRegistration();
+    } else if (ack.ackStatus == HB_ACK_UNKNOWN_NODE) {
+      Serial.println(F("[REGISTRATION] ⚠️ Gateway reports unknown node. Resetting local registration."));
+      poleRegClient.clearRegistration();
+    }
   }
 }
 

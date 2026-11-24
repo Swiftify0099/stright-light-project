@@ -114,8 +114,21 @@ private:
   bool     startupNotified;
   uint32_t lastVerifyAttemptMs;
 
-  char customFeederNames[GW_MAX_MANAGED_POLES][6][24]; // Custom feeder names for all 50 poles
+  struct ActiveRegistrationWizard {
+    bool     active;
+    int64_t  adminChatId;
+    uint8_t  mac[6];
+    uint32_t startMs;
+    uint8_t  currentStep; // 1 = Name, 2 = Location, 3 = Area/Landmark, 4 = Review
+  };
 
+  ActiveRegistrationWizard activeWizard;
+
+public:
+  const ActiveRegistrationWizard& getActiveWizard() const { return activeWizard; }
+  void resetActiveWizard() { memset(&activeWizard, 0, sizeof(activeWizard)); }
+
+private:
 #if defined(ARDUINO)
   WiFiClientSecure client;
   UniversalTelegramBot bot;

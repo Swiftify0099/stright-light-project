@@ -225,6 +225,9 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           }
 
           // Active registered pole: Update node telemetry
+          if (p->status == POLE_STATUS_PENDING_ACK) {
+            gwRegistry.confirmPoleHandshake(hb.poleId);
+          }
           gwRegistry.updateNodeTelemetry(hb.poleId, hb.primaryParent, hb.backupParent,
                                          hb.rank, hb.feederStateMask, hb.auxFeedbackMask, hb.mcbStatusMask,
                                          hb.busVoltageV, hb.totalCurrentA, rssi, snr);
@@ -307,6 +310,7 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           memcpy(&ack, frame.payload, sizeof(PktRevokeAckPayload));
           Serial.printf("[MESH] Pole 0x%04X confirmed revocation ACK (status=%u)\n",
                         ack.poleId, ack.status);
+          gwRegistry.confirmRevokeDelivery(nullptr, ack.poleId);
         }
         break;
       }
@@ -588,13 +592,20 @@ void GwMeshCoordinator::resetFeederAckTracking() {
 
 bool GwMeshCoordinator::sendRevokeCommand(uint16_t poleId, const uint8_t mac[6], uint32_t transactionId, const char* reason) {
   PktRevokeCmdPayload cmd;
-  memset(&cmd, 0, sizeof(cmd));
-  cmd.targetPoleId = poleId;
-  if (mac) memcpy(cmd.macAddress, mac, 6);
-  snprintf(cmd.txId, sizeof(cmd.txId), "TX_%08X", transactionId);
-  if (reason) strncpy(cmd.reason, reason, sizeof(cmd.reason) - 1);
-  cmd.timestamp = millis() / 1000;
-  memset(cmd.authTag, 0, sizeof(cmd.authTag));
+  char txIdBuf[16];
+  snprintf(txIdBuf, sizeof(txIdBuf), "TX_%08X", transactionId);
+
+  uint32_t currentUtc = gwSchedule.getEpoch();
+  if (currentUtc == 0) currentUtc = (uint32_t)(millis() / 1000);
+  uint32_t expiryUtc = currentUtc + 60; // 60s validity
+
+  bool created = cmdSecurity.createRevokeCommand(
+    poleId, mac, txIdBuf, reason, currentUtc, expiryUtc, cmd
+  );
+  if (!created) {
+    Serial.println(F("[MESH] ❌ Failed to create authenticated Revoke Command envelope!"));
+    return false;
+  }
 
   return sendDownlinkPacket(poleId, PKT_CMD_REVOKE_POLE, (const uint8_t*)&cmd, sizeof(PktRevokeCmdPayload), PRIO_CRITICAL);
 }

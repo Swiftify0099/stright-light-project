@@ -136,13 +136,20 @@ struct PktHeartbeatAckPayload {
 };
 
 struct PktRevokeCmdPayload {
-  uint8_t  macAddress[6];
-  uint16_t targetPoleId;
-  char     txId[16];
-  char     reason[32];
-  uint32_t timestamp;
-  uint8_t  authTag[16];
+  uint16_t networkId;          // MSCB_CMD_NETWORK_MAGIC (0x4D53)
+  uint16_t gatewayNodeId;      // MSCB_GATEWAY_NODE_ID (0x0001)
+  uint16_t targetPoleId;       // Destination Pole ID
+  uint8_t  macAddress[6];      // Hardware MAC of target pole
+  uint32_t sequenceNumber;     // Monotonic sequence number
+  uint32_t keyEpoch;           // Active key epoch
+  uint32_t timestamp;          // Real UTC Unix Epoch from Gateway
+  uint32_t expiryEpoch;        // Expiry timestamp
+  char     txId[16];           // Transaction ID
+  char     reason[32];         // Revocation reason
+  uint8_t  hmacTag[32];        // 256-bit HMAC tag computed over the header fields above
 };
+
+#define MSCB_REVOKE_AUTH_BYTES (offsetof(PktRevokeCmdPayload, hmacTag))
 
 struct PktRevokeAckPayload {
   uint8_t  macAddress[6];
@@ -150,6 +157,7 @@ struct PktRevokeAckPayload {
   char     txId[16];
   uint8_t  status; // 0 = SUCCESS_LOCKED, 1 = FAILED
   uint32_t timestamp;
+  uint8_t  authTag[32]; // Authenticated ACK tag
 };
 
 struct PktRevokedReappearPayload {
@@ -188,6 +196,8 @@ struct PktFeederAckPayload {
   uint8_t  currentRelayMask;     // Bitmask of physical relay coils
   uint8_t  currentAuxMask;       // Bitmask of contactor auxiliary contacts
   uint8_t  currentMcbMask;       // Bitmask of MCB auxiliary contacts
+  uint8_t  auxFeedbackValid;     // 1 = Valid physical contactor feedback, 0 = NOT_CONNECTED / UNKNOWN
+  uint8_t  mcbStatusValid;       // 1 = Valid MCB feedback, 0 = NOT_CONNECTED / UNKNOWN
 };
 
 struct PktBeaconAnnouncePayload {

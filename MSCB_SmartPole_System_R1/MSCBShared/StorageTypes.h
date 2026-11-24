@@ -311,6 +311,10 @@ struct AuditEventRecord {
 };
 
 // Dedicated Permanent Revocation Record
+#define REVOKE_DELIVERY_CONFIRMED  0
+#define REVOKE_DELIVERY_PENDING    1
+#define REVOKE_STATUS_UNREVOKED    2
+
 struct PermanentRevocationRecord {
   char hwId[17];
   char logicalId[16];
@@ -318,6 +322,10 @@ struct PermanentRevocationRecord {
   char reason[32];
   char adminId[24];
   uint32_t timestamp;
+  uint8_t  deliveryStatus;   // REVOKE_DELIVERY_CONFIRMED, REVOKE_DELIVERY_PENDING, REVOKE_STATUS_UNREVOKED
+  char     unrevokeAdmin[24];
+  char     unrevokeReason[32];
+  uint32_t unrevokeTimestamp;
   uint32_t crc32;
 };
 

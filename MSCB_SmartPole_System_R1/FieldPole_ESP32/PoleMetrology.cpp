@@ -5,6 +5,7 @@
  */
 
 #include "PoleMetrology.h"
+#include "PoleStorageManager.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -203,6 +204,9 @@ bool PoleMetrology::begin() {
   pinMode(POLE_ADC3_DRDY_PIN, INPUT);
 #endif
 
+  // Load saved calibration from storage
+  poleStorage.loadCalibration(calibrationTable);
+
   bool ok = detectHardware();
   return ok;
 }
@@ -340,7 +344,7 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
 
     // Bus Voltages True-RMS
     for (uint8_t p = 0; p < 3; p++) {
-      if (channelStates[p] == CHANNEL_STATE_OK || channelStates[p] == CHANNEL_UNCALIBRATED) {
+      if (channelStates[p] == CHANNEL_STATE_OK && calibrationTable[p].isValid) {
         float rmsPinV = (float)sqrt(sumSqVoltage[p] / N);
         channelRmsValues[p] = rmsPinV * calibrationTable[p].sensorSensitivity;
       } else {
@@ -351,7 +355,7 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
     // Feeder Currents True-RMS
     for (uint8_t i = 0; i < 18; i++) {
       uint8_t lIdx = i + 3;
-      if (channelStates[lIdx] == CHANNEL_STATE_OK || channelStates[lIdx] == CHANNEL_UNCALIBRATED) {
+      if (channelStates[lIdx] == CHANNEL_STATE_OK && calibrationTable[lIdx].isValid) {
         float rmsPinI = (float)sqrt(sumSqCurrent[i] / N);
         channelRmsValues[lIdx] = rmsPinI * calibrationTable[lIdx].sensorSensitivity;
       } else {
@@ -423,8 +427,9 @@ void PoleMetrology::acquireRawSamples() {
   if (!allAdcsDetected) return;
 
   // DRDY lines are active-low when conversion frame is ready
-  if (digitalRead(POLE_ADC1_DRDY_PIN) == LOW ||
-      digitalRead(POLE_ADC2_DRDY_PIN) == LOW ||
+  // Synchronized sample validation: require all 3 ADS131M08 DRDY pins to be LOW simultaneously
+  if (digitalRead(POLE_ADC1_DRDY_PIN) == LOW &&
+      digitalRead(POLE_ADC2_DRDY_PIN) == LOW &&
       digitalRead(POLE_ADC3_DRDY_PIN) == LOW) {
 
     int32_t rawSamples[METROLOGY_TOTAL_RAW_CH];
@@ -503,8 +508,8 @@ float PoleMetrology::getChannelValue(uint8_t logicalChId1Based) const {
     return NAN;
   }
   uint8_t idx = logicalChId1Based - 1;
-  if (channelStates[idx] != CHANNEL_STATE_OK && channelStates[idx] != CHANNEL_UNCALIBRATED) {
-    return NAN; // Fail-Closed: Never output fake numbers for invalid channels!
+  if (channelStates[idx] != CHANNEL_STATE_OK || !calibrationTable[idx].isValid) {
+    return NAN; // Fail-Closed: Never output numbers for uncalibrated or invalid channels!
   }
   return channelRmsValues[idx];
 }

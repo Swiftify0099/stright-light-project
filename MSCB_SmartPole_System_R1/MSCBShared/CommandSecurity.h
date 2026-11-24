@@ -125,6 +125,26 @@ public:
   bool createTimeSyncPacket(uint32_t epochSec, PktTimeSyncPayload &outPkt);
   bool verifyTimeSyncPacket(const PktTimeSyncPayload &pkt);
 
+  // Authenticated Revocation Envelope (Gateway / Pole)
+  bool createRevokeCommand(
+    uint16_t targetPoleId,
+    const uint8_t mac[6],
+    const char* txId,
+    const char* reason,
+    uint32_t currentEpochSec,
+    uint32_t expiryEpochSec,
+    PktRevokeCmdPayload &outPkt
+  );
+  CommandAuthResult verifyRevokeCommand(
+    const PktRevokeCmdPayload &pkt,
+    uint16_t localNodeId,
+    const uint8_t localMac[6],
+    uint32_t currentEpochSec
+  );
+
+  // Non-secret key fingerprint (e.g. CRC16 hex, NEVER prints raw key bytes!)
+  void getKeyFingerprint(char* outBuf, size_t maxLen) const;
+
   // Cryptographic HMAC-SHA256
   static void computeHmacSha256(
     const uint8_t *key, size_t keyLen,

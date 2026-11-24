@@ -97,8 +97,8 @@ uint8_t PoleFeederManager::readContactorAuxMask() {
   SPI.transfer(MCP23S17_GPIOB);
   uint8_t portb = SPI.transfer(0x00);
   poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
-  // Port B bits 0..5 are contactor aux closed contacts (Active LOW or HIGH)
-  return portb & 0x3F;
+  // Active-Low: 100k pull-up to 3.3V (Open = HIGH, Closed/Engaged = LOW)
+  return ((~portb) & 0x3F);
 #else
   return 0;
 #endif
@@ -112,7 +112,8 @@ uint8_t PoleFeederManager::readMcbTripMask() {
   SPI.transfer(MCP23S17_GPIOA);
   uint8_t porta = SPI.transfer(0x00);
   poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
-  return porta & 0x3F;
+  // Active-Low: Pulled HIGH normally; Contact to GND when tripped = LOW
+  return ((~porta) & 0x3F);
 #else
   return 0;
 #endif
@@ -127,6 +128,8 @@ void PoleFeederManager::sendAckUplink(uint8_t feederId, uint32_t seqNumber, Feed
   ack.currentRelayMask = poleActuators.getActiveRelayMask();
   ack.currentAuxMask = readContactorAuxMask();
   ack.currentMcbMask = readMcbTripMask();
+  ack.auxFeedbackValid = auxHardwareDetected ? 1 : 0;
+  ack.mcbStatusValid = auxHardwareDetected ? 1 : 0;
 
   poleMesh.sendUplinkPacket(PKT_CMD_FEEDER_ACK, (const uint8_t*)&ack, sizeof(PktFeederAckPayload), PRIO_COMMAND);
 }
@@ -240,12 +243,22 @@ bool PoleFeederManager::processCommandPayload(const PktFeederCmdPayload &cmd) {
     sendAckUplink(cmd.feederId, cmd.sequenceNumber, finalState);
     return (finalState == FEEDER_ACK_COMPLETED || finalState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED);
   } else if (cmd.feederId == 0xF0) {
-    // Group Staggered Execution
+    // Group Staggered Execution: reject new group ON if already busy
+    if (cmd.commandAction != 0 && pendingStaggerMask != 0) {
+      sendAckUplink(cmd.feederId, cmd.sequenceNumber, FEEDER_ACK_REJECTED_FAULT);
+      return false;
+    }
+    if (cmd.commandAction == 0) pendingStaggerMask = 0; // Emergency OFF preempts
     executeGroupSwitch(cmd.groupMask, cmd.commandAction);
     activeCommandSeq = cmd.sequenceNumber;
     return true;
   } else if (cmd.feederId == 0x00) {
-    // All Feeders Staggered Execution
+    // All Feeders Staggered Execution: reject new all ON if already busy
+    if (cmd.commandAction != 0 && pendingStaggerMask != 0) {
+      sendAckUplink(cmd.feederId, cmd.sequenceNumber, FEEDER_ACK_REJECTED_FAULT);
+      return false;
+    }
+    if (cmd.commandAction == 0) pendingStaggerMask = 0; // Emergency OFF preempts
     executeAllSwitch(cmd.commandAction);
     activeCommandSeq = cmd.sequenceNumber;
     return true;
@@ -257,7 +270,7 @@ bool PoleFeederManager::processCommandPayload(const PktFeederCmdPayload &cmd) {
 void PoleFeederManager::executeGroupSwitch(uint8_t groupMask, uint8_t action) {
   pendingStaggerMask = groupMask & 0x3F;
   pendingStaggerAction = action;
-  lastStaggerStepMs = millis() - 200; // Trigger first step immediately
+  lastStaggerStepMs = millis() - POLE_FEEDER_STAGGER_INTERVAL_MS; // Trigger first step immediately
 }
 
 void PoleFeederManager::executeAllSwitch(uint8_t action) {
@@ -274,8 +287,8 @@ void PoleFeederManager::service() {
   if (pendingStaggerMask == 0) return;
 
   uint32_t now = millis();
-  // 200ms stagger between sequential feeder coil activations
-  if (now - lastStaggerStepMs >= 200) {
+  // 500ms stagger between sequential feeder coil activations
+  if (now - lastStaggerStepMs >= POLE_FEEDER_STAGGER_INTERVAL_MS) {
     lastStaggerStepMs = now;
 
     // Find next bit in pendingStaggerMask

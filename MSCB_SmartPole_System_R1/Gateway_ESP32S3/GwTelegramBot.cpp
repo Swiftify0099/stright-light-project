@@ -52,11 +52,7 @@ GwTelegramBot::GwTelegramBot() :
   lastVerifyAttemptMs(0)
 {
   memset(botToken, 0, sizeof(botToken));
-  for (int p = 0; p < GW_MAX_MANAGED_POLES; p++) {
-    for (int f = 0; f < 6; f++) {
-      customFeederNames[p][f][0] = '\0';
-    }
-  }
+  memset(&activeWizard, 0, sizeof(activeWizard));
 }
 
 bool GwTelegramBot::begin() {
@@ -201,50 +197,19 @@ void GwTelegramBot::sendReplyKeyboard(int64_t chatId, const char* text) {
 }
 
 const char* GwTelegramBot::getFeederName(uint16_t poleId, uint8_t feederId) const {
-  if (feederId < 1 || feederId > 6) return "Unknown";
-  uint8_t pIdx = (poleId >= GW_POLE_ID_START) ? (poleId - GW_POLE_ID_START) : 0;
-  if (pIdx < GW_MAX_MANAGED_POLES && customFeederNames[pIdx][feederId - 1][0] != '\0') {
-    return customFeederNames[pIdx][feederId - 1];
-  }
-  switch (feederId) {
-    case 1: return "Feeder 1";
-    case 2: return "Feeder 2";
-    case 3: return "Feeder 3";
-    case 4: return "Feeder 4";
-    case 5: return "Feeder 5";
-    case 6: return "Feeder 6";
-    default: return "Feeder";
-  }
+  return gwRegistry.getPoleFeederName(poleId, feederId);
 }
 
 void GwTelegramBot::setFeederName(uint16_t poleId, uint8_t feederId, const char* name) {
-  if (feederId < 1 || feederId > 6 || !name) return;
-  uint8_t pIdx = (poleId >= GW_POLE_ID_START) ? (poleId - GW_POLE_ID_START) : 0;
-  if (pIdx < GW_MAX_MANAGED_POLES) {
-    strncpy(customFeederNames[pIdx][feederId - 1], name, sizeof(customFeederNames[pIdx][feederId - 1]) - 1);
-    customFeederNames[pIdx][feederId - 1][sizeof(customFeederNames[pIdx][feederId - 1]) - 1] = '\0';
-    saveFeederNames();
-  }
+  gwRegistry.setPoleFeederName(poleId, feederId, name);
 }
 
 bool GwTelegramBot::saveFeederNames() {
-#if defined(ARDUINO)
-  Preferences p;
-  if (!p.begin("mscb_fnames", false)) return false;
-  p.putBytes("names", customFeederNames, sizeof(customFeederNames));
-  p.end();
-#endif
-  return true;
+  return true; // Authoritative single source of truth in gwRegistry NVS (mscb_reg)
 }
 
 bool GwTelegramBot::loadFeederNames() {
-#if defined(ARDUINO)
-  Preferences p;
-  if (!p.begin("mscb_fnames", true)) return false;
-  p.getBytes("names", customFeederNames, sizeof(customFeederNames));
-  p.end();
-#endif
-  return true;
+  return true; // Loaded via gwRegistry.loadRegistry()
 }
 
 void GwTelegramBot::broadcastAdminAlert(const char* alertText) {
@@ -658,9 +623,11 @@ void GwTelegramBot::showPolesMenu(int64_t chatId, uint8_t page) {
     if (!p) continue;
     PoleHealthStateMonitor st = gwHeartbeat.getPoleState(p->poleId);
     const char* stStr = (st == POLE_STATE_ONLINE) ? "🟢 ON" : (st == POLE_STATE_DELAYED ? "🟡 DLY" : "🔴 OFF");
-    char btn[128];
-    snprintf(btn, sizeof(btn), "[{\"text\":\"📍 %s (%s)\",\"callback_data\":\"P_SEL:%u\"}],",
-             p->stringId, stStr, p->poleId);
+    const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+    const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned";
+    char btn[160];
+    snprintf(btn, sizeof(btn), "[{\"text\":\"📍 %s (%s) - %s\",\"callback_data\":\"P_SEL:%u\"}],",
+             dName, stStr, loc, p->poleId);
     kb += btn;
   }
 
@@ -697,12 +664,19 @@ void GwTelegramBot::showPoleDetail(int64_t chatId, uint16_t poleId) {
     snprintf(voltBuf, sizeof(voltBuf), "UNAVAILABLE");
   }
 
-  char buf[800];
+  const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+  const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned Location";
+  const char* area = (strlen(p->area) > 0) ? p->area : "None";
+  const char* landmark = (strlen(p->landmark) > 0) ? p->landmark : "None";
+
+  char buf[900];
   snprintf(buf, sizeof(buf),
-           "📍 *POLE DETAILS: %s*\n"
+           "📍 *POLE DETAILS: %s (POLE-%04d)*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "🆔 Logical ID: `0x%04X`\n"
-           "🏷️ Pole Name: *%s*\n"
+           "🆔 Logical ID: `POLE-%04d (0x%04X)`\n"
+           "🏷️ Display Name: *%s*\n"
+           "📍 Location: *%s*\n"
+           "🏙️ Area: *%s* | Landmark: *%s*\n"
            "📶 Health: *%s*\n"
            "📡 LoRa RF: `%d dBm` (SNR: `%d dB`)\n"
            "🌲 Mesh: Parent `0x%04X` (Rank %u) | Backup `0x%04X`\n"
@@ -716,8 +690,8 @@ void GwTelegramBot::showPoleDetail(int64_t chatId, uint16_t poleId) {
            "• F5: *%s* `[%s]` (Aux: %s | MCB: %s)\n"
            "• F6: *%s* `[%s]` (Aux: %s | MCB: %s)\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "Tap buttons below to toggle feeders instantly:",
-           p->stringId, p->poleId, p->stringId, hStr,
+           "Tap buttons below to control feeders or manage pole:",
+           dName, p->poleId, p->poleId, p->poleId, dName, loc, area, landmark, hStr,
            p->lastRssi, p->lastSnr,
            p->primaryParent, p->rank, p->backupParent,
            voltBuf,
@@ -800,11 +774,15 @@ void GwTelegramBot::showVoltageDashboard(int64_t chatId, uint16_t poleId) {
     snprintf(vllStr, sizeof(vllStr), "UNAVAILABLE `[ADC Not Connected]`");
   }
 
+  const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+  const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned Location";
+
   char buf[750];
   snprintf(buf, sizeof(buf),
            "⚡ *3-PHASE VOLTAGE & METROLOGY DASHBOARD*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "📍 *Target Pole:* `%s` (0x%04X)\n"
+           "🏢 *Location:* %s\n"
            "📊 *Frequency:* `UNAVAILABLE (Pending Bench Cert)`\n\n"
            "🔴 *Phase R (L1-N):* %s\n"
            "🟡 *Phase Y (L2-N):* %s\n"
@@ -819,7 +797,7 @@ void GwTelegramBot::showVoltageDashboard(int64_t chatId, uint16_t poleId) {
            "• F5 (%s): %s | `UNAVAILABLE (No CT Hardware)`\n"
            "• F6 (%s): %s | `UNAVAILABLE (No CT Hardware)`\n"
            "━━━━━━━━━━━━━━━━━━━━━━",
-           p->stringId, p->poleId,
+           dName, p->poleId, loc,
            vrStr, vyStr, vbStr, vllStr,
            getFeederName(p->poleId, 1), (p->feederStateMask & 0x01) ? "⚡ ON" : "⭕ OFF",
            getFeederName(p->poleId, 2), (p->feederStateMask & 0x02) ? "⚡ ON" : "⭕ OFF",
@@ -840,42 +818,97 @@ void GwTelegramBot::showVoltageDashboard(int64_t chatId, uint16_t poleId) {
   sendMessageWithKeyboard(chatId, buf, kb);
 }
 
-void GwTelegramBot::showFeederDashboard(int64_t chatId, uint16_t poleId) {
+void GwTelegramBot::showFeederPoleSelectMenu(int64_t chatId, uint8_t page) {
   uint8_t total = gwRegistry.getActiveCount();
-  RegisteredPole* p = nullptr;
-  if (poleId != 0) {
-    p = gwRegistry.findPoleById(poleId);
-  }
-  if (!p && total > 0) {
-    p = (RegisteredPole*)gwRegistry.getPoleByIndex(0);
-  }
-
-  if (!p) {
+  if (total == 0) {
     String text = "🔌 *FEEDER CONTROL DASHBOARD*\n"
                   "━━━━━━━━━━━━━━━━━━━━━━\n"
                   "⚠️ No active Pole Nodes registered yet.\n\n"
-                  "When poles connect to the LoRa mesh, their 6 individual feeders can be toggled ON/OFF directly here with quick action buttons.";
+                  "When poles connect to the LoRa mesh, their individual feeders can be controlled directly here.";
     const char* kb = "[[{\"text\":\"📋 Check Registrations\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
     sendMessageWithKeyboard(chatId, text.c_str(), kb);
     return;
   }
 
-  char buf[512];
+  uint8_t pageSize = 5;
+  uint8_t totalPages = (total + pageSize - 1) / pageSize;
+  if (page >= totalPages) page = totalPages - 1;
+  uint8_t startIndex = page * pageSize;
+
+  char buf[300];
   snprintf(buf, sizeof(buf),
-           "🔌 *FEEDER CONTROL DASHBOARD*\n"
+           "🔌 *SELECT POLE FOR FEEDER CONTROL (Page %u of %u)*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "📍 *Selected Pole:* `%s` (0x%04X)\n"
+           "Choose a pole to view status and switch feeders:",
+           page + 1, totalPages);
+
+  String kb = "[";
+  uint8_t count = 0;
+  for (uint8_t i = startIndex; i < total && count < pageSize; i++, count++) {
+    const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
+    if (!p) continue;
+    const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+    uint8_t activeFeeders = 0;
+    for (uint8_t f = 0; f < 6; f++) {
+      if (p->feederStateMask & (1 << f)) activeFeeders++;
+    }
+
+    char btn[160];
+    snprintf(btn, sizeof(btn),
+             "[{\"text\":\"📍 %s (0x%04X) [%u/6 ON]\",\"callback_data\":\"F_SEL:%u\"}],",
+             dName, p->poleId, activeFeeders, p->poleId);
+    kb += btn;
+  }
+
+  kb += "[";
+  if (page > 0) {
+    char prevBtn[48];
+    snprintf(prevBtn, sizeof(prevBtn), "{\"text\":\"◀ Prev\",\"callback_data\":\"F_PAGE:%u\"},", page - 1);
+    kb += prevBtn;
+  }
+  if (page + 1 < totalPages) {
+    char nextBtn[48];
+    snprintf(nextBtn, sizeof(nextBtn), "{\"text\":\"Next ▶\",\"callback_data\":\"F_PAGE:%u\"},", page + 1);
+    kb += nextBtn;
+  }
+  kb += "{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
+
+  sendMessageWithKeyboard(chatId, buf, kb.c_str());
+}
+
+void GwTelegramBot::showFeederDashboard(int64_t chatId, uint16_t poleId) {
+  if (poleId == 0) {
+    showFeederPoleSelectMenu(chatId, 0);
+    return;
+  }
+
+  RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  if (!p) {
+    sendMessage(chatId, "❌ Pole ID not found in active registry.");
+    showFeederPoleSelectMenu(chatId, 0);
+    return;
+  }
+
+  const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+  const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned Location";
+
+  char buf[900];
+  snprintf(buf, sizeof(buf),
+           "🔌 *FEEDER DASHBOARD: %s*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "🆔 Pole ID: `POLE-%04d (0x%04X)`\n"
+           "📍 Location: *%s*\n"
            "⚡ Bus Voltage: *%0.1f VAC*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "• F1: *%s* `[%s]`\n"
-           "• F2: *%s* `[%s]`\n"
-           "• F3: *%s* `[%s]`\n"
-           "• F4: *%s* `[%s]`\n"
-           "• F5: *%s* `[%s]`\n"
-           "• F6: *%s* `[%s]`\n"
+           "• F1 (%s): %s\n"
+           "• F2 (%s): %s\n"
+           "• F3 (%s): %s\n"
+           "• F4 (%s): %s\n"
+           "• F5 (%s): %s\n"
+           "• F6 (%s): %s\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "Tap buttons below to toggle feeders on/off:",
-           p->stringId, p->poleId, p->lastBusVoltage,
+           "Explicit Feeder Controls (ON / OFF):",
+           dName, p->poleId, p->poleId, loc, p->lastBusVoltage,
            getFeederName(p->poleId, 1), (p->feederStateMask & 0x01) ? "⚡ ON" : "⭕ OFF",
            getFeederName(p->poleId, 2), (p->feederStateMask & 0x02) ? "⚡ ON" : "⭕ OFF",
            getFeederName(p->poleId, 3), (p->feederStateMask & 0x04) ? "⚡ ON" : "⭕ OFF",
@@ -883,21 +916,26 @@ void GwTelegramBot::showFeederDashboard(int64_t chatId, uint16_t poleId) {
            getFeederName(p->poleId, 5), (p->feederStateMask & 0x10) ? "⚡ ON" : "⭕ OFF",
            getFeederName(p->poleId, 6), (p->feederStateMask & 0x20) ? "⚡ ON" : "⭕ OFF");
 
-  char kb[512];
+  char kb[768];
   snprintf(kb, sizeof(kb),
            "["
-           "[{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:1\"},{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:2\"},{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:3\"}],"
-           "[{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:4\"},{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:5\"},{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:6\"}],"
-           "[{\"text\":\"⚡ Pole All ON\",\"callback_data\":\"P_ALL_ON:%u\"},{\"text\":\"⭕ Pole All OFF\",\"callback_data\":\"P_ALL_OFF:%u\"}],"
-           "[{\"text\":\"⚡ 3-Phase Voltage\",\"callback_data\":\"MENU:VOLT:%u\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]"
+           "[{\"text\":\"F1 ⚡ON\",\"callback_data\":\"F_SET:%u:1:1\"},{\"text\":\"F1 ⭕OFF\",\"callback_data\":\"F_SET:%u:1:0\"}],"
+           "[{\"text\":\"F2 ⚡ON\",\"callback_data\":\"F_SET:%u:2:1\"},{\"text\":\"F2 ⭕OFF\",\"callback_data\":\"F_SET:%u:2:0\"}],"
+           "[{\"text\":\"F3 ⚡ON\",\"callback_data\":\"F_SET:%u:3:1\"},{\"text\":\"F3 ⭕OFF\",\"callback_data\":\"F_SET:%u:3:0\"}],"
+           "[{\"text\":\"F4 ⚡ON\",\"callback_data\":\"F_SET:%u:4:1\"},{\"text\":\"F4 ⭕OFF\",\"callback_data\":\"F_SET:%u:4:0\"}],"
+           "[{\"text\":\"F5 ⚡ON\",\"callback_data\":\"F_SET:%u:5:1\"},{\"text\":\"F5 ⭕OFF\",\"callback_data\":\"F_SET:%u:5:0\"}],"
+           "[{\"text\":\"F6 ⚡ON\",\"callback_data\":\"F_SET:%u:6:1\"},{\"text\":\"F6 ⭕OFF\",\"callback_data\":\"F_SET:%u:6:0\"}],"
+           "[{\"text\":\"⚡ ALL ON\",\"callback_data\":\"F_ALL:%u:1\"},{\"text\":\"⭕ ALL OFF\",\"callback_data\":\"F_ALL:%u:0\"}],"
+           "[{\"text\":\"🔄 Refresh\",\"callback_data\":\"F_SEL:%u\"},{\"text\":\"⬅️ Select Pole\",\"callback_data\":\"MENU:FDR:0\"}]"
            "]",
-           (p->feederStateMask & 0x01) ? "F1 ⭕OFF" : "F1 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x02) ? "F2 ⭕OFF" : "F2 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x04) ? "F3 ⭕OFF" : "F3 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x08) ? "F4 ⭕OFF" : "F4 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x10) ? "F5 ⭕OFF" : "F5 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x20) ? "F6 ⭕OFF" : "F6 ⚡ON", p->poleId,
-           p->poleId, p->poleId, p->poleId);
+           p->poleId, p->poleId,
+           p->poleId, p->poleId,
+           p->poleId, p->poleId,
+           p->poleId, p->poleId,
+           p->poleId, p->poleId,
+           p->poleId, p->poleId,
+           p->poleId, p->poleId,
+           p->poleId);
 
   sendMessageWithKeyboard(chatId, buf, kb);
 }
@@ -908,7 +946,7 @@ void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
     String text = "📋 *PENDING POLE REGISTRATIONS*\n"
                   "━━━━━━━━━━━━━━━━━━━━━━\n"
                   "✅ *All Clear!* No pending pole join requests.\n"
-                  "When an unprovisioned pole powers on, its MAC address and signal metrics will appear here for one-click approval.";
+                  "When an unprovisioned pole powers on, its MAC address and signal metrics will appear here for wizard configuration.";
     const char* kb = "[[{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
     sendMessageWithKeyboard(chatId, text.c_str(), kb);
     return;
@@ -925,7 +963,7 @@ void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "Total Pending Nodes: %u / %d\n"
            "Unprovisioned hardware detected over LoRa mesh.\n"
-           "Tap [✅ Approve] to assign ID and cryptographic keys:",
+           "Tap [📝 Configure & Approve] to start registration wizard:",
            page + 1, totalPages, pCount, GW_MAX_PENDING_REGISTRATIONS);
 
   String kb = "[";
@@ -936,9 +974,9 @@ void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
     char macHex[13];
     snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
              p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5]);
-    char row[180];
+    char row[200];
     snprintf(row, sizeof(row),
-             "[{\"text\":\"✅ Approve %02X:%02X (%ddBm)\",\"callback_data\":\"REG:APP:%s\"},"
+             "[{\"text\":\"📝 Configure & Approve %02X:%02X (%ddBm)\",\"callback_data\":\"REG:WIZ:%s\"},"
              "{\"text\":\"❌ Reject\",\"callback_data\":\"REG:REJ:%s\"}],",
              p->mac[4], p->mac[5], p->rssi, macHex, macHex);
     kb += row;
@@ -958,6 +996,94 @@ void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
   kb += "{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
 
   sendMessageWithKeyboard(chatId, buf, kb.c_str());
+}
+
+void GwTelegramBot::showWizardPrompt(int64_t chatId, const uint8_t mac[6]) {
+  PendingRegistration* p = gwRegistry.getPendingByMac(mac);
+  if (!p) {
+    sendMessage(chatId, "❌ Pending pole registration record not found or expired.");
+    showRegistrationsMenu(chatId, 0);
+    return;
+  }
+
+  char macHex[13];
+  snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+  char text[768];
+  String kb = "[";
+
+  if (p->wizardStep == 1 || strlen(p->draftDisplayName) == 0) {
+    p->wizardStep = 1;
+    snprintf(text, sizeof(text),
+             "📝 *Pole Registration Wizard — Step 1/3*\n"
+             "━━━━━━━━━━━━━━━━━━━━━━\n"
+             "MAC Address: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
+             "RSSI: %d dBm | SNR: %d dB\n\n"
+             "👉 Please enter the *Display Name* for this pole:\n"
+             "`/reg_name <name>`\n"
+             "Example: `/reg_name Street Light Pole 10`",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], p->rssi, p->snr);
+    kb += "[{\"text\":\"❌ Cancel Registration\",\"callback_data\":\"REG:CANCEL\"}]]";
+  } else if (p->wizardStep == 2 || strlen(p->draftLocation) == 0) {
+    p->wizardStep = 2;
+    snprintf(text, sizeof(text),
+             "📍 *Pole Registration Wizard — Step 2/3*\n"
+             "━━━━━━━━━━━━━━━━━━━━━━\n"
+             "MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
+             "Display Name: *%s*\n\n"
+             "👉 Please enter the mandatory *Installation Location*:\n"
+             "`/reg_loc <location>`\n"
+             "Example: `/reg_loc Main Cross Road, Sector 5`",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], p->draftDisplayName);
+    kb += "[{\"text\":\"❌ Cancel Registration\",\"callback_data\":\"REG:CANCEL\"}]]";
+  } else if (p->wizardStep == 3) {
+    snprintf(text, sizeof(text),
+             "🏙️ *Pole Registration Wizard — Step 3/3*\n"
+             "━━━━━━━━━━━━━━━━━━━━━━\n"
+             "Name: *%s*\n"
+             "Location: *%s*\n\n"
+             "Optional details:\n"
+             "- Area & Landmark: `/reg_area <area> | <landmark>`\n"
+             "- Custom Feeder Name: `/reg_f <1-6> <name>`\n\n"
+             "Tap [➡️ Continue to Review] or type `/reg_skip` to finish.",
+             p->draftDisplayName, p->draftLocation);
+    kb += "[{\"text\":\"➡️ Continue to Review\",\"callback_data\":\"REG:SKIP\"}],";
+    kb += "[{\"text\":\"❌ Cancel Registration\",\"callback_data\":\"REG:CANCEL\"}]]";
+  } else {
+    // Review card (Step 4)
+    p->wizardStep = 4;
+    char fNames[256] = "";
+    for (uint8_t f = 0; f < 6; f++) {
+      char fBuf[48];
+      const char* fn = (strlen(p->draftFeederNames[f]) > 0) ? p->draftFeederNames[f] : "Default";
+      snprintf(fBuf, sizeof(fBuf), "• F%u: %s\n", f + 1, fn);
+      strncat(fNames, fBuf, sizeof(fNames) - strlen(fNames) - 1);
+    }
+
+    snprintf(text, sizeof(text),
+             "📋 *POLE REGISTRATION REVIEW CARD*\n"
+             "━━━━━━━━━━━━━━━━━━━━━━\n"
+             "MAC Address: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
+             "Display Name: *%s*\n"
+             "Location: *%s*\n"
+             "Area: *%s* | Landmark: *%s*\n"
+             "Feeders:\n%s\n"
+             "⚠️ Please confirm all metadata before approving hardware keys:",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             p->draftDisplayName, p->draftLocation,
+             strlen(p->draftArea) > 0 ? p->draftArea : "None",
+             strlen(p->draftLandmark) > 0 ? p->draftLandmark : "None",
+             fNames);
+
+    char confirmBtn[140];
+    snprintf(confirmBtn, sizeof(confirmBtn),
+             "[{\"text\":\"✅ CONFIRM & APPROVE\",\"callback_data\":\"REG:CONFIRM:%s\"}],", macHex);
+    kb += confirmBtn;
+    kb += "[{\"text\":\"❌ Cancel\",\"callback_data\":\"REG:CANCEL\"}]]";
+  }
+
+  sendMessageWithKeyboard(chatId, text, kb.c_str());
 }
 
 void GwTelegramBot::showDeleteMenu(int64_t chatId, uint8_t page) {
@@ -1102,15 +1228,26 @@ void GwTelegramBot::showFeederScheduleMenu(int64_t chatId, uint8_t page) {
   }
 
   // Action buttons
-  const char* kb =
-    "["
-    "[{\"text\":\"⏱️ Auto-OFF 15m (P2)\",\"callback_data\":\"SCHED:ARM:2:0:15\"},{\"text\":\"⏱️ Auto-OFF 30m (P2)\",\"callback_data\":\"SCHED:ARM:2:0:30\"}],"
-    "[{\"text\":\"⏱️ Auto-OFF 1h (P2)\",\"callback_data\":\"SCHED:ARM:2:0:60\"},{\"text\":\"⏱️ Auto-OFF 2h (P2)\",\"callback_data\":\"SCHED:ARM:2:0:120\"}],"
-    "[{\"text\":\"🕒 Mesh Time Sync\",\"callback_data\":\"MENU:TIMESYNC\"},{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:SCHED:0\"}],"
-    "[{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]"
-    "]";
+  String kb = "[";
+  uint8_t totalPoles = gwRegistry.getActiveCount();
+  if (totalPoles > 0) {
+    const RegisteredPole* p0 = gwRegistry.getPoleByIndex(0);
+    uint16_t pid = p0 ? p0->poleId : 2;
+    const char* dName = (p0 && strlen(p0->displayName) > 0) ? p0->displayName : "Active Pole";
+    char row1[180], row2[180];
+    snprintf(row1, sizeof(row1),
+             "[{\"text\":\"⏱️ %s 15m Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:0:15\"},{\"text\":\"⏱️ %s 30m Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:0:30\"}],",
+             dName, pid, dName, pid);
+    snprintf(row2, sizeof(row2),
+             "[{\"text\":\"⏱️ %s 1h Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:0:60\"},{\"text\":\"⏱️ %s 2h Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:0:120\"}],",
+             dName, pid, dName, pid);
+    kb += row1;
+    kb += row2;
+  }
+  kb += "[{\"text\":\"🕒 Mesh Time Sync\",\"callback_data\":\"MENU:TIMESYNC\"},{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:SCHED:0\"}],";
+  kb += "[{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
 
-  sendMessageWithKeyboard(chatId, buf, kb);
+  sendMessageWithKeyboard(chatId, buf, kb.c_str());
 }
 
 void GwTelegramBot::showMeshTimeSync(int64_t chatId) {
@@ -1525,6 +1662,99 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
     } else {
       sendMessage(chatId, "Usage: `/fname <poleId> <feederId:1..6> <New Name>`");
     }
+  } else if (strncmp(cmdText, "/cancel_registration", 20) == 0 || strncmp(cmdText, "/cancel", 7) == 0) {
+    if (activeWizard.active) {
+      resetActiveWizard();
+      sendMessage(chatId, "❌ Pole registration wizard cancelled.");
+      showRegistrationsMenu(chatId, 0);
+    } else {
+      sendMessage(chatId, "ℹ️ No active registration wizard in progress.");
+    }
+  } else if (strncmp(cmdText, "/reg_name ", 10) == 0) {
+    if (!activeWizard.active) {
+      sendMessage(chatId, "❌ No active registration wizard in progress. Please select a pending pole from the Registrations menu first.");
+      return;
+    }
+    const char* val = cmdText + 10;
+    while (*val == ' ') val++;
+    if (strlen(val) == 0) {
+      sendMessage(chatId, "Usage: `/reg_name <Display Name>`");
+      return;
+    }
+    gwRegistry.setPendingWizardName(activeWizard.mac, val);
+    activeWizard.currentStep = 2;
+    sendMessage(chatId, "✅ Display Name saved!");
+    showWizardPrompt(chatId, activeWizard.mac);
+  } else if (strncmp(cmdText, "/reg_loc ", 9) == 0) {
+    if (!activeWizard.active) {
+      sendMessage(chatId, "❌ No active registration wizard in progress. Please select a pending pole from the Registrations menu first.");
+      return;
+    }
+    const char* val = cmdText + 9;
+    while (*val == ' ') val++;
+    if (strlen(val) == 0) {
+      sendMessage(chatId, "Usage: `/reg_loc <Installation Location>`");
+      return;
+    }
+    gwRegistry.setPendingWizardLocation(activeWizard.mac, val);
+    activeWizard.currentStep = 3;
+    sendMessage(chatId, "✅ Installation Location saved!");
+    showWizardPrompt(chatId, activeWizard.mac);
+  } else if (strncmp(cmdText, "/reg_area ", 10) == 0) {
+    if (!activeWizard.active) {
+      sendMessage(chatId, "❌ No active registration wizard in progress. Please select a pending pole from the Registrations menu first.");
+      return;
+    }
+    const char* val = cmdText + 10;
+    while (*val == ' ') val++;
+    if (strlen(val) == 0) {
+      sendMessage(chatId, "Usage: `/reg_area <Area> | <Landmark>`");
+      return;
+    }
+    char areaBuf[32] = {0};
+    char landmarkBuf[32] = {0};
+    const char* pipe = strchr(val, '|');
+    if (pipe) {
+      size_t aLen = pipe - val;
+      if (aLen >= sizeof(areaBuf)) aLen = sizeof(areaBuf) - 1;
+      strncpy(areaBuf, val, aLen);
+      areaBuf[aLen] = '\0';
+      while (aLen > 0 && areaBuf[aLen - 1] == ' ') { areaBuf[--aLen] = '\0'; }
+      const char* lm = pipe + 1;
+      while (*lm == ' ') lm++;
+      strncpy(landmarkBuf, lm, sizeof(landmarkBuf) - 1);
+    } else {
+      strncpy(areaBuf, val, sizeof(areaBuf) - 1);
+    }
+    gwRegistry.setPendingWizardAreaLandmark(activeWizard.mac, areaBuf, landmarkBuf);
+    activeWizard.currentStep = 4;
+    sendMessage(chatId, "✅ Area & Landmark saved!");
+    showWizardPrompt(chatId, activeWizard.mac);
+  } else if (strncmp(cmdText, "/reg_skip", 9) == 0) {
+    if (!activeWizard.active) {
+      sendMessage(chatId, "❌ No active registration wizard in progress.");
+      return;
+    }
+    PendingRegistration* p = gwRegistry.getPendingByMac(activeWizard.mac);
+    if (p) { p->wizardStep = 4; }
+    activeWizard.currentStep = 4;
+    showWizardPrompt(chatId, activeWizard.mac);
+  } else if (strncmp(cmdText, "/reg_f ", 7) == 0) {
+    if (!activeWizard.active) {
+      sendMessage(chatId, "❌ No active registration wizard in progress.");
+      return;
+    }
+    int fid = 0;
+    char fname[24] = {0};
+    if (sscanf(cmdText + 7, "%d %23[^\n]", &fid, fname) == 2 && fid >= 1 && fid <= 6) {
+      gwRegistry.setPendingWizardFeederName(activeWizard.mac, (uint8_t)fid, fname);
+      char buf[128];
+      snprintf(buf, sizeof(buf), "✅ Feeder %d named: *%s*", fid, fname);
+      sendMessage(chatId, buf);
+      showWizardPrompt(chatId, activeWizard.mac);
+    } else {
+      sendMessage(chatId, "Usage: `/reg_f <1..6> <Feeder Name>`");
+    }
   } else if (strncmp(cmdText, "/approve_", 9) == 0) {
     const char* hex = cmdText + 9;
     if (strlen(hex) == 12) {
@@ -1533,14 +1763,37 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
         char byteStr[3] = { hex[i*2], hex[i*2 + 1], '\0' };
         mac[i] = (uint8_t)strtoul(byteStr, NULL, 16);
       }
+      PendingRegistration* p = gwRegistry.getPendingByMac(mac);
+      if (p && (strlen(p->draftDisplayName) == 0 || strlen(p->draftLocation) == 0)) {
+        activeWizard.active = true;
+        activeWizard.adminChatId = chatId;
+        memcpy(activeWizard.mac, mac, 6);
+        activeWizard.startMs = millis();
+        activeWizard.currentStep = 1;
+        sendMessage(chatId, "⚠️ Mandatory Display Name and Location are required before approval! Starting wizard...");
+        showWizardPrompt(chatId, mac);
+        return;
+      }
       uint16_t assignedId = 0;
-      if (gwRegistry.approvePending(mac, assignedId)) {
+      char adminStr[24];
+      snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
+      if (gwRegistry.approvePending(mac, assignedId, p ? p->draftDisplayName : nullptr, p ? p->draftLocation : nullptr, adminStr)) {
         gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
-        char buf[128];
-        snprintf(buf, sizeof(buf), "✅ Approved! Assigned Logical ID: POLE-%04d (0x%04X)\nResponse sent over LoRa mesh.", assignedId, assignedId);
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "✅ *POLE APPROVED & REGISTERED*\n"
+                 "Assigned Logical ID: `POLE-%04d (0x%04X)`\n"
+                 "Display Name: *%s*\n"
+                 "Location: *%s*\n"
+                 "Status: `PENDING_HANDSHAKE_ACK`\n"
+                 "LoRa response dispatched. Active confirmation occurs on first heartbeat.",
+                 assignedId, assignedId,
+                 p ? p->draftDisplayName : "Pole",
+                 p ? p->draftLocation : "Field");
         sendMessage(chatId, buf);
+        resetActiveWizard();
       } else {
-        sendMessage(chatId, "❌ Failed to approve (capacity full or not in pending).");
+        sendMessage(chatId, "❌ Failed to approve (mandatory Name/Location missing, capacity full, or not pending).");
       }
       showRegistrationsMenu(chatId, 0);
     }
@@ -1652,7 +1905,29 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
     showVoltageDashboard(chatId, pid + 1);
   } else if (strncmp(callbackData, "MENU:FDR:", 9) == 0) {
     uint16_t pid = (uint16_t)atoi(callbackData + 9);
+    if (pid == 0) {
+      showFeederPoleSelectMenu(chatId, 0);
+    } else {
+      showFeederDashboard(chatId, pid);
+    }
+  } else if (strncmp(callbackData, "F_SEL:", 6) == 0) {
+    uint16_t pid = (uint16_t)atoi(callbackData + 6);
     showFeederDashboard(chatId, pid);
+  } else if (strncmp(callbackData, "F_PAGE:", 7) == 0) {
+    uint8_t page = (uint8_t)atoi(callbackData + 7);
+    showFeederPoleSelectMenu(chatId, page);
+  } else if (strncmp(callbackData, "F_SET:", 6) == 0) {
+    int pid = 0, fid = 0, act = 0;
+    if (sscanf(callbackData + 6, "%d:%d:%d", &pid, &fid, &act) == 3) {
+      cmdFeeder(chatId, (uint16_t)pid, (uint8_t)fid, (uint8_t)act);
+      showFeederDashboard(chatId, (uint16_t)pid);
+    }
+  } else if (strncmp(callbackData, "F_ALL:", 6) == 0) {
+    int pid = 0, act = 0;
+    if (sscanf(callbackData + 6, "%d:%d", &pid, &act) == 2) {
+      cmdAll(chatId, (uint16_t)pid, (uint8_t)act);
+      showFeederDashboard(chatId, (uint16_t)pid);
+    }
   } else if (strncmp(callbackData, "F_TOG:", 6) == 0) {
     int pid = 0, fid = 0;
     if (sscanf(callbackData + 6, "%d:%d", &pid, &fid) == 2) {
@@ -1664,7 +1939,7 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
         currentAct = 1;
       }
       cmdFeeder(chatId, (uint16_t)pid, (uint8_t)fid, currentAct);
-      showPoleDetail(chatId, (uint16_t)pid);
+      showFeederDashboard(chatId, (uint16_t)pid);
     }
   } else if (strncmp(callbackData, "P_ALL_ON:", 9) == 0) {
     uint16_t pid = (uint16_t)atoi(callbackData + 9);
@@ -1686,6 +1961,80 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
     showRegistrationsMenu(chatId, page);
   } else if (strcmp(callbackData, "MENU:REG") == 0) {
     showRegistrationsMenu(chatId, 0);
+  } else if (strncmp(callbackData, "REG:WIZ:", 8) == 0) {
+    const char* hex = callbackData + 8;
+    if (strlen(hex) == 12) {
+      uint8_t mac[6];
+      for (int i = 0; i < 6; i++) {
+        char byteStr[3] = { hex[i*2], hex[i*2 + 1], '\0' };
+        mac[i] = (uint8_t)strtoul(byteStr, NULL, 16);
+      }
+      PendingRegistration* p = gwRegistry.getPendingByMac(mac);
+      if (!p) {
+        sendMessage(chatId, "❌ Pending pole record not found or expired.");
+        showRegistrationsMenu(chatId, 0);
+        return;
+      }
+      activeWizard.active = true;
+      activeWizard.adminChatId = chatId;
+      memcpy(activeWizard.mac, mac, 6);
+      activeWizard.startMs = millis();
+      activeWizard.currentStep = (p->wizardStep > 0) ? p->wizardStep : 1;
+      showWizardPrompt(chatId, mac);
+    }
+  } else if (strncmp(callbackData, "REG:CONFIRM:", 12) == 0) {
+    const char* hex = callbackData + 12;
+    if (strlen(hex) == 12) {
+      uint8_t mac[6];
+      for (int i = 0; i < 6; i++) {
+        char byteStr[3] = { hex[i*2], hex[i*2 + 1], '\0' };
+        mac[i] = (uint8_t)strtoul(byteStr, NULL, 16);
+      }
+      PendingRegistration* p = gwRegistry.getPendingByMac(mac);
+      if (!p) {
+        sendMessage(chatId, "❌ Pending pole record not found.");
+        showRegistrationsMenu(chatId, 0);
+        return;
+      }
+      if (strlen(p->draftDisplayName) == 0 || strlen(p->draftLocation) == 0) {
+        sendMessage(chatId, "❌ Registration cannot be approved without mandatory Name and Location!\nPlease enter Name (/reg_name) and Location (/reg_loc) first.");
+        showWizardPrompt(chatId, mac);
+        return;
+      }
+      uint16_t assignedId = 0;
+      char adminStr[24];
+      snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
+      if (gwRegistry.approvePending(mac, assignedId, p->draftDisplayName, p->draftLocation, adminStr)) {
+        gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "✅ *POLE APPROVED & REGISTERED*\n"
+                 "Assigned Logical ID: `POLE-%04d (0x%04X)`\n"
+                 "Display Name: *%s*\n"
+                 "Location: *%s*\n"
+                 "State: `PENDING_HANDSHAKE_ACK`\n"
+                 "LoRa approval dispatched. Node will be confirmed fully active on first heartbeat.",
+                 assignedId, assignedId, p->draftDisplayName, p->draftLocation);
+        sendMessage(chatId, buf);
+        resetActiveWizard();
+      } else {
+        sendMessage(chatId, "❌ Failed to approve (capacity full or node missing).");
+      }
+      showRegistrationsMenu(chatId, 0);
+    }
+  } else if (strcmp(callbackData, "REG:CANCEL") == 0) {
+    resetActiveWizard();
+    sendMessage(chatId, "❌ Registration wizard cancelled.");
+    showRegistrationsMenu(chatId, 0);
+  } else if (strcmp(callbackData, "REG:SKIP") == 0) {
+    if (activeWizard.active) {
+      PendingRegistration* p = gwRegistry.getPendingByMac(activeWizard.mac);
+      if (p) { p->wizardStep = 4; }
+      activeWizard.currentStep = 4;
+      showWizardPrompt(chatId, activeWizard.mac);
+    } else {
+      showRegistrationsMenu(chatId, 0);
+    }
   } else if (strncmp(callbackData, "REG:APP:", 8) == 0) {
     const char* hex = callbackData + 8;
     if (strlen(hex) == 12) {
@@ -1694,14 +2043,34 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
         char byteStr[3] = { hex[i*2], hex[i*2 + 1], '\0' };
         mac[i] = (uint8_t)strtoul(byteStr, NULL, 16);
       }
+      PendingRegistration* p = gwRegistry.getPendingByMac(mac);
+      if (p && (strlen(p->draftDisplayName) == 0 || strlen(p->draftLocation) == 0)) {
+        activeWizard.active = true;
+        activeWizard.adminChatId = chatId;
+        memcpy(activeWizard.mac, mac, 6);
+        activeWizard.startMs = millis();
+        activeWizard.currentStep = 1;
+        sendMessage(chatId, "⚠️ Mandatory Display Name and Location are required before approval! Launching wizard...");
+        showWizardPrompt(chatId, mac);
+        return;
+      }
       uint16_t assignedId = 0;
-      if (gwRegistry.approvePending(mac, assignedId)) {
+      char adminStr[24];
+      snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
+      if (gwRegistry.approvePending(mac, assignedId, p ? p->draftDisplayName : nullptr, p ? p->draftLocation : nullptr, adminStr)) {
         gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
         char buf[128];
         snprintf(buf, sizeof(buf), "✅ Approved! Assigned Logical ID: POLE-%04d (0x%04X)\nResponse packet dispatched over LoRa mesh.", assignedId, assignedId);
         sendMessage(chatId, buf);
       } else {
-        sendMessage(chatId, "❌ Failed to approve (capacity full or not in pending).");
+        sendMessage(chatId, "❌ Failed to approve. Mandatory Name and Location required!");
+        activeWizard.active = true;
+        activeWizard.adminChatId = chatId;
+        memcpy(activeWizard.mac, mac, 6);
+        activeWizard.startMs = millis();
+        activeWizard.currentStep = 1;
+        showWizardPrompt(chatId, mac);
+        return;
       }
       showRegistrationsMenu(chatId, 0);
     }

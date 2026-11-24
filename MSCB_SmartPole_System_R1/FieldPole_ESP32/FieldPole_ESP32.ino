@@ -264,22 +264,34 @@ void loop() {
             if (inFrame.header.payloadLen >= sizeof(PktRevokeCmdPayload)) {
               PktRevokeCmdPayload rev;
               memcpy(&rev, inFrame.payload, sizeof(PktRevokeCmdPayload));
-              if (rev.targetPoleId == poleStorage.getAssignedPoleId() ||
-                  memcmp(rev.macAddress, poleRegClient.getMacAddress(), 6) == 0) {
-                Serial.printf("[REVOCATION] ⛔ Received authenticated REVOCATION from Gateway! Reason: %s\n", rev.reason);
-                poleStorage.setRevokedLocked(rev.reason);
-                poleActuators.emergencyShutdownAll("GATEWAY_REVOCATION");
-                poleActuators.setRelaysLockedDisabled(true);
 
-                // Send REVOKE_ACK
-                PktRevokeAckPayload ack;
-                memcpy(ack.macAddress, poleRegClient.getMacAddress(), 6);
-                ack.poleId = poleStorage.getAssignedPoleId();
-                strncpy(ack.txId, rev.txId, sizeof(ack.txId) - 1);
-                ack.status = 0; // SUCCESS_LOCKED
-                ack.timestamp = millis();
-                poleMesh.sendUplinkPacket(PKT_CMD_REVOKE_ACK, (const uint8_t*)&ack, sizeof(PktRevokeAckPayload), PRIO_COMMAND);
+              CommandAuthResult authRes = cmdSecurity.verifyRevokeCommand(
+                rev, poleStorage.getAssignedPoleId(),
+                poleRegClient.getMacAddress(), poleTimeMgr.getCurrentEpoch()
+              );
+
+              if (authRes != AUTH_SUCCESS) {
+                Serial.printf("[SECURITY] 🚨 PKT_CMD_REVOKE_POLE rejected: %s\n",
+                              commandAuthResultToString(authRes));
+                break;
               }
+
+              Serial.printf("[REVOCATION] ⛔ Received authenticated REVOCATION from Gateway! Reason: %s\n", rev.reason);
+              poleStorage.setRevokedLocked(rev.reason);
+              poleActuators.emergencyShutdownAll("GATEWAY_REVOCATION");
+              poleActuators.setRelaysLockedDisabled(true);
+              poleRegClient.clearRegistration();
+              poleRegClient.setRevokedLockedState();
+
+              // Send REVOKE_ACK
+              PktRevokeAckPayload ack;
+              memset(&ack, 0, sizeof(ack));
+              memcpy(ack.macAddress, poleRegClient.getMacAddress(), 6);
+              ack.poleId = poleStorage.getAssignedPoleId();
+              strncpy(ack.txId, rev.txId, sizeof(ack.txId) - 1);
+              ack.status = 0; // SUCCESS_LOCKED
+              ack.timestamp = millis() / 1000;
+              poleMesh.sendUplinkPacket(PKT_CMD_REVOKE_ACK, (const uint8_t*)&ack, sizeof(PktRevokeAckPayload), PRIO_COMMAND);
             }
             break;
           }

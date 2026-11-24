@@ -50,6 +50,13 @@ public:
   bool isRegistered() const { return (state == REG_CLIENT_REGISTERED); }
   bool isRevoked() const { return (state == REG_CLIENT_REVOKED_LOCKED); }
   uint16_t getAssignedId() const { return poleStorage.getAssignedPoleId(); }
+  void clearRegistration() {
+    state = REG_CLIENT_UNREGISTERED;
+    poleStorage.clearRegistration();
+  }
+  void setRevokedLockedState() {
+    state = REG_CLIENT_REVOKED_LOCKED;
+  }
 
 private:
   void readHardwareMac();

@@ -48,6 +48,7 @@ calculateRegistryCrc(uint8_t activeCnt, const RegisteredPole *pPoles,
 
 GwNodeRegistry::GwNodeRegistry()
     : activeCount(0), pendingCount(0), revokedCount(0),
+      currentGeneration(0), activeSlot(0), simulateInterruptedWrite(false),
       reappearedAlertPending(false) {
   memset(poles, 0, sizeof(poles));
   memset(pending, 0, sizeof(pending));
@@ -66,7 +67,9 @@ bool GwNodeRegistry::isMacRevoked(const uint8_t mac[6]) const {
 
   for (uint8_t i = 0; i < revokedCount; i++) {
     if (strncmp(revoked[i].hwId, macHex, 12) == 0) {
-      return true;
+      if (revoked[i].deliveryStatus != REVOKE_STATUS_UNREVOKED) {
+        return true;
+      }
     }
   }
   return false;
@@ -81,7 +84,8 @@ GwNodeRegistry::findRevokedByMac(const uint8_t mac[6]) const {
            mac[2], mac[3], mac[4], mac[5]);
 
   for (uint8_t i = 0; i < revokedCount; i++) {
-    if (strncmp(revoked[i].hwId, macHex, 12) == 0) {
+    if (strncmp(revoked[i].hwId, macHex, 12) == 0 &&
+        revoked[i].deliveryStatus != REVOKE_STATUS_UNREVOKED) {
       return &revoked[i];
     }
   }
@@ -92,9 +96,15 @@ const PermanentRevocationRecord *
 GwNodeRegistry::findRevokedByPoleId(uint16_t poleId) const {
   char pidStr[16];
   snprintf(pidStr, sizeof(pidStr), "POLE_%02d", poleId);
+  char pidStrAlt[16];
+  snprintf(pidStrAlt, sizeof(pidStrAlt), "POLE-%04d", poleId);
+
   for (uint8_t i = 0; i < revokedCount; i++) {
-    if (strcmp(revoked[i].logicalId, pidStr) == 0) {
-      return &revoked[i];
+    if (revoked[i].deliveryStatus != REVOKE_STATUS_UNREVOKED) {
+      if (strcmp(revoked[i].logicalId, pidStr) == 0 ||
+          strcmp(revoked[i].logicalId, pidStrAlt) == 0) {
+        return &revoked[i];
+      }
     }
   }
   return NULL;
@@ -125,7 +135,8 @@ void GwNodeRegistry::setReappearedRevokedAlert(const uint8_t mac[6],
 
 RegisteredPole *GwNodeRegistry::findPoleById(uint16_t poleId) {
   for (uint8_t i = 0; i < activeCount; i++) {
-    if (poles[i].poleId == poleId && poles[i].status == POLE_STATUS_ACTIVE) {
+    if (poles[i].poleId == poleId &&
+        (poles[i].status == POLE_STATUS_ACTIVE || poles[i].status == POLE_STATUS_PENDING_ACK)) {
       return &poles[i];
     }
   }
@@ -137,7 +148,7 @@ RegisteredPole *GwNodeRegistry::findPoleByMac(const uint8_t mac[6]) {
     return NULL;
   for (uint8_t i = 0; i < activeCount; i++) {
     if (memcmp(poles[i].mac, mac, 6) == 0 &&
-        poles[i].status == POLE_STATUS_ACTIVE) {
+        (poles[i].status == POLE_STATUS_ACTIVE || poles[i].status == POLE_STATUS_PENDING_ACK)) {
       return &poles[i];
     }
   }
@@ -330,7 +341,7 @@ bool GwNodeRegistry::approvePending(const uint8_t mac[6],
     }
   }
 
-  newPole.status = POLE_STATUS_ACTIVE;
+  newPole.status = POLE_STATUS_PENDING_ACK; // Handshake pending until confirmed over mesh
   newPole.firmwareVersion = pending[pIdx].firmwareVersion;
   newPole.primaryParent = pending[pIdx].requestedParent
                               ? pending[pIdx].requestedParent
@@ -407,7 +418,9 @@ const char *GwNodeRegistry::getPoleFeederName(uint16_t poleId,
   if (feederId < 1 || feederId > 6)
     return "Unknown Feeder";
   for (uint8_t i = 0; i < activeCount; i++) {
-    if (poles[i].poleId == poleId && poles[i].status == POLE_STATUS_ACTIVE) {
+    if (poles[i].poleId == poleId &&
+        (poles[i].status == POLE_STATUS_ACTIVE ||
+         poles[i].status == POLE_STATUS_PENDING_ACK)) {
       if (strlen(poles[i].feederNames[feederId - 1]) > 0) {
         return poles[i].feederNames[feederId - 1];
       }
@@ -503,7 +516,9 @@ PoleDeleteResult GwNodeRegistry::deleteAndRevokePoleEx(uint16_t poleId,
                                                        const char *reason) {
   int targetIdx = -1;
   for (uint8_t i = 0; i < activeCount; i++) {
-    if (poles[i].poleId == poleId && poles[i].status == POLE_STATUS_ACTIVE) {
+    if (poles[i].poleId == poleId &&
+        (poles[i].status == POLE_STATUS_ACTIVE ||
+         poles[i].status == POLE_STATUS_PENDING_ACK)) {
       targetIdx = i;
       break;
     }
@@ -534,7 +549,7 @@ PoleDeleteResult GwNodeRegistry::deleteAndRevokePoleEx(uint16_t poleId,
   memcpy(revokedBackup, revoked, sizeof(revoked));
   memcpy(pendingBackup, pending, sizeof(pending));
 
-  // 1. Stage permanent revocation record with integrity CRC
+  // 1. Stage permanent revocation record with delivery pending
   PermanentRevocationRecord &r = revoked[revokedCount++];
   char macHex[13];
   snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
@@ -553,15 +568,16 @@ PoleDeleteResult GwNodeRegistry::deleteAndRevokePoleEx(uint16_t poleId,
           sizeof(r.adminId) - 1);
   r.adminId[sizeof(r.adminId) - 1] = '\0';
   r.timestamp = millis() / 1000;
+  r.deliveryStatus = REVOKE_DELIVERY_PENDING;
+  r.unrevokeAdmin[0] = '\0';
+  r.unrevokeReason[0] = '\0';
+  r.unrevokeTimestamp = 0;
   r.crc32 = calculateRevocationCrc(r);
 
-  // 2. Stage removal from active poles array
-  for (uint8_t i = targetIdx; i < activeCount - 1; i++) {
-    poles[i] = poles[i + 1];
-  }
-  activeCount--;
+  // 2. Mark pole status as REVOKED in registry (preserve route until delivery confirmed/acked)
+  poles[targetIdx].status = POLE_STATUS_REVOKED;
 
-  // 5. Child Route Migration: If any pole had deleted pole as primary/backup
+  // 3. Child Route Migration: If any pole had deleted pole as primary/backup
   // parent, re-route to Gateway
   for (uint8_t i = 0; i < activeCount; i++) {
     if (poles[i].primaryParent == poleId) {
@@ -573,7 +589,7 @@ PoleDeleteResult GwNodeRegistry::deleteAndRevokePoleEx(uint16_t poleId,
     }
   }
 
-  // 4. Atomic Two-Phase Commit Persistence
+  // 4. Two-Phase Commit Persistence
   if (!saveRegistry()) {
     Serial.println(F("[REGISTRY] ❌ saveRegistry() failed! Rolling back delete "
                      "transaction."));
@@ -588,7 +604,7 @@ PoleDeleteResult GwNodeRegistry::deleteAndRevokePoleEx(uint16_t poleId,
   }
 
   Serial.printf(
-      "[REGISTRY] ✅ Pole 0x%04X (MAC %s) revoked and deleted successfully.\n",
+      "[REGISTRY] ✅ Pole 0x%04X (MAC %s) marked REVOKED (delivery pending).\n",
       poleId, macHex);
   return DELETE_SUCCESS;
 }
@@ -602,15 +618,14 @@ bool GwNodeRegistry::unrevokePole(const uint8_t mac[6], const char *adminId,
                                   const char *reason) {
   if (!mac)
     return false;
-  (void)adminId;
-  (void)reason;
   char macHex[13];
   snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X", mac[0], mac[1],
            mac[2], mac[3], mac[4], mac[5]);
 
   int targetIdx = -1;
   for (uint8_t i = 0; i < revokedCount; i++) {
-    if (strncmp(revoked[i].hwId, macHex, 12) == 0) {
+    if (strncmp(revoked[i].hwId, macHex, 12) == 0 &&
+        revoked[i].deliveryStatus != REVOKE_STATUS_UNREVOKED) {
       targetIdx = i;
       break;
     }
@@ -623,11 +638,16 @@ bool GwNodeRegistry::unrevokePole(const uint8_t mac[6], const char *adminId,
   uint8_t revokedCountBackup = revokedCount;
   memcpy(revokedBackup, revoked, sizeof(revoked));
 
-  // Remove entry from revoked list
-  for (uint8_t i = targetIdx; i < revokedCount - 1; i++) {
-    revoked[i] = revoked[i + 1];
-  }
-  revokedCount--;
+  // Retain record in audit trail: mark un-revoked with admin, reason, timestamp
+  revoked[targetIdx].deliveryStatus = REVOKE_STATUS_UNREVOKED;
+  revoked[targetIdx].unrevokeTimestamp = millis() / 1000;
+  strncpy(revoked[targetIdx].unrevokeAdmin, adminId ? adminId : "ADMIN",
+          sizeof(revoked[targetIdx].unrevokeAdmin) - 1);
+  revoked[targetIdx].unrevokeAdmin[sizeof(revoked[targetIdx].unrevokeAdmin) - 1] = '\0';
+  strncpy(revoked[targetIdx].unrevokeReason, reason ? reason : "ADMIN_REAUTHORIZED",
+          sizeof(revoked[targetIdx].unrevokeReason) - 1);
+  revoked[targetIdx].unrevokeReason[sizeof(revoked[targetIdx].unrevokeReason) - 1] = '\0';
+  revoked[targetIdx].crc32 = calculateRevocationCrc(revoked[targetIdx]);
 
   if (!saveRegistry()) {
     // Rollback
@@ -640,6 +660,59 @@ bool GwNodeRegistry::unrevokePole(const uint8_t mac[6], const char *adminId,
       "[REGISTRY] ✅ MAC %s successfully un-revoked / re-authorized by %s.\n",
       macHex, adminId ? adminId : "ADMIN");
   return true;
+}
+
+void GwNodeRegistry::confirmPoleHandshake(uint16_t poleId) {
+  for (uint8_t i = 0; i < activeCount; i++) {
+    if (poles[i].poleId == poleId && poles[i].status == POLE_STATUS_PENDING_ACK) {
+      poles[i].status = POLE_STATUS_ACTIVE;
+      Serial.printf("[REGISTRY] 🤝 Pole 0x%04X handshake confirmed -> POLE_STATUS_ACTIVE\n", poleId);
+      saveRegistry();
+      break;
+    }
+  }
+}
+
+void GwNodeRegistry::confirmRevokeDelivery(const uint8_t mac[6], uint16_t poleId) {
+  char macHex[13] = {0};
+  if (mac) {
+    snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  }
+
+  char polePrefix[16] = {0};
+  if (poleId != 0) {
+    snprintf(polePrefix, sizeof(polePrefix), "TX_REV_%04X", poleId);
+  }
+
+  // Update revocation delivery status to confirmed
+  for (uint8_t i = 0; i < revokedCount; i++) {
+    if ((mac && strncmp(revoked[i].hwId, macHex, 12) == 0) ||
+        (poleId != 0 && strstr(revoked[i].txId, polePrefix) != nullptr)) {
+      revoked[i].deliveryStatus = REVOKE_DELIVERY_CONFIRMED;
+      revoked[i].crc32 = calculateRevocationCrc(revoked[i]);
+      break;
+    }
+  }
+
+  // Remove pole from poles array now that delivery is confirmed
+  int targetIdx = -1;
+  for (uint8_t i = 0; i < activeCount; i++) {
+    if ((poleId != 0 && poles[i].poleId == poleId) ||
+        (mac && memcmp(poles[i].mac, mac, 6) == 0)) {
+      targetIdx = i;
+      break;
+    }
+  }
+
+  if (targetIdx >= 0) {
+    for (uint8_t i = targetIdx; i < activeCount - 1; i++) {
+      poles[i] = poles[i + 1];
+    }
+    activeCount--;
+    Serial.printf("[REGISTRY] 🏁 Revocation delivery confirmed. Removed pole 0x%04X from active routing.\n", poleId);
+    saveRegistry();
+  }
 }
 
 void GwNodeRegistry::updateNodeTelemetry(uint16_t poleId, uint16_t priParent,
@@ -668,143 +741,318 @@ void GwNodeRegistry::updateNodeTelemetry(uint16_t poleId, uint16_t priParent,
   pole->lastSnr = snr;
 }
 
+#if !defined(ARDUINO)
+struct SimulatedSlot {
+  RegistrySlotHeader header;
+  RegisteredPole poles[GW_MAX_MANAGED_POLES];
+  PermanentRevocationRecord revoked[MSCB_MAX_REVOCATION_RECORDS];
+  PendingRegistration pending[GW_MAX_PENDING_REGISTRATIONS];
+  bool valid;
+};
+static SimulatedSlot s_simSlotA;
+static SimulatedSlot s_simSlotB;
+static bool s_simInitDone = false;
+
+static void initSimSlotsOnce() {
+  if (!s_simInitDone) {
+    memset(&s_simSlotA, 0, sizeof(s_simSlotA));
+    memset(&s_simSlotB, 0, sizeof(s_simSlotB));
+    s_simSlotA.valid = false;
+    s_simSlotB.valid = false;
+    s_simInitDone = true;
+  }
+}
+#endif
+
+void GwNodeRegistry::simulateCorruptSlot(uint8_t slotIdx) {
+#if !defined(ARDUINO)
+  initSimSlotsOnce();
+  if (slotIdx == 0) {
+    s_simSlotA.header.magic = 0xDEADBEEF;
+    s_simSlotA.valid = false;
+  } else {
+    s_simSlotB.header.magic = 0xDEADBEEF;
+    s_simSlotB.valid = false;
+  }
+#else
+  const char *slotNs = (slotIdx == 0) ? "mscb_reg_a" : "mscb_reg_b";
+  Preferences p;
+  if (p.begin(slotNs, false)) {
+    p.putUInt("magic", 0xDEADBEEF);
+    p.end();
+  }
+#endif
+}
+
+void GwNodeRegistry::simulatePowerFailureMidWrite(bool enable) {
+  simulateInterruptedWrite = enable;
+}
+
+void GwNodeRegistry::resetStorageToDefault() {
+  activeCount = 0;
+  revokedCount = 0;
+  pendingCount = 0;
+  currentGeneration = 0;
+  activeSlot = 0;
+  simulateInterruptedWrite = false;
+  reappearedAlertPending = false;
+  reappearedAlertBuf[0] = '\0';
+  memset(poles, 0, sizeof(poles));
+  memset(pending, 0, sizeof(pending));
+  memset(revoked, 0, sizeof(revoked));
+
+#if !defined(ARDUINO)
+  initSimSlotsOnce();
+  s_simSlotA.valid = false;
+  s_simSlotB.valid = false;
+  memset(&s_simSlotA, 0, sizeof(s_simSlotA));
+  memset(&s_simSlotB, 0, sizeof(s_simSlotB));
+#else
+  Preferences pA, pB;
+  if (pA.begin("mscb_reg_a", false)) {
+    pA.clear();
+    pA.end();
+  }
+  if (pB.begin("mscb_reg_b", false)) {
+    pB.clear();
+    pB.end();
+  }
+#endif
+}
+
 bool GwNodeRegistry::saveRegistry() {
-#if defined(ARDUINO)
-  if (!prefs.begin("mscb_reg", false)) {
-    Serial.println(
-        F("[REGISTRY] ❌ Preferences.begin('mscb_reg', false) FAILED!"));
+  uint8_t targetSlot = 1 - activeSlot; // Write to alternate inactive slot
+  uint32_t nextGen = currentGeneration + 1;
+
+  uint32_t payloadCrc = calculateRegistryCrc(
+      activeCount, poles, revokedCount, revoked, pendingCount, pending);
+
+#if !defined(ARDUINO)
+  initSimSlotsOnce();
+  SimulatedSlot &dest = (targetSlot == 0) ? s_simSlotA : s_simSlotB;
+
+  // 1. Invalidate slot before write
+  dest.valid = false;
+  dest.header.magic = 0;
+  dest.header.generation = nextGen;
+  dest.header.schemaVersion = MSCB_CURRENT_REG_SCHEMA;
+  dest.header.activeCount = activeCount;
+  dest.header.revokedCount = revokedCount;
+  dest.header.pendingCount = pendingCount;
+  dest.header.payloadCrc = payloadCrc;
+
+  // 2. Write payload
+  memcpy(dest.poles, poles, sizeof(poles));
+  memcpy(dest.revoked, revoked, sizeof(revoked));
+  memcpy(dest.pending, pending, sizeof(pending));
+
+  // 3. Test hook: simulate power loss before final commit marker
+  if (simulateInterruptedWrite) {
+    Serial.println(F("[REGISTRY] ⚠️ Simulated power failure mid-write! Commit marker not set."));
     return false;
   }
 
-  uint8_t schemaVer = MSCB_CURRENT_REG_SCHEMA; // V3
-  if (prefs.putUChar("schema_ver", schemaVer) != sizeof(schemaVer)) {
-    prefs.end();
-    return false;
-  }
-  if (prefs.putUChar("active_cnt", activeCount) != sizeof(activeCount)) {
-    prefs.end();
-    return false;
-  }
-  if (prefs.putUChar("revoked_cnt", revokedCount) != sizeof(revokedCount)) {
-    prefs.end();
-    return false;
-  }
-  if (prefs.putUChar("pending_cnt", pendingCount) != sizeof(pendingCount)) {
-    prefs.end();
+  // 4. Atomic Commit
+  dest.header.magic = MSCB_SLOT_MAGIC;
+  dest.valid = true;
+  activeSlot = targetSlot;
+  currentGeneration = nextGen;
+  return true;
+
+#else
+  const char *targetNs = (targetSlot == 0) ? "mscb_reg_a" : "mscb_reg_b";
+  Preferences p;
+  if (!p.begin(targetNs, false)) {
+    Serial.printf("[REGISTRY] ❌ Preferences.begin('%s', false) FAILED!\n", targetNs);
     return false;
   }
 
+  // 1. Clear magic marker to invalidate slot during write
+  p.putUInt("magic", 0);
+
+  // 2. Write header fields
+  p.putUInt("generation", nextGen);
+  p.putUChar("schema_ver", MSCB_CURRENT_REG_SCHEMA);
+  p.putUChar("active_cnt", activeCount);
+  p.putUChar("revoked_cnt", revokedCount);
+  p.putUChar("pending_cnt", pendingCount);
+  p.putUInt("reg_crc", payloadCrc);
+
+  // 3. Write payload data
   if (activeCount > 0) {
-    size_t expected = activeCount * sizeof(RegisteredPole);
-    if (prefs.putBytes("poles", poles, expected) != expected) {
-      prefs.end();
-      return false;
-    }
+    size_t sz = activeCount * sizeof(RegisteredPole);
+    p.putBytes("poles", poles, sz);
   }
   if (revokedCount > 0) {
-    size_t expected = revokedCount * sizeof(PermanentRevocationRecord);
-    if (prefs.putBytes("revoked", revoked, expected) != expected) {
-      prefs.end();
-      return false;
-    }
+    size_t sz = revokedCount * sizeof(PermanentRevocationRecord);
+    p.putBytes("revoked", revoked, sz);
   }
   if (pendingCount > 0) {
-    size_t expected = pendingCount * sizeof(PendingRegistration);
-    if (prefs.putBytes("pending", pending, expected) != expected) {
-      prefs.end();
-      return false;
-    }
+    size_t sz = pendingCount * sizeof(PendingRegistration);
+    p.putBytes("pending", pending, sz);
   }
 
-  uint32_t crc = calculateRegistryCrc(activeCount, poles, revokedCount, revoked,
-                                      pendingCount, pending);
-  if (prefs.putUInt("reg_crc", crc) != sizeof(crc)) {
-    prefs.end();
+  // 4. Test hook for power loss
+  if (simulateInterruptedWrite) {
+    p.end();
     return false;
   }
 
-  prefs.end();
-#endif
+  // 5. Atomic commit: write valid magic last
+  p.putUInt("magic", MSCB_SLOT_MAGIC);
+  p.end();
+
+  activeSlot = targetSlot;
+  currentGeneration = nextGen;
   return true;
+#endif
 }
 
 bool GwNodeRegistry::loadRegistry() {
-#if defined(ARDUINO)
-  if (!prefs.begin("mscb_reg", true)) {
+#if !defined(ARDUINO)
+  initSimSlotsOnce();
+
+  bool aValid = s_simSlotA.valid && (s_simSlotA.header.magic == MSCB_SLOT_MAGIC);
+  if (aValid) {
+    uint32_t calcCrcA = calculateRegistryCrc(
+        s_simSlotA.header.activeCount, s_simSlotA.poles,
+        s_simSlotA.header.revokedCount, s_simSlotA.revoked,
+        s_simSlotA.header.pendingCount, s_simSlotA.pending);
+    if (calcCrcA != s_simSlotA.header.payloadCrc) {
+      aValid = false;
+    }
+  }
+
+  bool bValid = s_simSlotB.valid && (s_simSlotB.header.magic == MSCB_SLOT_MAGIC);
+  if (bValid) {
+    uint32_t calcCrcB = calculateRegistryCrc(
+        s_simSlotB.header.activeCount, s_simSlotB.poles,
+        s_simSlotB.header.revokedCount, s_simSlotB.revoked,
+        s_simSlotB.header.pendingCount, s_simSlotB.pending);
+    if (calcCrcB != s_simSlotB.header.payloadCrc) {
+      bValid = false;
+    }
+  }
+
+  if (!aValid && !bValid) {
+    Serial.println(F("[REGISTRY] No valid A/B slot found. Initializing empty."));
+    activeCount = 0;
+    revokedCount = 0;
+    pendingCount = 0;
+    currentGeneration = 0;
+    activeSlot = 0;
     return false;
   }
 
-  uint8_t schemaVer = prefs.getUChar("schema_ver", MSCB_REG_SCHEMA_V1);
-  activeCount = prefs.getUChar("active_cnt", 0);
-  revokedCount = prefs.getUChar("revoked_cnt", 0);
-  pendingCount =
-      (schemaVer >= MSCB_REG_SCHEMA_V2) ? prefs.getUChar("pending_cnt", 0) : 0;
-
-  if (activeCount > GW_MAX_MANAGED_POLES)
-    activeCount = 0;
-  if (revokedCount > MSCB_MAX_REVOCATION_RECORDS)
-    revokedCount = 0;
-  if (pendingCount > GW_MAX_PENDING_REGISTRATIONS)
-    pendingCount = 0;
-
-  if (activeCount > 0) {
-    size_t expected = activeCount * sizeof(RegisteredPole);
-    size_t read = prefs.getBytes("poles", poles, expected);
-    if (read != expected) {
-      activeCount = 0;
-    }
-  }
-  if (revokedCount > 0) {
-    size_t expected = revokedCount * sizeof(PermanentRevocationRecord);
-    size_t read = prefs.getBytes("revoked", revoked, expected);
-    if (read != expected) {
-      revokedCount = 0;
-    }
-  }
-  if (pendingCount > 0) {
-    size_t expected = pendingCount * sizeof(PendingRegistration);
-    size_t read = prefs.getBytes("pending", pending, expected);
-    if (read != expected) {
-      pendingCount = 0;
-    }
+  uint8_t selectedSlot = 0;
+  if (aValid && bValid) {
+    selectedSlot = (s_simSlotB.header.generation > s_simSlotA.header.generation) ? 1 : 0;
+  } else if (bValid) {
+    selectedSlot = 1;
+  } else {
+    selectedSlot = 0;
   }
 
-  if (schemaVer < MSCB_REG_SCHEMA_V3) {
-    for (uint8_t i = 0; i < activeCount; i++) {
-      if (strlen(poles[i].displayName) == 0) {
-        strncpy(poles[i].displayName, poles[i].stringId,
-                sizeof(poles[i].displayName) - 1);
-      }
-      if (strlen(poles[i].location) == 0) {
-        strncpy(poles[i].location, "Unassigned Location",
-                sizeof(poles[i].location) - 1);
-      }
-      for (uint8_t f = 0; f < 6; f++) {
-        if (strlen(poles[i].feederNames[f]) == 0) {
-          snprintf(poles[i].feederNames[f], sizeof(poles[i].feederNames[f]),
-                   "Feeder %u", f + 1);
-        }
-      }
-    }
-  }
+  const SimulatedSlot &src = (selectedSlot == 0) ? s_simSlotA : s_simSlotB;
+  activeCount = src.header.activeCount;
+  revokedCount = src.header.revokedCount;
+  pendingCount = src.header.pendingCount;
+  currentGeneration = src.header.generation;
+  activeSlot = selectedSlot;
 
-  if (schemaVer >= MSCB_REG_SCHEMA_V2) {
-    uint32_t storedCrc = prefs.getUInt("reg_crc", 0);
-    uint32_t computedCrc = calculateRegistryCrc(
-        activeCount, poles, revokedCount, revoked, pendingCount, pending);
-    if (storedCrc != computedCrc) {
-      Serial.printf("[REGISTRY] ⚠️ Registry CRC mismatch! Stored: 0x%08X, "
-                    "Computed: 0x%08X\n",
-                    storedCrc, computedCrc);
-      activeCount = 0;
-      revokedCount = 0;
-      pendingCount = 0;
-      prefs.end();
-      return false;
-    }
-  }
+  memcpy(poles, src.poles, sizeof(poles));
+  memcpy(revoked, src.revoked, sizeof(revoked));
+  memcpy(pending, src.pending, sizeof(pending));
 
-  prefs.end();
-#endif
+  Serial.printf("[REGISTRY] ✅ Loaded Slot %c (Gen %u, Active: %u, Revoked: %u, Pending: %u)\n",
+                selectedSlot == 0 ? 'A' : 'B', currentGeneration, activeCount, revokedCount, pendingCount);
   return true;
+
+#else
+  Preferences pA, pB;
+  bool aOpen = pA.begin("mscb_reg_a", true);
+  bool bOpen = pB.begin("mscb_reg_b", true);
+
+  auto validateSlot = [](Preferences &p, RegisteredPole *tempPoles,
+                         PermanentRevocationRecord *tempRev, PendingRegistration *tempPend,
+                         uint8_t &outAct, uint8_t &outRev, uint8_t &outPend,
+                         uint32_t &outGen) -> bool {
+    uint32_t magic = p.getUInt("magic", 0);
+    if (magic != MSCB_SLOT_MAGIC) return false;
+    outGen = p.getUInt("generation", 0);
+    outAct = p.getUChar("active_cnt", 0);
+    outRev = p.getUChar("revoked_cnt", 0);
+    outPend = p.getUChar("pending_cnt", 0);
+    uint32_t storedCrc = p.getUInt("reg_crc", 0);
+
+    if (outAct > GW_MAX_MANAGED_POLES || outRev > MSCB_MAX_REVOCATION_RECORDS ||
+        outPend > GW_MAX_PENDING_REGISTRATIONS) return false;
+
+    if (outAct > 0) {
+      size_t expected = outAct * sizeof(RegisteredPole);
+      if (p.getBytes("poles", tempPoles, expected) != expected) return false;
+    }
+    if (outRev > 0) {
+      size_t expected = outRev * sizeof(PermanentRevocationRecord);
+      if (p.getBytes("revoked", tempRev, expected) != expected) return false;
+    }
+    if (outPend > 0) {
+      size_t expected = outPend * sizeof(PendingRegistration);
+      if (p.getBytes("pending", tempPend, expected) != expected) return false;
+    }
+
+    uint32_t computed = calculateRegistryCrc(outAct, tempPoles, outRev, tempRev, outPend, tempPend);
+    return (computed == storedCrc);
+  };
+
+  RegisteredPole tempPoles[GW_MAX_MANAGED_POLES];
+  PermanentRevocationRecord tempRev[MSCB_MAX_REVOCATION_RECORDS];
+  PendingRegistration tempPend[GW_MAX_PENDING_REGISTRATIONS];
+
+  uint8_t actA = 0, revA = 0, pendA = 0;
+  uint32_t genA = 0;
+  bool aValid = aOpen && validateSlot(pA, tempPoles, tempRev, tempPend, actA, revA, pendA, genA);
+
+  uint8_t actB = 0, revB = 0, pendB = 0;
+  uint32_t genB = 0;
+  bool bValid = bOpen && validateSlot(pB, tempPoles, tempRev, tempPend, actB, revB, pendB, genB);
+
+  if (!aValid && !bValid) {
+    if (aOpen) pA.end();
+    if (bOpen) pB.end();
+    activeCount = 0;
+    revokedCount = 0;
+    pendingCount = 0;
+    currentGeneration = 0;
+    activeSlot = 0;
+    return false;
+  }
+
+  uint8_t selectedSlot = 0;
+  if (aValid && bValid) {
+    selectedSlot = (genB > genA) ? 1 : 0;
+  } else if (bValid) {
+    selectedSlot = 1;
+  } else {
+    selectedSlot = 0;
+  }
+
+  Preferences &selP = (selectedSlot == 0) ? pA : pB;
+  activeCount = (selectedSlot == 0) ? actA : actB;
+  revokedCount = (selectedSlot == 0) ? revA : revB;
+  pendingCount = (selectedSlot == 0) ? pendA : pendB;
+  currentGeneration = (selectedSlot == 0) ? genA : genB;
+  activeSlot = selectedSlot;
+
+  if (activeCount > 0) selP.getBytes("poles", poles, activeCount * sizeof(RegisteredPole));
+  if (revokedCount > 0) selP.getBytes("revoked", revoked, revokedCount * sizeof(PermanentRevocationRecord));
+  if (pendingCount > 0) selP.getBytes("pending", pending, pendingCount * sizeof(PendingRegistration));
+
+  if (aOpen) pA.end();
+  if (bOpen) pB.end();
+
+  Serial.printf("[REGISTRY] ✅ Loaded Slot %c (Gen %u, Active: %u, Revoked: %u, Pending: %u)\n",
+                selectedSlot == 0 ? 'A' : 'B', currentGeneration, activeCount, revokedCount, pendingCount);
+  return true;
+#endif
 }

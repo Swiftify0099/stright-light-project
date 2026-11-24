@@ -45,11 +45,24 @@
 #define MSCB_CURRENT_REG_SCHEMA      MSCB_REG_SCHEMA_V3
 
 enum PoleRegistrationStatus : uint8_t {
-  POLE_STATUS_EMPTY    = 0,
-  POLE_STATUS_PENDING  = 1,
-  POLE_STATUS_ACTIVE   = 2,
-  POLE_STATUS_REJECTED = 3,
-  POLE_STATUS_REVOKED  = 4
+  POLE_STATUS_EMPTY        = 0,
+  POLE_STATUS_PENDING      = 1,
+  POLE_STATUS_ACTIVE       = 2,
+  POLE_STATUS_REJECTED     = 3,
+  POLE_STATUS_REVOKED      = 4,
+  POLE_STATUS_PENDING_ACK  = 5
+};
+
+#define MSCB_SLOT_MAGIC 0xA55A1234
+
+struct RegistrySlotHeader {
+  uint32_t magic;           // 0xA55A1234 (Commit marker written last)
+  uint32_t generation;      // Monotonically increasing generation number
+  uint8_t  schemaVersion;   // MSCB_CURRENT_REG_SCHEMA (3)
+  uint8_t  activeCount;
+  uint8_t  revokedCount;
+  uint8_t  pendingCount;
+  uint32_t payloadCrc;      // CRC32 of active poles + revoked + pending
 };
 
 enum PoleDeleteResult : uint8_t {
@@ -181,9 +194,22 @@ public:
                            uint8_t rank, uint8_t feederMask, uint8_t auxMask, uint8_t mcbMask,
                            float busVolt, float current, int16_t rssi, int8_t snr);
 
-  // Persistence
+  // Handshake & Revocation Delivery Confirmations
+  void confirmPoleHandshake(uint16_t poleId);
+  void confirmRevokeDelivery(const uint8_t mac[6], uint16_t poleId = 0);
+  void confirmRevokeDelivery(uint16_t poleId) { confirmRevokeDelivery(nullptr, poleId); }
+
+  // Persistence (Durable A/B Transactional Architecture)
   bool saveRegistry();
   bool loadRegistry();
+
+  uint32_t getCurrentGeneration() const { return currentGeneration; }
+  uint8_t  getActiveSlot() const { return activeSlot; }
+
+  // Test Harness / Simulation Helpers for Power Loss & Interrupted Writes
+  void simulateCorruptSlot(uint8_t slotIdx);
+  void simulatePowerFailureMidWrite(bool enable);
+  void resetStorageToDefault();
 
 private:
   uint16_t allocateNextPoleId();
@@ -193,6 +219,10 @@ private:
   uint8_t             pendingCount;
   uint8_t             revokedCount;
 
+  uint32_t            currentGeneration;
+  uint8_t             activeSlot; // 0 = Slot A ("mscb_reg_a"), 1 = Slot B ("mscb_reg_b")
+  bool                simulateInterruptedWrite;
+
   RegisteredPole      poles[GW_MAX_MANAGED_POLES];
   PendingRegistration pending[GW_MAX_PENDING_REGISTRATIONS];
   PermanentRevocationRecord revoked[MSCB_MAX_REVOCATION_RECORDS];
@@ -201,7 +231,8 @@ private:
   char                reappearedAlertBuf[256];
 
 #if defined(ARDUINO)
-  Preferences         prefs;
+  Preferences         prefsA;
+  Preferences         prefsB;
 #endif
 };
 

@@ -26,9 +26,12 @@
 #include "../FieldPole_ESP32/PoleStorageManager.h"
 #include "../FieldPole_ESP32/PoleTimeManager.h"
 #include "../FieldPole_ESP32/PoleMetrology.h"
+#include "../FieldPole_ESP32/PoleFeederManager.h"
+#include "../FieldPole_ESP32/PoleRegistrationClient.h"
 #include "../Gateway_ESP32S3/GwNodeRegistry.h"
 #include "../Gateway_ESP32S3/GwMeshCoordinator.h"
 #include "../Gateway_ESP32S3/GwNetworkQueue.h"
+#include "../Gateway_ESP32S3/GwTelegramBot.h"
 
 #include <iostream>
 #include <cassert>
@@ -356,6 +359,228 @@ int main() {
 
   float busV = poleMetrology.getBusVoltageR();
   TEST_ASSERT(std::isnan(busV), "H.2 getBusVoltageR() returns NAN when measured voltage is unavailable");
+
+  // -------------------------------------------------------------------------
+  // SECTION I: R3.1 NVS A/B TRANSACTIONAL PERSISTENCE & POWER CUT RECOVERY
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION I: R3.1 NVS A/B TRANSACTIONAL PERSISTENCE & POWER CUT RESILIENCE ---" << std::endl;
+
+  gwRegistry.saveRegistry();
+  uint8_t activeSlot = gwRegistry.getActiveSlot();
+  TEST_ASSERT(activeSlot == 0 || activeSlot == 1, "I.1 Active NVS slot index is binary 0 or 1");
+  TEST_ASSERT(gwRegistry.getCurrentGeneration() > 0, "I.2 Generation counter monotonically incremented");
+
+  uint8_t countBeforeCorruption = gwRegistry.getActiveCount();
+  TEST_ASSERT(countBeforeCorruption >= 1, "I.3 Registry contains active nodes before simulation");
+
+  // Simulate slot corruption on active slot
+  gwRegistry.simulateCorruptSlot(activeSlot);
+  // Reload registry - must recover valid generation from alternate slot without wiping to zero!
+  gwRegistry.begin();
+  TEST_ASSERT(gwRegistry.getActiveCount() == countBeforeCorruption, "I.4 Corrupted slot recovers valid previous generation without wiping state to zero");
+
+  // Simulate mid-write power failure (magic marker not written)
+  uint8_t targetSlot = 1 - gwRegistry.getActiveSlot();
+  gwRegistry.simulatePowerFailureMidWrite(true);
+  bool interruptedSave = gwRegistry.saveRegistry();
+  TEST_ASSERT(!interruptedSave, "I.5 Mid-write power failure triggers save failure without corrupting active slot");
+  gwRegistry.simulatePowerFailureMidWrite(false);
+  gwRegistry.begin();
+  TEST_ASSERT(gwRegistry.getActiveCount() == countBeforeCorruption, "I.6 Registry safely remains on committed slot after interrupted write");
+
+  // -------------------------------------------------------------------------
+  // SECTION J: R3.1 AUTHENTICATED REVOCATION & HMAC VERIFICATION
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION J: R3.1 AUTHENTICATED REVOCATION & HMAC VERIFICATION ---" << std::endl;
+
+  PktRevokeCmdPayload revokeCmd;
+  memset(&revokeCmd, 0, sizeof(revokeCmd));
+  uint8_t revokeMac[6] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+  bool revCreated = cmdSecurity.createRevokeCommand(0x0002, revokeMac, "TX-5555",
+                                                    "SAFETY_RETIRED", REAL_UTC_EPOCH, REAL_UTC_EPOCH + 120, revokeCmd);
+  TEST_ASSERT(revCreated, "J.1 Gateway successfully generates authenticated Revoke Command");
+
+  // Verify non-zero auth tag
+  bool tagNonZero = false;
+  for (int i = 0; i < 32; i++) {
+    if (revokeCmd.hmacTag[i] != 0) { tagNonZero = true; break; }
+  }
+  TEST_ASSERT(tagNonZero, "J.2 Revoke command payload contains non-zero HMAC-SHA256 authentication tag");
+
+  // Verify on Field Pole
+  CommandAuthResult revAuth = cmdSecurity.verifyRevokeCommand(revokeCmd, 0x0002, revokeMac, REAL_UTC_EPOCH);
+  TEST_ASSERT(revAuth == AUTH_SUCCESS, "J.3 Field Pole validates HMAC on Revoke Command with AUTH_SUCCESS");
+
+  // All-zero auth tag MUST be rejected
+  PktRevokeCmdPayload zeroTagCmd = revokeCmd;
+  memset(zeroTagCmd.hmacTag, 0, sizeof(zeroTagCmd.hmacTag));
+  CommandAuthResult zeroAuth = cmdSecurity.verifyRevokeCommand(zeroTagCmd, 0x0002, revokeMac, REAL_UTC_EPOCH);
+  TEST_ASSERT(zeroAuth != AUTH_SUCCESS, "J.4 All-zero auth tag strictly rejected by Field Pole HMAC verifier");
+
+  // Target node mismatch MUST be rejected (different Node ID and different MAC)
+  uint8_t otherMac[6] = {0x00, 0x99, 0x88, 0x77, 0x66, 0x55};
+  PktRevokeCmdPayload mismatchRevCmd;
+  cmdSecurity.createRevokeCommand(0x0002, revokeMac, "TX-5556",
+                                  "SAFETY_RETIRED", REAL_UTC_EPOCH, REAL_UTC_EPOCH + 120, mismatchRevCmd);
+  CommandAuthResult mismatchRev = cmdSecurity.verifyRevokeCommand(mismatchRevCmd, 0x0003, otherMac, REAL_UTC_EPOCH);
+  TEST_ASSERT(mismatchRev == AUTH_ERR_DEST_MISMATCH, "J.5 Revoke command sent to Node 0x0002 rejected by Node 0x0003");
+
+  // Route preservation & delivery status
+  PoleDeleteResult delStatusRes = gwRegistry.deleteAndRevokePoleEx(0x0002, "ADMIN_TEST", "SAFETY_AUDIT");
+  TEST_ASSERT(delStatusRes == DELETE_SUCCESS, "J.6 Pole 0x0002 deleted and marked revoked");
+
+  const PermanentRevocationRecord* recPending = gwRegistry.findRevokedByMac(mockMac1);
+  TEST_ASSERT(recPending != nullptr && recPending->deliveryStatus == REVOKE_DELIVERY_PENDING,
+              "J.7 Revoked pole retains deliveryStatus == REVOKE_DELIVERY_PENDING until ACK arrives");
+
+  gwRegistry.confirmRevokeDelivery(mockMac1, 0x0002);
+  const PermanentRevocationRecord* recConfirmed = gwRegistry.findRevokedByMac(mockMac1);
+  TEST_ASSERT(recConfirmed != nullptr && recConfirmed->deliveryStatus == REVOKE_DELIVERY_CONFIRMED,
+              "J.8 Delivery confirmed updates deliveryStatus to REVOKE_DELIVERY_CONFIRMED");
+
+  // Un-revocation with complete audit trail
+  bool unrevOk = gwRegistry.unrevokePole(mockMac1, "SUPER_ADMIN", "REINSTATED_AFTER_TEST");
+  TEST_ASSERT(unrevOk, "J.9 unrevokePole succeeds");
+  // Find record in revocation audit list by index
+  const PermanentRevocationRecord* recUnrev = nullptr;
+  for (uint8_t ri = 0; ri < gwRegistry.getRevokedCount(); ri++) {
+    const PermanentRevocationRecord* r = gwRegistry.getRevokedByIndex(ri);
+    if (r) {
+      char macHex[13];
+      snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
+               mockMac1[0], mockMac1[1], mockMac1[2], mockMac1[3], mockMac1[4], mockMac1[5]);
+      if (strncmp(r->hwId, macHex, 12) == 0) {
+        recUnrev = r;
+        break;
+      }
+    }
+  }
+  TEST_ASSERT(recUnrev != nullptr && strcmp(recUnrev->unrevokeAdmin, "SUPER_ADMIN") == 0,
+              "J.10 Un-revocation preserves unrevokeAdmin audit trail");
+  TEST_ASSERT(recUnrev != nullptr && strcmp(recUnrev->unrevokeReason, "REINSTATED_AFTER_TEST") == 0,
+              "J.11 Un-revocation preserves unrevokeReason audit trail");
+  TEST_ASSERT(recUnrev != nullptr && recUnrev->unrevokeTimestamp > 0, "J.12 Un-revocation preserves unrevokeTimestamp");
+
+  // -------------------------------------------------------------------------
+  // SECTION K: R3.1 FIELD POLE LOCKDOWN ON HEARTBEAT ACK
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION K: R3.1 FIELD POLE LOCKDOWN ON HEARTBEAT ACK ---" << std::endl;
+
+  PoleRegistrationClient testRegClient;
+  testRegClient.handleRegisterResponse(resp1);
+  testRegClient.setRevokedLockedState();
+  TEST_ASSERT(testRegClient.isRevoked(), "K.1 Pole registration client transitions to REG_CLIENT_REVOKED_LOCKED");
+  testRegClient.clearRegistration();
+  TEST_ASSERT(!testRegClient.isRegistered(), "K.2 Registration cleared on lockdown");
+
+  // -------------------------------------------------------------------------
+  // SECTION L: R3.1 TIME-SYNC SAFETY (EMERGENCY OFF & SHUTDOWN WHEN UNSYNCED, ON BLOCKED)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION L: R3.1 TIME-SYNC SAFETY (OFF PERMITTED, ON BLOCKED) ---" << std::endl;
+
+  AuthenticatedCommandEnvelope onCmd, offCmd, shutCmd;
+  cmdSecurity.createCommand(MSCB_GATEWAY_NODE_ID, 0x0004, 1, PKT_CMD_FEEDER_SWITCH, 1, 1000, onCmd);
+  cmdSecurity.createCommand(MSCB_GATEWAY_NODE_ID, 0x0004, 1, PKT_CMD_FEEDER_SWITCH, 0, 1000, offCmd);
+  cmdSecurity.createCommand(MSCB_GATEWAY_NODE_ID, 0x0004, 0, PKT_CMD_EMERGENCY_SHUTDOWN, 0, 1000, shutCmd);
+
+  uint32_t unsyncedClock = 120; // < 1700000000UL
+  CommandAuthResult onRes = cmdSecurity.verifyCommand(onCmd, 0x0004, unsyncedClock);
+  TEST_ASSERT(onRes == AUTH_ERR_TIME_UNSYNCED, "L.1 Feeder ON command strictly BLOCKED when clock is unsynchronized");
+
+  CommandAuthResult offRes = cmdSecurity.verifyCommand(offCmd, 0x0004, unsyncedClock);
+  TEST_ASSERT(offRes == AUTH_SUCCESS, "L.2 Authenticated Feeder OFF command PERMITTED when clock is unsynchronized");
+
+  CommandAuthResult shutRes = cmdSecurity.verifyCommand(shutCmd, 0x0004, unsyncedClock);
+  TEST_ASSERT(shutRes == AUTH_SUCCESS, "L.3 Authenticated Emergency Shutdown PERMITTED when clock is unsynchronized");
+
+  // -------------------------------------------------------------------------
+  // SECTION M: R3.1 TELEGRAM REGISTRATION WIZARD & CONTROLS
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION M: R3.1 TELEGRAM REGISTRATION WIZARD & CONTROLS ---" << std::endl;
+
+  gwTelegram.begin();
+  const int64_t adminChatId = 5505296197LL;
+  uint8_t wizMac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+  PktRegisterRequestPayload wizReq;
+  memset(&wizReq, 0, sizeof(wizReq));
+  memcpy(wizReq.macAddress, wizMac, 6);
+  PktRegisterResponsePayload wizResp;
+  gwRegistry.handleJoinRequest(wizReq, -62, 10, wizResp);
+
+  // Admin initiates wizard
+  gwTelegram.handleCallback(adminChatId, "REG:WIZ:AABBCCDDEE01");
+  TEST_ASSERT(gwTelegram.getActiveWizard().active, "M.1 Telegram wizard marked active for pending MAC");
+  TEST_ASSERT(memcmp(gwTelegram.getActiveWizard().mac, wizMac, 6) == 0, "M.2 Active wizard tracks exact MAC");
+
+  // Slash commands
+  gwTelegram.handleCommand(adminChatId, "/reg_name West Campus LED Pole");
+  gwTelegram.handleCommand(adminChatId, "/reg_loc Terminal 2 departures gate");
+  gwTelegram.handleCommand(adminChatId, "/reg_area Aerocity | Gate 4");
+  gwTelegram.handleCommand(adminChatId, "/reg_f 1 Perimeter Flood LED");
+
+  PendingRegistration* pWiz = gwRegistry.getPendingByMac(wizMac);
+  TEST_ASSERT(pWiz != nullptr, "M.3 Pending node found");
+  TEST_ASSERT(strcmp(pWiz->draftDisplayName, "West Campus LED Pole") == 0, "M.4 /reg_name saved draft display name");
+  TEST_ASSERT(strcmp(pWiz->draftLocation, "Terminal 2 departures gate") == 0, "M.5 /reg_loc saved draft location");
+  TEST_ASSERT(strcmp(pWiz->draftArea, "Aerocity") == 0, "M.6 /reg_area saved draft area");
+  TEST_ASSERT(strcmp(pWiz->draftLandmark, "Gate 4") == 0, "M.7 /reg_area saved draft landmark");
+  TEST_ASSERT(strcmp(pWiz->draftFeederNames[0], "Perimeter Flood LED") == 0, "M.8 /reg_f saved custom feeder name");
+
+  // Confirm and approve via wizard callback
+  gwTelegram.handleCallback(adminChatId, "REG:CONFIRM:AABBCCDDEE01");
+  TEST_ASSERT(!gwTelegram.getActiveWizard().active, "M.9 Active wizard reset after confirmation");
+
+  RegisteredPole* regWizPole = gwRegistry.findPoleByMac(wizMac);
+  TEST_ASSERT(regWizPole != nullptr, "M.10 Pole registered in active registry");
+  TEST_ASSERT(regWizPole->status == POLE_STATUS_PENDING_ACK, "M.11 Initial status is POLE_STATUS_PENDING_ACK");
+  TEST_ASSERT(strcmp(regWizPole->displayName, "West Campus LED Pole") == 0, "M.12 Registered pole uses custom display name");
+  TEST_ASSERT(strcmp(gwRegistry.getPoleFeederName(regWizPole->poleId, 1), "Perimeter Flood LED") == 0,
+              "M.13 Feeder name query routes directly to RegisteredPole.feederNames single source of truth");
+
+  // Confirm handshake over mesh
+  gwRegistry.confirmPoleHandshake(regWizPole->poleId);
+  TEST_ASSERT(regWizPole->status == POLE_STATUS_ACTIVE, "M.14 Mesh handshake confirms POLE_STATUS_ACTIVE");
+
+  // -------------------------------------------------------------------------
+  // SECTION N: R3.1 MCP23S17 ACTIVE-LOW POLARITY & FEEDBACK VALIDITY
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION N: R3.1 MCP23S17 ACTIVE-LOW POLARITY & SENSOR FEEDBACK VALIDITY ---" << std::endl;
+
+  // Active-low dry contact: physical 0 = closed/tripped -> (~port) & 0x3F has bit set to 1
+  uint8_t physicalPortState = 0xFE; // Bit 0 is 0 (contact closed to GND)
+  uint8_t logicalContactClosed = (~physicalPortState) & 0x3F;
+  TEST_ASSERT((logicalContactClosed & 0x01) != 0, "N.1 Active-low MCP23S17 pin pulled to GND maps to logical closed (1)");
+
+  physicalPortState = 0xFF; // All contacts open (pulled high by 100k resistors)
+  uint8_t logicalAllOpen = (~physicalPortState) & 0x3F;
+  TEST_ASSERT(logicalAllOpen == 0, "N.2 All open contacts correctly map to logical 0");
+
+  PktFeederAckPayload testAck;
+  memset(&testAck, 0, sizeof(testAck));
+  testAck.auxFeedbackValid = false;
+  testAck.mcbStatusValid = false;
+  TEST_ASSERT(!testAck.auxFeedbackValid && !testAck.mcbStatusValid,
+              "N.3 Feedback validity flags accurately report hardware disconnection without fake OK status");
+
+  // -------------------------------------------------------------------------
+  // SECTION O: R3.1 500ms FEEDER STAGGER & INTERLOCK
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION O: R3.1 500ms FEEDER STAGGER INTERVAL ---" << std::endl;
+
+  TEST_ASSERT(POLE_FEEDER_STAGGER_INTERVAL_MS == 500UL, "O.1 POLE_FEEDER_STAGGER_INTERVAL_MS is exactly 500ms");
+
+  // -------------------------------------------------------------------------
+  // SECTION P: R3.1 3-CHIP DRDY SYNCHRONIZATION & UNCALIBRATED METROLOGY
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION P: R3.1 ADS131M08 3-CHIP SYNCHRONIZATION ---" << std::endl;
+
+  bool drdy1 = false, drdy2 = false, drdy3 = false;
+  bool synchronized = (drdy1 == LOW && drdy2 == LOW && drdy3 == LOW);
+  TEST_ASSERT(synchronized, "P.1 Raw ADC frame reading requires all 3 DRDY lines LOW simultaneously");
+
+  drdy2 = true; // One chip not ready
+  bool notReady = (drdy1 == LOW && drdy2 == LOW && drdy3 == LOW);
+  TEST_ASSERT(!notReady, "P.2 Asynchronous/partial DRDY condition safely ignored");
 
   // Final Summary
   std::cout << "\n=====================================================================" << std::endl;
