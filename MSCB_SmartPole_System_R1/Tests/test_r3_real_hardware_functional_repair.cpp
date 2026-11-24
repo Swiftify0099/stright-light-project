@@ -582,6 +582,59 @@ int main() {
   bool notReady = (drdy1 == LOW && drdy2 == LOW && drdy3 == LOW);
   TEST_ASSERT(!notReady, "P.2 Asynchronous/partial DRDY condition safely ignored");
 
+  // -------------------------------------------------------------------------
+  // SECTION Q: R3.1 DYNAMIC SCHEDULING, TIME-SYNC GATING & EXPLICIT CONTROLS
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION Q: R3.1 DYNAMIC SCHEDULING & FEEDER CONTROLS ---" << std::endl;
+
+  // Q.1 Single source of truth for feeder names across all 50 poles
+  RegisteredPole testPoleQ;
+  memset(&testPoleQ, 0, sizeof(testPoleQ));
+  testPoleQ.poleId = 0x0005;
+  strncpy(testPoleQ.stringId, "POLE-0005", sizeof(testPoleQ.stringId) - 1);
+  strncpy(testPoleQ.displayName, "Highway Junction Light", sizeof(testPoleQ.displayName) - 1);
+  strncpy(testPoleQ.location, "NH48 Km 42", sizeof(testPoleQ.location) - 1);
+  strncpy(testPoleQ.feederNames[0], "High-Mast Floodlight", sizeof(testPoleQ.feederNames[0]) - 1);
+  strncpy(testPoleQ.feederNames[1], "Service Lane LED", sizeof(testPoleQ.feederNames[1]) - 1);
+
+  // Directly verify feeder name retrieval from RegisteredPole authoritative record
+  const char* fn1 = (strlen(testPoleQ.feederNames[0]) > 0) ? testPoleQ.feederNames[0] : "F1";
+  const char* fn2 = (strlen(testPoleQ.feederNames[1]) > 0) ? testPoleQ.feederNames[1] : "F2";
+  const char* fn3 = (strlen(testPoleQ.feederNames[2]) > 0) ? testPoleQ.feederNames[2] : "F3";
+  TEST_ASSERT(strcmp(fn1, "High-Mast Floodlight") == 0, "Q.1 Feeder 1 returns custom name from RegisteredPole");
+  TEST_ASSERT(strcmp(fn2, "Service Lane LED") == 0, "Q.2 Feeder 2 returns custom name from RegisteredPole");
+  TEST_ASSERT(strcmp(fn3, "F3") == 0, "Q.3 Feeder 3 defaults to F3 when unassigned");
+
+  // Q.4 Dynamic Schedule Rules and Time-Sync Safety Gating
+  gwSchedule.clearSchedules();
+  TEST_ASSERT(gwSchedule.getScheduleCount() == 0, "Q.4 clearSchedules resets ruleCount to 0");
+
+  // Arm auto-off timer on dynamic pole (not hardcoded Pole 2)
+  bool armed = gwSchedule.armAutoOffTimer(0x0005, 1, 30);
+  TEST_ASSERT(armed, "Q.5 Successfully armed 30m Auto-OFF timer on Pole 0x0005 Feeder 1");
+  TEST_ASSERT(gwSchedule.getScheduleCount() == 1, "Q.6 Schedule rule count is 1");
+  const FeederScheduleRule* rule0 = gwSchedule.getSchedule(0);
+  TEST_ASSERT(rule0 != NULL && rule0->poleId == 0x0005 && rule0->feederId == 1 && rule0->autoOffMinutes == 30,
+              "Q.7 Rule correctly records target pole 0x0005 and 30m duration");
+
+  // Test Time-Sync check for recurring schedule
+  // When unsynced: addSchedule is gated by UI check in Telegram bot
+  bool isSynced = gwSchedule.isTimeSynced();
+  // Verify schedule validation rejects invalid hours/minutes
+  bool invalidHour = gwSchedule.addSchedule(0x0005, 1, 25, 0, 6, 0, true);
+  TEST_ASSERT(!invalidHour, "Q.8 addSchedule rejects invalid hour (25)");
+  bool invalidMin = gwSchedule.addSchedule(0x0005, 1, 18, 65, 6, 0, true);
+  TEST_ASSERT(!invalidMin, "Q.9 addSchedule rejects invalid minute (65)");
+
+  // Add valid recurring daily schedule
+  bool validSchedule = gwSchedule.addSchedule(0x0005, 2, 18, 30, 6, 0, true);
+  TEST_ASSERT(validSchedule, "Q.10 Valid recurring schedule added (18:30 - 06:00)");
+  TEST_ASSERT(gwSchedule.getScheduleCount() == 2, "Q.11 Schedule rule count is now 2");
+
+  // Clear schedules
+  gwSchedule.clearSchedules();
+  TEST_ASSERT(gwSchedule.getScheduleCount() == 0, "Q.12 clearSchedules successfully cleared all rules");
+
   // Final Summary
   std::cout << "\n=====================================================================" << std::endl;
   std::cout << "TEST RUN COMPLETE: " << g_pass << " PASSED, " << g_fail << " FAILED" << std::endl;

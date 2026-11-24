@@ -68,6 +68,7 @@ public:
   bool cancelAutoOffTimer(uint16_t poleId, uint8_t feederId);
   bool toggleSchedule(uint8_t index);
   bool removeSchedule(uint8_t index);
+  void clearSchedules();
 
   uint8_t getScheduleCount() const { return ruleCount; }
   const FeederScheduleRule* getSchedule(uint8_t index) const;

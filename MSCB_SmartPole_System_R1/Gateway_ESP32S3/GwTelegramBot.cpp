@@ -2219,6 +2219,17 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
     showFeederScheduleMenu(chatId, page);
   } else if (strcmp(callbackData, "MENU:SCHED") == 0) {
     showFeederScheduleMenu(chatId, 0);
+  } else if (strncmp(callbackData, "SCHED:CHOOSE:", 13) == 0) {
+    uint8_t page = (uint8_t)atoi(callbackData + 13);
+    showSchedulePoleSelect(chatId, page);
+  } else if (strncmp(callbackData, "SCHED:P:", 8) == 0) {
+    uint16_t pid = (uint16_t)atoi(callbackData + 8);
+    showScheduleFeederSelect(chatId, pid);
+  } else if (strncmp(callbackData, "SCHED:F:", 8) == 0) {
+    int pid = 0, fid = 0;
+    if (sscanf(callbackData + 8, "%d:%d", &pid, &fid) == 2) {
+      showScheduleActionSelect(chatId, (uint16_t)pid, (uint8_t)fid);
+    }
   } else if (strncmp(callbackData, "SCHED:ARM:", 10) == 0) {
     int pid = 0, fid = 0, mins = 0;
     if (sscanf(callbackData + 10, "%d:%d:%d", &pid, &fid, &mins) == 3) {
@@ -2231,6 +2242,27 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
       }
       showFeederScheduleMenu(chatId, 0);
     }
+  } else if (strncmp(callbackData, "SCHED:DAILY:", 12) == 0) {
+    int pid = 0, fid = 0, onH = 0, onM = 0, offH = 0, offM = 0;
+    if (sscanf(callbackData + 12, "%d:%d:%d:%d:%d:%d", &pid, &fid, &onH, &onM, &offH, &offM) == 6) {
+      if (!gwSchedule.isTimeSynced()) {
+        sendMessage(chatId, "⚠️ *CANNOT CONFIGURE SCHEDULE: TIME_UNSYNCED*\nGateway system time is not synchronized with NTP. Scheduled ON is blocked for safety until valid time sync is established.");
+      } else {
+        if (gwSchedule.addSchedule((uint16_t)pid, (uint8_t)fid, (uint8_t)onH, (uint8_t)onM, (uint8_t)offH, (uint8_t)offM, true)) {
+          char buf[160];
+          snprintf(buf, sizeof(buf), "✅ Recurring daily schedule saved for Pole 0x%04X Feeder %u: ON %02d:%02d | OFF %02d:%02d IST.",
+                   pid, fid, onH, onM, offH, offM);
+          sendMessage(chatId, buf);
+        } else {
+          sendMessage(chatId, "❌ Failed to add schedule rule (capacity full or invalid parameters).");
+        }
+      }
+      showFeederScheduleMenu(chatId, 0);
+    }
+  } else if (strcmp(callbackData, "SCHED:CLEAR") == 0) {
+    gwSchedule.clearSchedules();
+    sendMessage(chatId, "🗑️ All schedule rules and auto-OFF timers cleared.");
+    showFeederScheduleMenu(chatId, 0);
   } else if (strcmp(callbackData, "MENU:TIMESYNC") == 0) {
     showMeshTimeSync(chatId);
   } else if (strcmp(callbackData, "TIMESYNC:EXEC") == 0) {

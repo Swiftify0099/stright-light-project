@@ -198,6 +198,11 @@ bool GwScheduleManager::removeSchedule(uint8_t index) {
   return true;
 }
 
+void GwScheduleManager::clearSchedules() {
+  ruleCount = 0;
+  saveSchedules();
+}
+
 const FeederScheduleRule* GwScheduleManager::getSchedule(uint8_t index) const {
   if (index >= ruleCount) return NULL;
   return &rules[index];
