@@ -1,12 +1,12 @@
 /**
  * @file Gateway_ESP32S3.ino
- * @brief MSCB Smart Pole System - Main Gateway Controller Firmware (Skeleton)
+ * @brief MSCB Smart Pole System - Main Gateway Controller Firmware (R3.2 Production Controller)
  * @version 1.0.0
  * 
  * Hardware Platform: ESP32-S3-WROOM-1/2 N16R8 DOIT Dual Type-C Development Board
  * Subsystems: SX1278 RA-02 433 MHz LoRa + Wi-Fi + Telegram Bot Architecture
  * 
- * DESIGN CONSTRAINTS (PROMPT 06):
+ * DESIGN CONSTRAINTS:
  * - Safe startup logic enabled.
  * - All electrical switching outputs strictly disabled.
  * - Hardware readiness diagnostic audit printed to Serial.
@@ -44,7 +44,7 @@ static bool     s_hardwareAuditPassed = false;
 void printGatewayDiagnosticBanner() {
   Serial.println(F("\n========================================================"));
   Serial.println(F("       MSCB SMART POLE & FEEDER AUTOMATION SYSTEM       "));
-  Serial.println(F("       MAIN GATEWAY CONTROLLER FIRMWARE (SKELETON)       "));
+  Serial.println(F("       MAIN GATEWAY CONTROLLER FIRMWARE (R3.2 PROD)     "));
   Serial.println(F("========================================================"));
   Serial.printf("Firmware Version : %d.%d.%d (%s)\n", 
                 MSCB_FW_VERSION_MAJOR, MSCB_FW_VERSION_MINOR, MSCB_FW_VERSION_PATCH, MSCB_SYSTEM_CODENAME);

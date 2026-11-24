@@ -44,6 +44,8 @@
 #define MESH_DUP_CACHE_SIZE          32
 #define MESH_MAX_HOPS                MSCB_DEFAULT_MAX_HOPS // 6
 #define MESH_PARENT_TIMEOUT_MS       90000UL // 90 seconds without parent packet = link loss
+#define MESH_MAX_TRACKED_CHILDREN    12
+#define MESH_CHILD_TIMEOUT_MS        90000UL
 
 enum NodeRoutingState : uint8_t {
   ROUTING_UNINITIALIZED = 0,
@@ -63,6 +65,14 @@ inline const char* routingStateToString(NodeRoutingState st) {
     default:                    return "UNKNOWN";
   }
 }
+
+struct TrackedChildNode {
+  uint16_t childPoleId;
+  uint32_t lastSeenMs;
+  uint16_t missedPings;
+  bool     reportedFault;
+  uint32_t lastSeqNumber;
+};
 
 struct MeshNeighbor {
   uint16_t nodeAddress;
@@ -101,6 +111,16 @@ public:
   void triggerFailover();
   void declareOrphan();
 
+  // Child Node Tracking (Parent monitors children)
+  void onChildPacketReceived(uint16_t childId, uint32_t seq);
+  uint8_t getTrackedChildCount() const { return childCount; }
+  const TrackedChildNode* getTrackedChild(uint8_t idx) const;
+
+  // Gateway Reachability Verification
+  bool isGatewayReachable() const {
+    return (state == ROUTING_CONNECTED || state == ROUTING_FAILOVER) && (primaryParent != 0) && (myRank < MESH_MAX_HOPS);
+  }
+
   // Status & Metrics
   NodeRoutingState getState() const { return state; }
   uint16_t getPrimaryParent() const { return primaryParent; }
@@ -132,6 +152,9 @@ private:
 
   MeshNeighbor     neighbors[MESH_MAX_NEIGHBORS];
   uint8_t          neighborCount;
+
+  TrackedChildNode trackedChildren[MESH_MAX_TRACKED_CHILDREN];
+  uint8_t          childCount;
 
   DupCacheEntry    dupCache[MESH_DUP_CACHE_SIZE];
   uint8_t          dupCacheIdx;

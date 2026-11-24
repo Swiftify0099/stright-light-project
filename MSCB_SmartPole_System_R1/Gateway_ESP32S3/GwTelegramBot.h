@@ -56,6 +56,8 @@ public:
   void showDashboard(int64_t chatId);
   void showPolesMenu(int64_t chatId, uint8_t page = 0);
   void showPoleDetail(int64_t chatId, uint16_t poleId);
+  void showPoleFeederList(int64_t chatId, uint16_t poleId);
+  void showFeederControlDetail(int64_t chatId, uint16_t poleId, uint8_t feederId);
   void showVoltageDashboard(int64_t chatId, uint16_t poleId = 0);
   void showFeederPoleSelectMenu(int64_t chatId, uint8_t page = 0);
   void showFeederDashboard(int64_t chatId, uint16_t poleId = 0);

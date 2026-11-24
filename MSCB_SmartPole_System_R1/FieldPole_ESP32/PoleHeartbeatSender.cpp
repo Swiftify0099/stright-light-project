@@ -34,11 +34,18 @@ void PoleHeartbeatSender::sendHeartbeat() {
   hb.mcbStatusMask = poleFeederMgr.readMcbTripMask();
   hb.uptimeSec = millis() / 1000;
   hb.busVoltageV = poleMetrology.getBusVoltageR();
-  hb.totalCurrentA = 0.0f;
+  float sumCurr = 0.0f;
+  bool anyNan = false;
 
   for (uint8_t f = 0; f < 6; f++) {
-    hb.totalCurrentA += poleMetrology.getFeederCurrent(f, 0); // Phase R
+    float iPhR = poleMetrology.getFeederCurrent(f, 0); // Phase R
+    if (isnan(iPhR)) {
+      anyNan = true;
+      break;
+    }
+    sumCurr += iPhR;
   }
+  hb.totalCurrentA = anyNan ? NAN : sumCurr;
 
   poleMesh.sendUplinkPacket(PKT_HEARTBEAT_PING, (const uint8_t*)&hb, sizeof(PktHeartbeatPingPayload), PRIO_ROUTINE);
   heartbeatsSent++;

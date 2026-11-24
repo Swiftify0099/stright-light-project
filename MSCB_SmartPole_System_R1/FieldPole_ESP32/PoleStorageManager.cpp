@@ -217,3 +217,28 @@ void PoleStorageManager::logFault(uint8_t faultCode, uint8_t feederId, float val
                 faultCode, feederId, val, desc ? desc : "UNKNOWN");
 #endif
 }
+
+bool PoleStorageManager::loadPinConfig(PoleHardwarePinConfig &outConfig) {
+#if defined(ARDUINO)
+  prefs.begin("mscb_pins", true);
+  size_t len = prefs.getBytes("pin_cfg", &outConfig, sizeof(PoleHardwarePinConfig));
+  prefs.end();
+  if (len == sizeof(PoleHardwarePinConfig) && validateHardwarePinConfig(outConfig)) {
+    return true;
+  }
+#endif
+  outConfig = getDefaultHardwarePinConfig();
+  return false;
+}
+
+bool PoleStorageManager::savePinConfig(const PoleHardwarePinConfig &inConfig) {
+  if (!validateHardwarePinConfig(inConfig)) return false;
+#if defined(ARDUINO)
+  prefs.begin("mscb_pins", false);
+  size_t written = prefs.putBytes("pin_cfg", &inConfig, sizeof(PoleHardwarePinConfig));
+  prefs.end();
+  return (written == sizeof(PoleHardwarePinConfig));
+#else
+  return true;
+#endif
+}

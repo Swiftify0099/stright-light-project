@@ -16,7 +16,8 @@ PoleActuators::PoleActuators() :
     emergencyActive(false),
     gpio12HazardPresent(false),
     relaysLockedDisabled(MSCB_RELAYS_LOCKED_DISABLED != 0),
-    benchTestOverride(false)
+    benchTestOverride(false),
+    localPhysicalAuthGranted(false)
 {
     for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
         channels[i].pin = POLE_FEEDER_RELAY_PINS[i];
@@ -43,6 +44,42 @@ void PoleActuators::configurePinMapping(const uint8_t pins[NUM_FEEDER_ACTUATORS]
         channels[i].isStrappingPin = (pins[i] == 12 || pins[i] == 15 || pins[i] == 0 || pins[i] == 2);
     }
     auditStrappingPins();
+}
+
+bool PoleActuators::applyPinConfiguration(const PoleHardwarePinConfig &cfg) {
+    // 1. Critical Safety: Never reconfigure pins while ANY relay output is active/energized!
+    if (getActiveRelayMask() != 0) {
+        Serial.println(F("[ACTUATOR] ⛔ Rejected pin reconfiguration: Relays are currently energized!"));
+        return false;
+    }
+
+    // 2. Validate configuration schema, CRC, strapping, and conflict rules
+    if (!validateHardwarePinConfig(cfg)) {
+        Serial.println(F("[ACTUATOR] ❌ Rejected pin reconfiguration: Configuration validation failed! Falling back to safe defaults."));
+        configurePinMapping(POLE_FEEDER_RELAY_PINS);
+        return false;
+    }
+
+    // 3. De-energize and set all existing pins SAFE OFF
+    uint8_t offLevel = getElectricalLevel(false);
+    for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
+        pinMode(channels[i].pin, OUTPUT);
+        digitalWrite(channels[i].pin, offLevel);
+        channels[i].commandedOn = false;
+        channels[i].actualPinState = false;
+    }
+
+    // 4. Apply new validated mapping
+    configurePinMapping(cfg.feederPins);
+
+    // 5. Initialize new pins to SAFE OFF
+    for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
+        pinMode(channels[i].pin, OUTPUT);
+        digitalWrite(channels[i].pin, offLevel);
+    }
+
+    // 6. Validate startup state
+    return validateStartupState();
 }
 
 bool PoleActuators::auditStrappingPins() {
@@ -162,15 +199,20 @@ ActuatorDriverState PoleActuators::getDriverState() const {
 }
 
 bool PoleActuators::areRelaysLockedDisabled() const {
-#if defined(MSCB_BENCH_TEST_PROFILE_ENABLED) && (MSCB_BENCH_TEST_PROFILE_ENABLED != 0)
-    // Isolated low-voltage DC bench testing profile: allow override if explicitly enabled
-    if (benchTestOverride) return false;
+#if (defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE != 0)) || \
+    (defined(MSCB_BENCH_TEST_PROFILE_ENABLED) && (MSCB_BENCH_TEST_PROFILE_ENABLED != 0))
+    // Isolated low-voltage DC commissioning profile:
+    // Requires BOTH build-time configuration AND explicit local physical authorization!
+    // Remote commands alone CANNOT enable relay switching.
+    if (benchTestOverride && localPhysicalAuthGranted) {
+        return false;
+    }
 #endif
 #if defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
     // Production safety lock permanently enforced: Relay ON strictly blocked
     return true;
 #else
-    return relaysLockedDisabled && !benchTestOverride;
+    return relaysLockedDisabled && !(benchTestOverride && localPhysicalAuthGranted);
 #endif
 }
 

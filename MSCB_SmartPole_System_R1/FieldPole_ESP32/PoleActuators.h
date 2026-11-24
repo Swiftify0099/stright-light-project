@@ -62,6 +62,7 @@ public:
     // 1. Relay Initialization & Safe Configuration
     void init(bool useSafeVerifiedPins = false);
     void configurePinMapping(const uint8_t pins[NUM_FEEDER_ACTUATORS]);
+    bool applyPinConfiguration(const PoleHardwarePinConfig &cfg);
     void setActiveLow(bool activeLow);
     bool isActiveLow() const;
 
@@ -95,9 +96,11 @@ public:
     void resetEmergencyState();
     bool isEmergencyActive() const;
 
-    // 7. Low-Voltage Isolated Bench Test Profile
+    // 7. Low-Voltage Isolated DC Commissioning Profile & Local Physical Authorization
     void setBenchTestOverride(bool enabled) { benchTestOverride = enabled; }
     bool isBenchTestOverride() const { return benchTestOverride; }
+    void setLocalPhysicalAuthorization(bool authorized) { localPhysicalAuthGranted = authorized; }
+    bool isLocalPhysicalAuthorized() const { return localPhysicalAuthGranted; }
 
     // 8. GPIO 12 Strapping Risk Audit
     bool auditStrappingPins();
@@ -111,6 +114,7 @@ private:
     bool                gpio12HazardPresent;
     bool                relaysLockedDisabled;
     bool                benchTestOverride;
+    bool                localPhysicalAuthGranted;
 
     ActuatorChannelSpec channels[NUM_FEEDER_ACTUATORS];
 

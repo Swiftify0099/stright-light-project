@@ -40,7 +40,7 @@ enum McbTripStatus : uint8_t {
   MCB_STATUS_UNKNOWN = 2  // Input line disconnected / unmonitored
 };
 
-// Section 7 Mandatory Command State Progression:
+// Section 7 Mandatory Command State Progression & Explicit Truth States:
 // SENT -> RECEIVED -> ACCEPTED -> OUTPUT_CHANGED -> AUXILIARY_FEEDBACK_VERIFIED -> COMPLETED
 enum FeederCommandAckState : uint8_t {
   FEEDER_ACK_SENT                        = 0,
@@ -54,23 +54,44 @@ enum FeederCommandAckState : uint8_t {
   FEEDER_ACK_REJECTED_FAULT              = 8,
   FEEDER_ACK_FEEDBACK_NOT_CONNECTED      = 9,
   FEEDER_ACK_FEEDBACK_UNAVAILABLE        = 10,
-  FEEDER_ACK_REJECTED_TIME_UNSYNCED      = 11
+  FEEDER_ACK_REJECTED_TIME_UNSYNCED      = 11,
+  FEEDER_ACK_RELAY_OUTPUT_ENERGIZED      = 12,
+  FEEDER_ACK_CONTACTOR_CLOSED            = 13,
+  FEEDER_ACK_MCB_TRIPPED                 = 14,
+  FEEDER_ACK_COMMAND_TIMEOUT             = 15,
+  FEEDER_ACK_HARDWARE_FAULT              = 16
 };
+
+// Required Architecture Truth State Aliases (Phase 2 & 9)
+#define TRUTH_STATE_COMMAND_RECEIVED          FEEDER_ACK_RECEIVED
+#define TRUTH_STATE_COMMAND_ACCEPTED          FEEDER_ACK_ACCEPTED
+#define TRUTH_STATE_RELAY_OUTPUT_ENERGIZED    FEEDER_ACK_RELAY_OUTPUT_ENERGIZED
+#define TRUTH_STATE_CONTACTOR_CLOSED          FEEDER_ACK_CONTACTOR_CLOSED
+#define TRUTH_STATE_MCB_TRIPPED               FEEDER_ACK_MCB_TRIPPED
+#define TRUTH_STATE_COMMAND_REJECTED          FEEDER_ACK_REJECTED_LOCKED
+#define TRUTH_STATE_FEEDBACK_UNAVAILABLE      FEEDER_ACK_FEEDBACK_UNAVAILABLE
+#define TRUTH_STATE_COMMAND_TIMEOUT           FEEDER_ACK_COMMAND_TIMEOUT
+#define TRUTH_STATE_HARDWARE_FAULT            FEEDER_ACK_HARDWARE_FAULT
 
 inline const char* feederAckStateToString(FeederCommandAckState st) {
   switch (st) {
     case FEEDER_ACK_SENT:                        return "SENT";
-    case FEEDER_ACK_RECEIVED:                    return "RECEIVED";
-    case FEEDER_ACK_ACCEPTED:                    return "ACCEPTED";
+    case FEEDER_ACK_RECEIVED:                    return "COMMAND_RECEIVED";
+    case FEEDER_ACK_ACCEPTED:                    return "COMMAND_ACCEPTED";
     case FEEDER_ACK_OUTPUT_CHANGED:              return "OUTPUT_CHANGED";
     case FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED: return "AUXILIARY_FEEDBACK_VERIFIED";
     case FEEDER_ACK_COMPLETED:                   return "COMPLETED";
     case FEEDER_ACK_REJECTED_STALE:              return "REJECTED_STALE";
-    case FEEDER_ACK_REJECTED_LOCKED:             return "REJECTED_LOCKED";
-    case FEEDER_ACK_REJECTED_FAULT:              return "REJECTED_FAULT";
+    case FEEDER_ACK_REJECTED_LOCKED:             return "COMMAND_REJECTED";
+    case FEEDER_ACK_REJECTED_FAULT:              return "COMMAND_REJECTED_FAULT";
     case FEEDER_ACK_FEEDBACK_NOT_CONNECTED:      return "FEEDBACK_NOT_CONNECTED";
     case FEEDER_ACK_FEEDBACK_UNAVAILABLE:        return "FEEDBACK_UNAVAILABLE";
     case FEEDER_ACK_REJECTED_TIME_UNSYNCED:      return "REJECTED_TIME_UNSYNCED";
+    case FEEDER_ACK_RELAY_OUTPUT_ENERGIZED:      return "RELAY_OUTPUT_ENERGIZED";
+    case FEEDER_ACK_CONTACTOR_CLOSED:            return "CONTACTOR_CLOSED";
+    case FEEDER_ACK_MCB_TRIPPED:                 return "MCB_TRIPPED";
+    case FEEDER_ACK_COMMAND_TIMEOUT:             return "COMMAND_TIMEOUT";
+    case FEEDER_ACK_HARDWARE_FAULT:              return "HARDWARE_FAULT";
     default:                                     return "UNKNOWN";
   }
 }

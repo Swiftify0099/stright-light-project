@@ -58,12 +58,18 @@ public:
   // Command Processing
   bool processCommandPayload(const PktFeederCmdPayload &cmd);
 
-  // Bench Test Mode
+  // Isolated Low-Voltage DC Commissioning & Bench Test Mode
   void setBenchTestMode(bool enabled) { 
     benchTestMode = enabled; 
     poleActuators.setBenchTestOverride(enabled);
   }
   bool isBenchTestMode() const { return benchTestMode; }
+  void setLocalPhysicalAuthorization(bool authorized) {
+    poleActuators.setLocalPhysicalAuthorization(authorized);
+  }
+  bool isLocalPhysicalAuthorized() const {
+    return poleActuators.isLocalPhysicalAuthorized();
+  }
 
   // Hardware Auxiliary Feedback Interrogation
   bool isAuxHardwareDetected() const { return auxHardwareDetected; }

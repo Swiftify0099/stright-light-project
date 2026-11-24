@@ -60,6 +60,10 @@ public:
   bool loadCalibration(ChannelCalibRecord outRecords[MSCB_TOTAL_CHANNELS_PER_POLE]);
   bool saveCalibration(const ChannelCalibRecord inRecords[MSCB_TOTAL_CHANNELS_PER_POLE]);
 
+  // Hardware Pin Configuration & Profile Persistence (CRC32 Verified)
+  bool loadPinConfig(PoleHardwarePinConfig &outConfig);
+  bool savePinConfig(const PoleHardwarePinConfig &inConfig);
+
   // Heartbeat Config
   uint16_t getHeartbeatIntervalSec() const { return heartbeatIntervalSec; }
   void setHeartbeatIntervalSec(uint16_t sec);

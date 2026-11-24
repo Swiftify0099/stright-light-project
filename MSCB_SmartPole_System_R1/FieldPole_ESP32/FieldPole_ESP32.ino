@@ -1,14 +1,14 @@
 /**
  * @file FieldPole_ESP32.ino
- * @brief MSCB Smart Pole System - Field Pole Node Controller Firmware (Skeleton)
+ * @brief MSCB Smart Pole System - Field Pole Node Controller Firmware (R3.2 Production Controller)
  * @version 1.0.0
  * 
  * Hardware Platform: Classic ESP32 ESP-WROOM-32 (30-pin / 38-pin DevKit)
  * Subsystems: SX1278 RA-02 433 MHz LoRa + 6 Feeder Relays + 21 Analog Channels (3x ADS131M08)
  * 
- * DESIGN CONSTRAINTS (PROMPT 06):
+ * DESIGN CONSTRAINTS:
  * - Safe startup logic enabled: All relay outputs driven to OFF on the first clock cycles.
- * - All electrical switching outputs strictly locked in inactive/safe state.
+ * - All electrical switching outputs strictly locked in inactive/safe state by default.
  * - Hardware readiness diagnostic audit printed to Serial.
  * - Modular, independent compilation guaranteed.
  */
@@ -46,7 +46,7 @@ static bool     s_hardwareAuditPassed = false;
 void printPoleDiagnosticBanner() {
   Serial.println(F("\n========================================================"));
   Serial.println(F("       MSCB SMART POLE & FEEDER AUTOMATION SYSTEM       "));
-  Serial.println(F("       FIELD POLE NODE CONTROLLER FIRMWARE (SKELETON)   "));
+  Serial.println(F("       FIELD POLE CONTROLLER FIRMWARE (R3.2 PROD)       "));
   Serial.println(F("========================================================"));
   Serial.printf("Firmware Version : %d.%d.%d (%s)\n", 
                 MSCB_FW_VERSION_MAJOR, MSCB_FW_VERSION_MINOR, MSCB_FW_VERSION_PATCH, MSCB_SYSTEM_CODENAME);

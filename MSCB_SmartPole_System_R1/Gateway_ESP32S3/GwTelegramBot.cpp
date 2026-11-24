@@ -529,22 +529,18 @@ void GwTelegramBot::showMainMenu(int64_t chatId) {
            "💡 *Active Poles:* %u / 50 | *Pending:* %u\n"
            "🔒 *Security:* Fail-Closed HMAC-SHA256\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "Select an action from the buttons below or send number (1-14):",
+           "Select an action from the menu below (Max 6 buttons):",
            GW_STRING_ID, GW_NODE_ADDRESS,
            gwWifi.getActiveSsid(), gwWifi.getRssi(),
            aCount, pCount);
 
-  // 14 Interactive Action Buttons
-  char kb[1024];
+  // Streamlined 6-Button Interactive Menu
+  char kb[512];
   snprintf(kb, sizeof(kb),
            "["
-           "[{\"text\":\"📊 1. Dashboard\",\"callback_data\":\"MENU:DASH\"},{\"text\":\"💡 2. Poles (%u)\",\"callback_data\":\"MENU:POLES:0\"}],"
-           "[{\"text\":\"⚡ 3. 3-Phase Voltage\",\"callback_data\":\"MENU:VOLT:0\"},{\"text\":\"🔌 4. Feeder Control\",\"callback_data\":\"MENU:FDR:0\"}],"
-           "[{\"text\":\"⚡ 5. ALL FEEDERS ON\",\"callback_data\":\"ALL:CONFIRM:1\"},{\"text\":\"🚨 6. ALL FEEDERS OFF\",\"callback_data\":\"ALL:CONFIRM:0\"}],"
-           "[{\"text\":\"📋 7. Registrations (%u)\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🗑️ 8. Delete Pole\",\"callback_data\":\"MENU:DEL:0\"}],"
-           "[{\"text\":\"⏰ 9. Feeder Schedule\",\"callback_data\":\"MENU:SCHED:0\"},{\"text\":\"🕒 10. Mesh Time Sync\",\"callback_data\":\"MENU:TIMESYNC\"}],"
-           "[{\"text\":\"📶 11. Wi-Fi Settings\",\"callback_data\":\"MENU:WIFI\"},{\"text\":\"📲 12. Firmware OTA\",\"callback_data\":\"MENU:OTA\"}],"
-           "[{\"text\":\"🚨 13. Alarm Log\",\"callback_data\":\"MENU:ALARMS\"},{\"text\":\"⚙️ 14. Settings\",\"callback_data\":\"MENU:CONFIG\"}]"
+           "[{\"text\":\"📋 1. Pole Directory (%u)\",\"callback_data\":\"MENU:POLES:0\"},{\"text\":\"⚡ 2. Network ALL ON\",\"callback_data\":\"ALL:CONFIRM:1\"}],"
+           "[{\"text\":\"🛑 3. Network ALL OFF\",\"callback_data\":\"ALL:CONFIRM:0\"},{\"text\":\"📋 4. Registrations (%u)\",\"callback_data\":\"MENU:REG:0\"}],"
+           "[{\"text\":\"📊 5. System Status\",\"callback_data\":\"MENU:DASH\"},{\"text\":\"⚙️ 6. Settings\",\"callback_data\":\"MENU:CONFIG\"}]"
            "]",
            aCount, pCount);
 
@@ -704,24 +700,93 @@ void GwTelegramBot::showPoleDetail(int64_t chatId, uint16_t poleId) {
            getFeederName(p->poleId, 5), (p->feederStateMask & 0x10) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x10) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x10) ? "TRIP" : "OK",
            getFeederName(p->poleId, 6), (p->feederStateMask & 0x20) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x20) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x20) ? "TRIP" : "OK");
 
-  char kb[600];
+  char kb[512];
   snprintf(kb, sizeof(kb),
            "["
-           "[{\"text\":\"⚡ Pole All ON\",\"callback_data\":\"P_ALL_ON:%u\"},{\"text\":\"⭕ Pole All OFF\",\"callback_data\":\"P_ALL_OFF:%u\"}],"
-           "[{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:1\"},{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:2\"},{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:3\"}],"
-           "[{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:4\"},{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:5\"},{\"text\":\"%s\",\"callback_data\":\"F_TOG:%u:6\"}],"
-           "[{\"text\":\"⚡ 3-Phase Voltage\",\"callback_data\":\"MENU:VOLT:%u\"},{\"text\":\"✏️ Edit Name\",\"callback_data\":\"P_EDIT:%u\"}],"
+           "[{\"text\":\"⚡ All Feeders ON\",\"callback_data\":\"P_ALL_ON_CONFIRM:%u\"},{\"text\":\"🛑 All Feeders OFF\",\"callback_data\":\"P_ALL_OFF_CONFIRM:%u\"}],"
+           "[{\"text\":\"🔌 Feeder List (F1-F6)\",\"callback_data\":\"P_FDRS:%u\"},{\"text\":\"📈 Live Metrology\",\"callback_data\":\"MENU:VOLT:%u\"}],"
            "[{\"text\":\"🗑️ Delete Pole\",\"callback_data\":\"DEL_PROMPT:%u\"},{\"text\":\"🔙 Back to Poles\",\"callback_data\":\"MENU:POLES:0\"}]"
            "]",
            p->poleId, p->poleId,
-           (p->feederStateMask & 0x01) ? "F1 ⭕OFF" : "F1 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x02) ? "F2 ⭕OFF" : "F2 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x04) ? "F3 ⭕OFF" : "F3 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x08) ? "F4 ⭕OFF" : "F4 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x10) ? "F5 ⭕OFF" : "F5 ⚡ON", p->poleId,
-           (p->feederStateMask & 0x20) ? "F6 ⭕OFF" : "F6 ⚡ON", p->poleId,
            p->poleId, p->poleId,
            p->poleId);
+
+  sendMessageWithKeyboard(chatId, buf, kb);
+}
+
+void GwTelegramBot::showPoleFeederList(int64_t chatId, uint16_t poleId) {
+  RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  if (!p) {
+    sendMessage(chatId, "❌ Pole not found.");
+    return;
+  }
+  const char* poleName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
+
+  char buf[384];
+  snprintf(buf, sizeof(buf),
+           "🔌 *FEEDER SELECTOR: %s (0x%04X)*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Select a feeder below to inspect physical status or switch individual power:",
+           poleName, poleId);
+
+  char kb[512];
+  snprintf(kb, sizeof(kb),
+           "["
+           "[{\"text\":\"F1: %s %s\",\"callback_data\":\"FDR_VIEW:%u:1\"},{\"text\":\"F2: %s %s\",\"callback_data\":\"FDR_VIEW:%u:2\"}],"
+           "[{\"text\":\"F3: %s %s\",\"callback_data\":\"FDR_VIEW:%u:3\"},{\"text\":\"F4: %s %s\",\"callback_data\":\"FDR_VIEW:%u:4\"}],"
+           "[{\"text\":\"F5: %s %s\",\"callback_data\":\"FDR_VIEW:%u:5\"},{\"text\":\"F6: %s %s\",\"callback_data\":\"FDR_VIEW:%u:6\"}],"
+           "[{\"text\":\"🔙 Back to Pole Details\",\"callback_data\":\"P_SEL:%u\"}]"
+           "]",
+           getFeederName(poleId, 1), (p->feederStateMask & 0x01) ? "⚡ON" : "⭕OFF", poleId,
+           getFeederName(poleId, 2), (p->feederStateMask & 0x02) ? "⚡ON" : "⭕OFF", poleId,
+           getFeederName(poleId, 3), (p->feederStateMask & 0x04) ? "⚡ON" : "⭕OFF", poleId,
+           getFeederName(poleId, 4), (p->feederStateMask & 0x08) ? "⚡ON" : "⭕OFF", poleId,
+           getFeederName(poleId, 5), (p->feederStateMask & 0x10) ? "⚡ON" : "⭕OFF", poleId,
+           getFeederName(poleId, 6), (p->feederStateMask & 0x20) ? "⚡ON" : "⭕OFF", poleId,
+           poleId);
+
+  sendMessageWithKeyboard(chatId, buf, kb);
+}
+
+void GwTelegramBot::showFeederControlDetail(int64_t chatId, uint16_t poleId, uint8_t feederId) {
+  if (feederId < 1 || feederId > 6) return;
+  RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  if (!p) {
+    sendMessage(chatId, "❌ Pole not found.");
+    return;
+  }
+  uint8_t fBit = (1 << (feederId - 1));
+  bool isCmdOn = (p->feederStateMask & fBit) != 0;
+  bool isAuxClosed = (p->auxFeedbackMask & fBit) != 0;
+  bool isMcbTrip = (p->mcbStatusMask & fBit) != 0;
+
+  char buf[512];
+  snprintf(buf, sizeof(buf),
+           "🔌 *FEEDER CONTROL: %s | F%u*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "📍 *Pole:* %s (0x%04X)\n"
+           "🏷️ *Feeder Name:* *%s*\n"
+           "• Relay Commanded: *%s*\n"
+           "• Contactor Feedback: *%s*\n"
+           "• MCB Switch: *%s*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Tap an action button below to operate:",
+           (strlen(p->displayName) > 0) ? p->displayName : p->stringId,
+           feederId,
+           p->stringId, poleId,
+           getFeederName(poleId, feederId),
+           isCmdOn ? "⚡ ENERGIZED (ON)" : "⭕ DE-ENERGIZED (OFF)",
+           isAuxClosed ? "✅ CLOSED" : "⭕ OPEN / DISCONNECTED",
+           isMcbTrip ? "⚠️ TRIPPED" : "✅ HEALTHY");
+
+  char kb[384];
+  snprintf(kb, sizeof(kb),
+           "["
+           "[{\"text\":\"⚡ Turn ON (Confirm)\",\"callback_data\":\"F_CONF_ON:%u:%u\"},{\"text\":\"🛑 Turn OFF\",\"callback_data\":\"F_OFF:%u:%u\"}],"
+           "[{\"text\":\"🔄 Refresh\",\"callback_data\":\"FDR_VIEW:%u:%u\"},{\"text\":\"🔙 Back to Feeders\",\"callback_data\":\"P_FDRS:%u\"}]"
+           "]",
+           poleId, feederId, poleId, feederId,
+           poleId, feederId, poleId);
 
   sendMessageWithKeyboard(chatId, buf, kb);
 }
@@ -2056,6 +2121,57 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
       cmdFeeder(chatId, (uint16_t)pid, (uint8_t)fid, currentAct);
       showFeederDashboard(chatId, (uint16_t)pid);
     }
+  } else if (strncmp(callbackData, "P_FDRS:", 7) == 0) {
+    uint16_t pid = (uint16_t)atoi(callbackData + 7);
+    showPoleFeederList(chatId, pid);
+  } else if (strncmp(callbackData, "FDR_VIEW:", 9) == 0) {
+    int pid = 0, fid = 0;
+    if (sscanf(callbackData + 9, "%d:%d", &pid, &fid) == 2) {
+      showFeederControlDetail(chatId, (uint16_t)pid, (uint8_t)fid);
+    }
+  } else if (strncmp(callbackData, "F_CONF_ON:", 10) == 0) {
+    int pid = 0, fid = 0;
+    if (sscanf(callbackData + 10, "%d:%d", &pid, &fid) == 2) {
+      char cBuf[300];
+      snprintf(cBuf, sizeof(cBuf),
+               "⚠️ *CONFIRM FEEDER ENERGIZE*\n━━━━━━━━━━━━━━━━━━━━━━\nAre you sure you want to turn ON Feeder %u (%s) on Pole 0x%04X?",
+               fid, getFeederName(pid, fid), pid);
+      char cKb[256];
+      snprintf(cKb, sizeof(cKb),
+               "[[{\"text\":\"✅ YES, TURN ON\",\"callback_data\":\"F_ON:%u:%u\"},{\"text\":\"❌ CANCEL\",\"callback_data\":\"FDR_VIEW:%u:%u\"}]]",
+               pid, fid, pid, fid);
+      sendMessageWithKeyboard(chatId, cBuf, cKb);
+    }
+  } else if (strncmp(callbackData, "F_ON:", 5) == 0) {
+    int pid = 0, fid = 0;
+    if (sscanf(callbackData + 5, "%d:%d", &pid, &fid) == 2) {
+      cmdFeeder(chatId, (uint16_t)pid, (uint8_t)fid, 1);
+      showFeederControlDetail(chatId, (uint16_t)pid, (uint8_t)fid);
+    }
+  } else if (strncmp(callbackData, "F_OFF:", 6) == 0) {
+    int pid = 0, fid = 0;
+    if (sscanf(callbackData + 6, "%d:%d", &pid, &fid) == 2) {
+      cmdFeeder(chatId, (uint16_t)pid, (uint8_t)fid, 0);
+      showFeederControlDetail(chatId, (uint16_t)pid, (uint8_t)fid);
+    }
+  } else if (strncmp(callbackData, "P_ALL_ON_CONFIRM:", 17) == 0) {
+    uint16_t pid = (uint16_t)atoi(callbackData + 17);
+    char cBuf[256];
+    snprintf(cBuf, sizeof(cBuf), "⚠️ *CONFIRM ALL FEEDERS ON*\n━━━━━━━━━━━━━━━━━━━━━━\nEnergize all 6 feeders on Pole 0x%04X?", pid);
+    char cKb[200];
+    snprintf(cKb, sizeof(cKb),
+             "[[{\"text\":\"✅ YES, ALL ON\",\"callback_data\":\"P_ALL_ON:%u\"},{\"text\":\"❌ CANCEL\",\"callback_data\":\"P_SEL:%u\"}]]",
+             pid, pid);
+    sendMessageWithKeyboard(chatId, cBuf, cKb);
+  } else if (strncmp(callbackData, "P_ALL_OFF_CONFIRM:", 18) == 0) {
+    uint16_t pid = (uint16_t)atoi(callbackData + 18);
+    char cBuf[256];
+    snprintf(cBuf, sizeof(cBuf), "⚠️ *CONFIRM ALL FEEDERS OFF*\n━━━━━━━━━━━━━━━━━━━━━━\nDe-energize all 6 feeders on Pole 0x%04X?", pid);
+    char cKb[200];
+    snprintf(cKb, sizeof(cKb),
+             "[[{\"text\":\"✅ YES, ALL OFF\",\"callback_data\":\"P_ALL_OFF:%u\"},{\"text\":\"❌ CANCEL\",\"callback_data\":\"P_SEL:%u\"}]]",
+             pid, pid);
+    sendMessageWithKeyboard(chatId, cBuf, cKb);
   } else if (strncmp(callbackData, "P_ALL_ON:", 9) == 0) {
     uint16_t pid = (uint16_t)atoi(callbackData + 9);
     cmdAll(chatId, pid, 1);
@@ -2351,7 +2467,7 @@ void GwTelegramBot::serviceTrackedCommands() {
     const char* fdrName = getFeederName(cmd.poleId, cmd.feederId);
 
     char reportBuf[384];
-    if (cmd.lastAckState == FEEDER_ACK_COMPLETED || cmd.lastAckState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED) {
+    if (cmd.lastAckState == FEEDER_ACK_COMPLETED || cmd.lastAckState == FEEDER_ACK_CONTACTOR_CLOSED || cmd.lastAckState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED) {
       snprintf(reportBuf, sizeof(reportBuf),
                "✅ *FEEDER COMMAND EXECUTED & VERIFIED*\n"
                "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2368,16 +2484,32 @@ void GwTelegramBot::serviceTrackedCommands() {
                cmd.feederId, fdrName,
                (cmd.action == 1) ? "ENERGIZED (ON)" : "DE-ENERGIZED (OFF)",
                (cmd.currentMcbMask & (1 << (cmd.feederId - 1))) ? "⚠️ TRIPPED" : "✅ HEALTHY");
-    } else if (cmd.lastAckState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) {
+    } else if (cmd.lastAckState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED || cmd.lastAckState == FEEDER_ACK_FEEDBACK_UNAVAILABLE) {
       snprintf(reportBuf, sizeof(reportBuf),
                "⚠️ *FEEDER SWITCHED (AUXILIARY UNVERIFIED)*\n"
                "━━━━━━━━━━━━━━━━━━━━━━\n"
                "📍 *Pole:* `%s` (0x%04X) | Feeder %u\n"
                "• Relay Output: %s\n"
-               "• Contactor Feedback: *NOT CONNECTED*\n"
+               "• Contactor Feedback: *%s*\n"
                "*(Physical auxiliary feedback line unpopulated or unmonitored)*",
                poleName, cmd.poleId, cmd.feederId,
-               (cmd.action == 1) ? "ON" : "OFF");
+               (cmd.action == 1) ? "ENERGIZED" : "DE-ENERGIZED",
+               (cmd.lastAckState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) ? "NOT CONNECTED" : "UNAVAILABLE");
+    } else if (cmd.lastAckState == FEEDER_ACK_MCB_TRIPPED) {
+      snprintf(reportBuf, sizeof(reportBuf),
+               "⚠️ *COMMAND INTERLOCKED: MCB TRIPPED*\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📍 *Pole:* `%s` (0x%04X) | Feeder %u\n"
+               "• Overload or short-circuit auxiliary trip contact detected.\n"
+               "• Physical contactor closed inhibited.",
+               poleName, cmd.poleId, cmd.feederId);
+    } else if (cmd.lastAckState == FEEDER_ACK_HARDWARE_FAULT) {
+      snprintf(reportBuf, sizeof(reportBuf),
+               "❌ *COMMAND REJECTED: HARDWARE FAULT*\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📍 *Pole:* `%s` (0x%04X) | Feeder %u\n"
+               "• Relay coil driver failure or output pin mismatch.",
+               poleName, cmd.poleId, cmd.feederId);
     } else if (cmd.lastAckState == FEEDER_ACK_REJECTED_LOCKED) {
       snprintf(reportBuf, sizeof(reportBuf),
                "⛔ *COMMAND REJECTED: SAFETY LOCK ACTIVE*\n"

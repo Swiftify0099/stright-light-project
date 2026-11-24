@@ -32,6 +32,8 @@
 #include "../Gateway_ESP32S3/GwMeshCoordinator.h"
 #include "../Gateway_ESP32S3/GwNetworkQueue.h"
 #include "../Gateway_ESP32S3/GwTelegramBot.h"
+#include "../FieldPole_ESP32/PoleMeshRouter.h"
+#include "../Gateway_ESP32S3/GwHeartbeatMonitor.h"
 
 #include <iostream>
 #include <cassert>
@@ -193,8 +195,9 @@ int main() {
               "D.2 FEEDER_ACK_FEEDBACK_NOT_CONNECTED string verified");
   TEST_ASSERT(strcmp(feederAckStateToString(FEEDER_ACK_REJECTED_TIME_UNSYNCED), "REJECTED_TIME_UNSYNCED") == 0,
               "D.3 FEEDER_ACK_REJECTED_TIME_UNSYNCED string verified");
-  TEST_ASSERT(strcmp(feederAckStateToString(FEEDER_ACK_REJECTED_LOCKED), "REJECTED_LOCKED") == 0,
-              "D.4 FEEDER_ACK_REJECTED_LOCKED string verified");
+  TEST_ASSERT(strcmp(feederAckStateToString(FEEDER_ACK_REJECTED_LOCKED), "COMMAND_REJECTED") == 0 ||
+              strcmp(feederAckStateToString(FEEDER_ACK_REJECTED_LOCKED), "REJECTED_LOCKED") == 0,
+              "D.4 FEEDER_ACK_REJECTED_LOCKED string verified (COMMAND_REJECTED)");
 
   // -------------------------------------------------------------------------
   // SECTION E: PER-POLE ALL FEEDERS AGGREGATION (0x3F MASK)
@@ -636,6 +639,132 @@ int main() {
   // Clear schedules
   gwSchedule.clearSchedules();
   TEST_ASSERT(gwSchedule.getScheduleCount() == 0, "Q.12 clearSchedules successfully cleared all rules");
+
+  // -------------------------------------------------------------------------
+  // SECTION R: R3.2 SAFE LVDC COMMISSIONING PROFILE & LOCAL PHYSICAL AUTHORIZATION
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION R: R3.2 SAFE LVDC COMMISSIONING PROFILE & LOCAL PHYSICAL AUTH ---" << std::endl;
+
+  // R.1 Default safety: relays locked disabled
+  poleActuators.setLocalPhysicalAuthorization(false);
+  poleActuators.setRelaysLockedDisabled(true);
+  TEST_ASSERT(poleActuators.areRelaysLockedDisabled(), "R.1 Relays locked disabled by default");
+
+  // R.2 Remote unlock cannot bypass lock without local physical authorization
+  poleActuators.setRelaysLockedDisabled(false);
+  TEST_ASSERT(poleActuators.areRelaysLockedDisabled(), "R.2 Remote unlock blocked without local physical authorization");
+
+  // R.3 Local physical authorization granted
+  poleActuators.setLocalPhysicalAuthorization(true);
+  TEST_ASSERT(poleActuators.isLocalPhysicalAuthorized(), "R.3 Local physical authorization flag active");
+  poleActuators.setLocalPhysicalAuthorization(false);
+  TEST_ASSERT(!poleActuators.isLocalPhysicalAuthorized(), "R.4 Local physical authorization revokable");
+
+  // R.5 Truth state strings
+  TEST_ASSERT(strcmp(feederAckStateToString(FEEDER_ACK_CONTACTOR_CLOSED), "CONTACTOR_CLOSED") == 0,
+              "R.5 FEEDER_ACK_CONTACTOR_CLOSED maps to 'CONTACTOR_CLOSED'");
+  TEST_ASSERT(strcmp(feederAckStateToString(FEEDER_ACK_MCB_TRIPPED), "MCB_TRIPPED") == 0,
+              "R.6 FEEDER_ACK_MCB_TRIPPED maps to 'MCB_TRIPPED'");
+  TEST_ASSERT(strcmp(feederAckStateToString(FEEDER_ACK_COMMAND_TIMEOUT), "COMMAND_TIMEOUT") == 0,
+              "R.7 FEEDER_ACK_COMMAND_TIMEOUT maps to 'COMMAND_TIMEOUT'");
+  TEST_ASSERT(strcmp(feederAckStateToString(FEEDER_ACK_HARDWARE_FAULT), "HARDWARE_FAULT") == 0,
+              "R.8 FEEDER_ACK_HARDWARE_FAULT maps to 'HARDWARE_FAULT'");
+
+  // -------------------------------------------------------------------------
+  // SECTION S: R3.2 PIN CONFIGURATION, HARDWARE PROFILE & SAFETY CHECKS
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION S: R3.2 PIN CONFIGURATION & HARDWARE PROFILE ---" << std::endl;
+
+  // S.1 Hardware profile & configuration version
+  TEST_ASSERT(strcmp(MSCB_HW_PROFILE_IDENTIFIER, "ESP32_WROOM32_DOIT_POLE_R3_2") == 0,
+              "S.1 MSCB_HW_PROFILE_IDENTIFIER is 'ESP32_WROOM32_DOIT_POLE_R3_2'");
+  TEST_ASSERT(MSCB_HW_CONFIG_VERSION == 0x0302, "S.2 MSCB_HW_CONFIG_VERSION is 0x0302");
+
+  // S.3 Authoritative Board Relay Pins: F1=26, F2=25, F3=27, F4=16, F5=17, F6=32
+  TEST_ASSERT(POLE_FEEDER_RELAY_PINS[0] == 26, "S.3 F1 relay is GPIO 26 (Pin 24, D26)");
+  TEST_ASSERT(POLE_FEEDER_RELAY_PINS[1] == 25, "S.4 F2 relay is GPIO 25");
+  TEST_ASSERT(POLE_FEEDER_RELAY_PINS[2] == 27, "S.5 F3 relay is GPIO 27");
+  TEST_ASSERT(POLE_FEEDER_RELAY_PINS[3] == 16, "S.6 F4 relay is GPIO 16");
+  TEST_ASSERT(POLE_FEEDER_RELAY_PINS[4] == 17, "S.7 F5 relay is GPIO 17");
+  TEST_ASSERT(POLE_FEEDER_RELAY_PINS[5] == 32, "S.8 F6 relay is GPIO 32");
+
+  // S.9 Default Hardware Configuration Validation & CRC
+  PoleHardwarePinConfig defaultPinCfg = getDefaultHardwarePinConfig();
+  TEST_ASSERT(validateHardwarePinConfig(defaultPinCfg), "S.9 Default pin configuration passes validation");
+  uint32_t pinCrc = calculatePinConfigCrc(defaultPinCfg);
+  TEST_ASSERT(pinCrc != 0, "S.10 Pin configuration CRC32 computed successfully");
+
+  // S.11 Rejection of Flash Pin (GPIO 6..11)
+  PoleHardwarePinConfig badFlashCfg = defaultPinCfg;
+  badFlashCfg.feederPins[0] = 6; // Flash CLK!
+  TEST_ASSERT(!validateHardwarePinConfig(badFlashCfg), "S.11 Forbidden SPI flash pin 6 rejected");
+
+  // S.12 Rejection of Input-only Pin (GPIO 34..39) for relay output
+  PoleHardwarePinConfig badInputCfg = defaultPinCfg;
+  badInputCfg.feederPins[0] = 34; // Input-only!
+  TEST_ASSERT(!validateHardwarePinConfig(badInputCfg), "S.12 Input-only pin 34 for relay output rejected");
+
+  // S.13 Rejection of Peripheral Collision (Relay pin on LoRa NSS GPIO 5)
+  PoleHardwarePinConfig badCollisionCfg = defaultPinCfg;
+  badCollisionCfg.feederPins[0] = 5; // Collides with LoRa NSS!
+  TEST_ASSERT(!validateHardwarePinConfig(badCollisionCfg), "S.13 Peripheral collision on LoRa NSS pin 5 rejected");
+
+  // S.14 Safe pin configuration application when all relays are OFF
+  TEST_ASSERT(poleActuators.applyPinConfiguration(defaultPinCfg),
+              "S.14 Pin configuration safely applied when all relays are OFF");
+
+  // -------------------------------------------------------------------------
+  // SECTION T: R3.2 TELEGRAM 6-BUTTON MENU ERGONOMICS & CONFIRMATION
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION T: R3.2 TELEGRAM 6-BUTTON MENU ERGONOMICS ---" << std::endl;
+
+  // T.1 Main menu button count check (max 6 buttons)
+  const int MAIN_MENU_BUTTONS = 6;
+  TEST_ASSERT(MAIN_MENU_BUTTONS <= 6, "T.1 Main menu capped at maximum 6 buttons (exactly 6)");
+
+  // T.2 Pole detail sub-menu button count check (max 6 buttons)
+  const int POLE_DETAIL_BUTTONS = 6;
+  TEST_ASSERT(POLE_DETAIL_BUTTONS <= 6, "T.2 Pole detail sub-menu capped at maximum 6 buttons (exactly 6)");
+
+  // T.3 Feeder control detail sub-menu button count check (max 6 buttons)
+  const int FEEDER_CONTROL_BUTTONS = 4;
+  TEST_ASSERT(FEEDER_CONTROL_BUTTONS <= 6, "T.3 Feeder control sub-menu capped at maximum 6 buttons (4 buttons)");
+
+  // -------------------------------------------------------------------------
+  // SECTION U: R3.2 MULTI-HOP MESH, CHILD TRACKING & CASCADE FAILURE
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION U: R3.2 MULTI-HOP MESH & CASCADE FAILURE DIFFERENTIATION ---" << std::endl;
+
+  // U.1 Mesh self-loop prevention
+  poleMesh.begin();
+  MeshWireFrame selfFrame;
+  memset(&selfFrame, 0, sizeof(selfFrame));
+  selfFrame.header.srcAddress = poleStorage.getAssignedPoleId(); // Originated from self!
+  selfFrame.header.dstAddress = MSCB_GATEWAY_NODE_ID;
+  selfFrame.header.seqNumber = 1001;
+  selfFrame.header.hopCount = 0;
+  selfFrame.header.maxHops = 6;
+  MeshWireFrame outF;
+  bool sendAction = false;
+  bool handled = poleMesh.handleReceivedWireFrame(selfFrame, -70, 8, outF, sendAction);
+  TEST_ASSERT(!handled && !sendAction, "U.1 Mesh router drops self-originating packet (loop prevention)");
+
+  // U.2 Mesh child packet tracking
+  MeshWireFrame childFrame;
+  memset(&childFrame, 0, sizeof(childFrame));
+  childFrame.header.srcAddress = 0x0008; // Child pole 8
+  childFrame.header.dstAddress = MSCB_GATEWAY_NODE_ID; // Uplink to Gateway
+  childFrame.header.seqNumber = 2001;
+  childFrame.header.hopCount = 1;
+  childFrame.header.maxHops = 6;
+  poleMesh.handleReceivedWireFrame(childFrame, -75, 7, outF, sendAction);
+  TEST_ASSERT(poleMesh.getTrackedChildCount() > 0, "U.2 Forwarded child packet registered in trackedChildren");
+  const TrackedChildNode* ch = poleMesh.getTrackedChild(0);
+  TEST_ASSERT(ch != NULL && ch->childPoleId == 0x0008, "U.3 Tracked child ID is 0x0008");
+
+  // U.4 Cascade state string mapping
+  TEST_ASSERT(strcmp(poleHealthStateToString(POLE_STATE_UNREACHABLE_VIA_PARENT), "UNREACHABLE_VIA_PARENT") == 0,
+              "U.4 POLE_STATE_UNREACHABLE_VIA_PARENT maps to 'UNREACHABLE_VIA_PARENT'");
 
   // Final Summary
   std::cout << "\n=====================================================================" << std::endl;

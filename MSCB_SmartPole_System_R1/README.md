@@ -22,12 +22,12 @@ The **MSCB Smart Pole & Feeder Automation System** is an industrial-grade rural 
 MSCB_SmartPole_System_R1/
 │
 ├── Gateway_ESP32S3/                # Main Gateway Firmware Tier
-│   ├── Gateway_ESP32S3.ino         # Gateway skeleton with safe startup & diagnostics
+│   ├── Gateway_ESP32S3.ino         # Gateway production controller with safe startup & diagnostics
 │   ├── GwConfig.h                  # Gateway configuration, sizing & credential templates
 │   └── GwBoardPins.h               # Verified ESP32-S3 N16R8 hardware pinout
 │
 ├── FieldPole_ESP32/                # Secondary Field Pole Firmware Tier
-│   ├── FieldPole_ESP32.ino         # Field Pole skeleton with safe relay lock & diagnostics
+│   ├── FieldPole_ESP32.ino         # Field Pole production controller with safe relay lock & diagnostics
 │   ├── PoleConfig.h                # Pole configuration & 21-channel electrical sizing
 │   └── PoleBoardPins.h             # Verified ESP32-WROOM-32 hardware pinout
 │
@@ -104,7 +104,7 @@ MSCB_SmartPole_System_R1/
 
 ## 6. Safety Compliance Rules (Prompt 06)
 
-1. **All Electrical Switching Outputs are Locked Inactive**: Firmwares drive all relay pins to HIGH/OFF on the first instruction cycle of boot.
-2. **Zero RF Transmission**: LoRa radio stays offline during this structural skeleton phase.
-3. **No Mains Connection**: Testing is strictly restricted to low-voltage bench DC (3.3V / 5.0V).
+1. **All Electrical Switching Outputs are Locked Inactive**: Firmwares drive all relay pins to HIGH/OFF on the first instruction cycle of boot. Remote switching is locked by default.
+2. **Controlled RF Transmission**: LoRa radio operates on Indian WPC 433 MHz band with authenticated mesh framing, sequence tracking, and low-power lab bench transmission.
+3. **No Mains Connection**: Testing is strictly restricted to low-voltage bench DC (3.3V / 5.0V / 12V isolated bench profile).
 4. **No Plaintext Secrets**: Wi-Fi credentials and Telegram Bot tokens are represented as configuration placeholders.

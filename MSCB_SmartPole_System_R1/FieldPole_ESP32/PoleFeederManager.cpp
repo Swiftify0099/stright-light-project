@@ -143,7 +143,7 @@ FeederCommandAckState PoleFeederManager::executeFeederSwitch(uint8_t feederId1Ba
   // 1. All OFF commands must remain safe and idempotent
   if (action == 0) {
     bool offOk = poleActuators.requestRelayOff(chIdx, "COMMAND_OFF");
-    if (!offOk) return FEEDER_ACK_REJECTED_FAULT;
+    if (!offOk) return FEEDER_ACK_HARDWARE_FAULT;
     // Check contactor auxiliary if present
     if (!auxHardwareDetected) return FEEDER_ACK_FEEDBACK_NOT_CONNECTED;
     uint8_t auxMask = readContactorAuxMask();
@@ -163,7 +163,7 @@ FeederCommandAckState PoleFeederManager::executeFeederSwitch(uint8_t feederId1Ba
 
   // 4. Actuator Driver Diagnostic Fault: reject ON
   if (!poleActuators.isDiagnosticPassed() || poleActuators.getDriverState() != ACTUATOR_STATE_READY) {
-    return FEEDER_ACK_REJECTED_FAULT;
+    return FEEDER_ACK_HARDWARE_FAULT;
   }
 
   // 5. Centralized Safety Lock (MSCB_RELAYS_LOCKED_DISABLED)
@@ -174,7 +174,7 @@ FeederCommandAckState PoleFeederManager::executeFeederSwitch(uint8_t feederId1Ba
   // 6. Drive Relay Output ON
   bool success = poleActuators.requestRelayOn(chIdx, "COMMAND_ON");
   if (!success) {
-    return FEEDER_ACK_REJECTED_FAULT;
+    return FEEDER_ACK_HARDWARE_FAULT;
   }
 
   // 7. Verify Auxiliary Feedback Hardware
@@ -186,7 +186,17 @@ FeederCommandAckState PoleFeederManager::executeFeederSwitch(uint8_t feederId1Ba
   // If auxiliary hardware is present, verify contactor closure
   uint8_t auxMask = readContactorAuxMask();
   bool auxClosed = (auxMask & (1 << chIdx)) != 0;
-  return auxClosed ? FEEDER_ACK_COMPLETED : FEEDER_ACK_FEEDBACK_UNAVAILABLE;
+  if (!auxClosed) {
+    return FEEDER_ACK_FEEDBACK_UNAVAILABLE;
+  }
+
+  // Check MCB trip status
+  uint8_t mcbMask = readMcbTripMask();
+  if ((mcbMask & (1 << chIdx)) != 0) {
+    return FEEDER_ACK_MCB_TRIPPED;
+  }
+
+  return FEEDER_ACK_CONTACTOR_CLOSED;
 }
 
 bool PoleFeederManager::processCommandPayload(const PktFeederCmdPayload &cmd) {
@@ -241,7 +251,7 @@ bool PoleFeederManager::processCommandPayload(const PktFeederCmdPayload &cmd) {
     // Single Feeder Execution
     FeederCommandAckState finalState = executeFeederSwitch(cmd.feederId, cmd.commandAction);
     sendAckUplink(cmd.feederId, cmd.sequenceNumber, finalState);
-    return (finalState == FEEDER_ACK_COMPLETED || finalState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED);
+    return (finalState == FEEDER_ACK_COMPLETED || finalState == FEEDER_ACK_CONTACTOR_CLOSED || finalState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED);
   } else if (cmd.feederId == 0xF0) {
     // Group Staggered Execution: reject new group ON if already busy
     if (cmd.commandAction != 0 && pendingStaggerMask != 0) {

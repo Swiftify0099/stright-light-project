@@ -62,9 +62,12 @@
 //  SAFETY LOCKS & HARDWARE EXECUTION ENFORCEMENT
 // =====================================================================
 #define MSCB_SAFE_BOOT_MODE               1     // 1 = Safe startup mode enabled
-#define MSCB_RELAYS_LOCKED_DISABLED       1     // 1 = Relay drive strictly prohibited by default (isolated DC bench test only when unlocked)
+#define MSCB_RELAYS_LOCKED_DISABLED       1     // 1 = Production relay drive strictly prohibited by default (isolated DC bench test only when unlocked)
+#ifndef MSCB_COMMISSIONING_LVDC_PROFILE
+#define MSCB_COMMISSIONING_LVDC_PROFILE   0     // 0 = Production locked; 1 = Isolated low-voltage DC commissioning profile compiled
+#endif
 #ifndef MSCB_BENCH_TEST_PROFILE_ENABLED
-#define MSCB_BENCH_TEST_PROFILE_ENABLED   0     // 0 = Production locked; 1 = Isolated low-voltage bench test profile compiled
+#define MSCB_BENCH_TEST_PROFILE_ENABLED   MSCB_COMMISSIONING_LVDC_PROFILE
 #endif
 #define MSCB_SIMULATION_TELEMETRY_ONLY    0     // 0 = Real physical ADC sampling enforced; zero synthetic data allowed!
 

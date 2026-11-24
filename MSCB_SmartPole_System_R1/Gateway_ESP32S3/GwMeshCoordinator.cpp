@@ -324,6 +324,7 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
             lastAckState = ack.ackState;
             lastAckPole = ack.poleId;
             if (ack.ackState == FEEDER_ACK_COMPLETED ||
+                ack.ackState == FEEDER_ACK_CONTACTOR_CLOSED ||
                 ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
                 ack.ackState >= FEEDER_ACK_REJECTED_STALE ||
                 ack.ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) {
@@ -352,16 +353,20 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
 
               // Classify response
               if (ack.ackState == FEEDER_ACK_COMPLETED ||
+                  ack.ackState == FEEDER_ACK_CONTACTOR_CLOSED ||
                   ack.ackState == FEEDER_ACK_OUTPUT_CHANGED ||
+                  ack.ackState == FEEDER_ACK_RELAY_OUTPUT_ENERGIZED ||
                   ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
                   ack.ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) {
                 trackedCommands[i].outputConfirmedMask |= fBit;
-                if (ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED) {
+                if (ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
+                    ack.ackState == FEEDER_ACK_CONTACTOR_CLOSED ||
+                    ack.ackState == FEEDER_ACK_COMPLETED) {
                   trackedCommands[i].auxConfirmedMask |= fBit;
                 }
               }
 
-              if ((ack.currentMcbMask & fBit) != 0) {
+              if ((ack.currentMcbMask & fBit) != 0 || ack.ackState == FEEDER_ACK_MCB_TRIPPED) {
                 trackedCommands[i].mcbFaultMask |= fBit;
               }
               if (ack.ackState >= FEEDER_ACK_REJECTED_STALE) {
@@ -370,6 +375,7 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
 
               // Terminal state check for this feeder
               if (ack.ackState == FEEDER_ACK_COMPLETED ||
+                  ack.ackState == FEEDER_ACK_CONTACTOR_CLOSED ||
                   ack.ackState == FEEDER_ACK_OUTPUT_CHANGED ||
                   ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
                   ack.ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED ||

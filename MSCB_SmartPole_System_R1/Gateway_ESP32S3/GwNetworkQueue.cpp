@@ -186,16 +186,20 @@ void GwNetworkQueue::onFeederAck(const PktFeederAckPayload &ack) {
       tasks[i].receivedAckMask |= fBit;
 
       if (ack.ackState == FEEDER_ACK_COMPLETED ||
+          ack.ackState == FEEDER_ACK_CONTACTOR_CLOSED ||
           ack.ackState == FEEDER_ACK_OUTPUT_CHANGED ||
+          ack.ackState == FEEDER_ACK_RELAY_OUTPUT_ENERGIZED ||
           ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
           ack.ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED) {
         tasks[i].outputConfirmedMask |= fBit;
-        if (ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED) {
+        if (ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
+            ack.ackState == FEEDER_ACK_CONTACTOR_CLOSED ||
+            ack.ackState == FEEDER_ACK_COMPLETED) {
           tasks[i].auxConfirmedMask |= fBit;
         }
       }
 
-      if ((ack.currentMcbMask & fBit) != 0) {
+      if ((ack.currentMcbMask & fBit) != 0 || ack.ackState == FEEDER_ACK_MCB_TRIPPED) {
         tasks[i].mcbFaultMask |= fBit;
       }
       if (ack.ackState >= FEEDER_ACK_REJECTED_STALE) {
@@ -203,6 +207,7 @@ void GwNetworkQueue::onFeederAck(const PktFeederAckPayload &ack) {
       }
 
       if (ack.ackState == FEEDER_ACK_COMPLETED ||
+          ack.ackState == FEEDER_ACK_CONTACTOR_CLOSED ||
           ack.ackState == FEEDER_ACK_OUTPUT_CHANGED ||
           ack.ackState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED ||
           ack.ackState == FEEDER_ACK_FEEDBACK_NOT_CONNECTED ||

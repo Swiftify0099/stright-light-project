@@ -28,19 +28,21 @@
 #include "GwNodeRegistry.h"
 
 enum PoleHealthStateMonitor : uint8_t {
-  POLE_STATE_ONLINE     = 0,
-  POLE_STATE_DELAYED    = 1,
-  POLE_STATE_OFFLINE    = 2,
-  POLE_STATE_RECOVERING = 3
+  POLE_STATE_ONLINE                 = 0,
+  POLE_STATE_DELAYED                = 1,
+  POLE_STATE_OFFLINE                = 2,
+  POLE_STATE_RECOVERING             = 3,
+  POLE_STATE_UNREACHABLE_VIA_PARENT = 4
 };
 
 inline const char* poleHealthStateToString(PoleHealthStateMonitor st) {
   switch (st) {
-    case POLE_STATE_ONLINE:     return "ONLINE";
-    case POLE_STATE_DELAYED:    return "DELAYED";
-    case POLE_STATE_OFFLINE:    return "OFFLINE";
-    case POLE_STATE_RECOVERING: return "RECOVERING";
-    default:                    return "UNKNOWN";
+    case POLE_STATE_ONLINE:                 return "ONLINE";
+    case POLE_STATE_DELAYED:                return "DELAYED";
+    case POLE_STATE_OFFLINE:                return "OFFLINE";
+    case POLE_STATE_RECOVERING:             return "RECOVERING";
+    case POLE_STATE_UNREACHABLE_VIA_PARENT: return "UNREACHABLE_VIA_PARENT";
+    default:                                return "UNKNOWN";
   }
 }
 
@@ -63,11 +65,16 @@ public:
   // Configuration API
   void setHeartbeatIntervalSec(uint16_t intervalSec);
   void setOfflineTimeoutSec(uint16_t timeoutSec);
+  void setAlertCooldownSec(uint16_t cooldownSec) { alertCooldownSec = cooldownSec; }
   uint16_t getHeartbeatIntervalSec() const { return heartbeatIntervalSec; }
   uint16_t getOfflineTimeoutSec() const { return offlineTimeoutSec; }
+  uint16_t getAlertCooldownSec() const { return alertCooldownSec; }
 
   // Query API
   PoleHealthStateMonitor getPoleState(uint16_t poleId) const;
+  bool isPoleUnreachableViaParent(uint16_t poleId) const {
+    return getPoleState(poleId) == POLE_STATE_UNREACHABLE_VIA_PARENT;
+  }
   uint16_t getMissedCount(uint16_t poleId) const;
   uint32_t getLastSeen(uint16_t poleId) const;
 
@@ -81,10 +88,11 @@ public:
 
 private:
   int findIndex(uint16_t poleId) const;
-  void queueAlert(uint16_t poleId, PoleHealthStateMonitor newState, uint32_t outageDurationSec = 0);
+  void queueAlert(uint16_t poleId, PoleHealthStateMonitor newState, uint32_t outageDurationSec = 0, uint16_t parentId = 0);
 
   uint16_t            heartbeatIntervalSec;
   uint16_t            offlineTimeoutSec;
+  uint16_t            alertCooldownSec;
   uint32_t            lastCheckMs;
 
   PoleHeartbeatStatus statuses[GW_MAX_MANAGED_POLES];
