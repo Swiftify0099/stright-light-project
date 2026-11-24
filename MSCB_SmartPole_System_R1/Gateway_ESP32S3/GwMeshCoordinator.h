@@ -31,17 +31,14 @@
   #include "../MSCBShared/Protocol.h"
   #include "../MSCBShared/NetworkTypes.h"
   #include "../MSCBShared/CommandSecurity.h"
-  #include "../MSCBShared/ReplayProtection.h"
 #elif __has_include(<CommandSecurity.h>)
   #include <Protocol.h>
   #include <NetworkTypes.h>
   #include <CommandSecurity.h>
-  #include <ReplayProtection.h>
 #else
   #include "Protocol.h"
   #include "NetworkTypes.h"
   #include "CommandSecurity.h"
-  #include "ReplayProtection.h"
 #endif
 
 #define GW_MESH_MAX_HOPS             MSCB_DEFAULT_MAX_HOPS // 6

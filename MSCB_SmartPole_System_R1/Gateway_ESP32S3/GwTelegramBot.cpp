@@ -320,7 +320,7 @@ void GwTelegramBot::cmdPoles(int64_t chatId, uint8_t page) {
   sendMessage(chatId, buf);
 }
 
-void GwTelegramBot::cmdPending(int64_t chatId, uint8_t page) {
+void GwTelegramBot::cmdPending(int64_t chatId) {
   uint8_t pCount = gwRegistry.getPendingCount();
   if (pCount == 0) {
     sendMessage(chatId, "✅ No pending pole registration requests.");
