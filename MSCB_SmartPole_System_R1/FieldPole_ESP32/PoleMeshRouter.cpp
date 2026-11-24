@@ -14,8 +14,10 @@ PoleMeshRouter::PoleMeshRouter()
     : state(ROUTING_UNINITIALIZED), myNodeId(POLE_DEFAULT_NODE_ADDRESS),
       primaryParent(MSCB_GATEWAY_NODE_ID), backupParent(MSCB_GATEWAY_NODE_ID),
       myRank(1), seqCounter(1), lastParentPacketMs(0), lastBeaconMs(0),
-      packetsForwarded(0), packetsDropped(0), neighborCount(0), childCount(0),
-      dupCacheIdx(0) {
+      packetsForwarded(0), packetsDropped(0),
+      packetsDroppedSelfLoop(0), packetsDroppedHopLimit(0),
+      packetsDroppedMalformed(0), packetsDroppedDuplicate(0),
+      neighborCount(0), childCount(0), dupCacheIdx(0) {
   memset(neighbors, 0, sizeof(neighbors));
   memset(trackedChildren, 0, sizeof(trackedChildren));
   memset(dupCache, 0, sizeof(dupCache));
@@ -57,8 +59,8 @@ void PoleMeshRouter::updateNeighborsFromBeacon(uint16_t sender, uint8_t rank,
     return;
 
   // Monotonically increasing rank loop prevention:
-  // Cannot select a parent whose primary parent is me!
-  if (priParent == myNodeId)
+  // Cannot select a parent whose primary parent is me or who is a tracked child!
+  if (priParent == myNodeId || findTrackedChild(sender) != nullptr)
     return;
 
   int idx = findNeighborIndex(sender);
@@ -109,7 +111,7 @@ bool PoleMeshRouter::selectBestParents() {
   for (uint8_t i = 0; i < neighborCount; i++) {
     // Monotonically increasing rank rule: parent must have lower or valid rank
     // Gateway is Rank 0
-    if (neighbors[i].primaryParent == myNodeId)
+    if (neighbors[i].primaryParent == myNodeId || findTrackedChild(neighbors[i].nodeAddress) != nullptr)
       continue; // Loop prevention
 
     if (neighbors[i].linkScore > bestScore) {
@@ -126,10 +128,10 @@ bool PoleMeshRouter::selectBestParents() {
   if (bestIdx >= 0) {
     primaryParent = neighbors[bestIdx].nodeAddress;
     myRank = neighbors[bestIdx].rank + 1; // Strict monotonic rank
-    if (secondBestIdx >= 0) {
+    if (secondBestIdx >= 0 && neighbors[secondBestIdx].nodeAddress != primaryParent) {
       backupParent = neighbors[secondBestIdx].nodeAddress;
     } else {
-      backupParent = primaryParent;
+      backupParent = 0; // Clear backup if no distinct candidate exists
     }
 
     state = ROUTING_CONNECTED;
@@ -217,15 +219,49 @@ bool PoleMeshRouter::handleReceivedWireFrame(const MeshWireFrame &frame,
                                              bool &outSendAction) {
   outSendAction = false;
 
-  // Hop Count Limit Enforcement
-  if (frame.header.hopCount > frame.header.maxHops) {
+  // A. Self-Loop Prevention: Reject self-originated packets immediately
+  if (frame.header.srcAddress == myNodeId) {
     packetsDropped++;
+    packetsDroppedSelfLoop++;
+    return false;
+  }
+
+  // B. Validate packet metadata
+  // Check magic numbers and protocol version
+  if (frame.header.magic[0] != MSCB_PROTOCOL_MAGIC_0 ||
+      frame.header.magic[1] != MSCB_PROTOCOL_MAGIC_1 ||
+      frame.header.version != MSCB_PROTOCOL_VERSION) {
+    packetsDropped++;
+    packetsDroppedMalformed++;
+    return false;
+  }
+
+  // Check valid source and destination IDs
+  if (frame.header.srcAddress == 0 || frame.header.srcAddress == MSCB_BROADCAST_NODE_ID ||
+      frame.header.dstAddress == 0) {
+    packetsDropped++;
+    packetsDroppedMalformed++;
+    return false;
+  }
+
+  // Check payload length limit
+  if (frame.header.payloadLen > MSCB_MAX_PAYLOAD_SIZE) {
+    packetsDropped++;
+    packetsDroppedMalformed++;
+    return false;
+  }
+
+  // Hop Count Limit Enforcement (hopCount >= maxHops cannot be forwarded further)
+  if (frame.header.hopCount >= frame.header.maxHops) {
+    packetsDropped++;
+    packetsDroppedHopLimit++;
     return false;
   }
 
   // Duplicate Suppression
   if (isDuplicate(frame.header.srcAddress, frame.header.seqNumber)) {
     packetsDropped++;
+    packetsDroppedDuplicate++;
     return false;
   }
   addDuplicate(frame.header.srcAddress, frame.header.seqNumber);
@@ -237,6 +273,13 @@ bool PoleMeshRouter::handleReceivedWireFrame(const MeshWireFrame &frame,
     if (state == ROUTING_FAILOVER) {
       state = ROUTING_CONNECTED;
     }
+  }
+
+  // Child Packet Tracking:
+  // If destination is Gateway (uplink) and this node is nextHop (or broadcast relay)
+  if (frame.header.dstAddress == MSCB_GATEWAY_NODE_ID &&
+      (frame.header.nextHop == myNodeId || frame.header.nextHop == MSCB_BROADCAST_NODE_ID)) {
+    onChildPacketReceived(frame.header.srcAddress, frame.header.seqNumber, rssi, snr, frame.header.type);
   }
 
   // Process Beacons
@@ -279,6 +322,116 @@ bool PoleMeshRouter::handleReceivedWireFrame(const MeshWireFrame &frame,
   return false;
 }
 
+void PoleMeshRouter::onChildPacketReceived(uint16_t childId, uint32_t seq,
+                                           int16_t rssi, int8_t snr,
+                                           uint8_t pktType) {
+  (void)pktType;
+  // Validate sender
+  if (childId == 0 || childId == myNodeId || childId == MSCB_GATEWAY_NODE_ID ||
+      childId == MSCB_BROADCAST_NODE_ID) {
+    return;
+  }
+
+  uint32_t now = millis();
+  int foundIdx = -1;
+
+  for (uint8_t i = 0; i < childCount; i++) {
+    if (trackedChildren[i].childPoleId == childId) {
+      foundIdx = (int)i;
+      break;
+    }
+  }
+
+  if (foundIdx >= 0) {
+    // Child already tracked: update record
+    // Sequence check: guard against replay
+    if (seq != 0 && seq <= trackedChildren[foundIdx].lastSeqNumber &&
+        (trackedChildren[foundIdx].lastSeqNumber - seq < 10000)) {
+      // Replayed or stale sequence, do not advance sequence or timestamp falsely
+      return;
+    }
+
+    trackedChildren[foundIdx].lastSeenMs = now;
+    if (seq > trackedChildren[foundIdx].lastSeqNumber || trackedChildren[foundIdx].lastSeqNumber == 0) {
+      trackedChildren[foundIdx].lastSeqNumber = seq;
+    }
+    if (rssi != 0) trackedChildren[foundIdx].lastRssi = rssi;
+    if (snr != 0) trackedChildren[foundIdx].lastSnr = snr;
+    trackedChildren[foundIdx].missedPings = 0;
+
+    if (trackedChildren[foundIdx].state != CHILD_STATE_ONLINE) {
+      trackedChildren[foundIdx].state = CHILD_STATE_ONLINE;
+      trackedChildren[foundIdx].reportedFault = false;
+    }
+  } else {
+    // New child node: add if capacity allows
+    if (childCount < MESH_MAX_TRACKED_CHILDREN) {
+      uint8_t idx = childCount++;
+      trackedChildren[idx].childPoleId = childId;
+      trackedChildren[idx].lastSeenMs = now;
+      trackedChildren[idx].lastHeartbeatEpoch = 0;
+      trackedChildren[idx].lastSeqNumber = seq;
+      trackedChildren[idx].lastRssi = rssi;
+      trackedChildren[idx].lastSnr = snr;
+      trackedChildren[idx].state = CHILD_STATE_ONLINE;
+      trackedChildren[idx].missedPings = 0;
+      trackedChildren[idx].reportedFault = false;
+    } else {
+      // Table full: safely evict oldest offline child if available
+      int offlineIdx = -1;
+      uint32_t oldestMs = now;
+      for (uint8_t i = 0; i < childCount; i++) {
+        if (trackedChildren[i].state == CHILD_STATE_OFFLINE && trackedChildren[i].lastSeenMs < oldestMs) {
+          oldestMs = trackedChildren[i].lastSeenMs;
+          offlineIdx = (int)i;
+        }
+      }
+      if (offlineIdx >= 0) {
+        trackedChildren[offlineIdx].childPoleId = childId;
+        trackedChildren[offlineIdx].lastSeenMs = now;
+        trackedChildren[offlineIdx].lastHeartbeatEpoch = 0;
+        trackedChildren[offlineIdx].lastSeqNumber = seq;
+        trackedChildren[offlineIdx].lastRssi = rssi;
+        trackedChildren[offlineIdx].lastSnr = snr;
+        trackedChildren[offlineIdx].state = CHILD_STATE_ONLINE;
+        trackedChildren[offlineIdx].missedPings = 0;
+        trackedChildren[offlineIdx].reportedFault = false;
+      }
+    }
+  }
+}
+
+const TrackedChildNode *PoleMeshRouter::getTrackedChild(uint8_t idx) const {
+  if (idx >= childCount)
+    return NULL;
+  return &trackedChildren[idx];
+}
+
+const TrackedChildNode *PoleMeshRouter::findTrackedChild(uint16_t childId) const {
+  for (uint8_t i = 0; i < childCount; i++) {
+    if (trackedChildren[i].childPoleId == childId) {
+      return &trackedChildren[i];
+    }
+  }
+  return NULL;
+}
+
+void PoleMeshRouter::checkChildTimeouts(uint32_t nowMs) {
+  for (uint8_t i = 0; i < childCount; i++) {
+    uint32_t elapsed = (nowMs >= trackedChildren[i].lastSeenMs) ? (nowMs - trackedChildren[i].lastSeenMs) : 0;
+    if (elapsed >= MESH_CHILD_TIMEOUT_MS) {
+      if (trackedChildren[i].state != CHILD_STATE_OFFLINE) {
+        trackedChildren[i].state = CHILD_STATE_OFFLINE;
+        trackedChildren[i].reportedFault = true;
+      }
+    } else if (elapsed >= MESH_CHILD_SUSPECTED_MS) {
+      if (trackedChildren[i].state == CHILD_STATE_ONLINE) {
+        trackedChildren[i].state = CHILD_STATE_SUSPECTED;
+      }
+    }
+  }
+}
+
 void PoleMeshRouter::service() {
   uint32_t now = millis();
 
@@ -289,7 +442,10 @@ void PoleMeshRouter::service() {
     }
   }
 
-  // 2. Periodic Beacon Broadcast (every 30s) if connected
+  // 2. Check child node timeouts (suspected / offline)
+  checkChildTimeouts(now);
+
+  // 3. Periodic Beacon Broadcast (every 30s) if connected
   if (state == ROUTING_CONNECTED &&
       (now - lastBeaconMs >= MSCB_BEACON_INTERVAL_MS)) {
     lastBeaconMs = now;

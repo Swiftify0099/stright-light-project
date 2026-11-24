@@ -32,6 +32,8 @@ void PoleHeartbeatSender::sendHeartbeat() {
   hb.feederStateMask = poleActuators.getActiveRelayMask();
   hb.auxFeedbackMask = poleFeederMgr.readContactorAuxMask();
   hb.mcbStatusMask = poleFeederMgr.readMcbTripMask();
+  hb.auxFeedbackValid = poleFeederMgr.isAuxHardwareDetected() ? 1 : 0;
+  hb.mcbStatusValid = poleFeederMgr.isAuxHardwareDetected() ? 1 : 0;
   hb.uptimeSec = millis() / 1000;
   hb.busVoltageV = poleMetrology.getBusVoltageR();
   float sumCurr = 0.0f;

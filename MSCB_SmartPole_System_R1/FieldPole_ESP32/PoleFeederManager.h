@@ -75,6 +75,8 @@ public:
   bool isAuxHardwareDetected() const { return auxHardwareDetected; }
   uint8_t readContactorAuxMask();
   uint8_t readMcbTripMask();
+  ContactorState getContactorState(uint8_t feederId1Based);
+  McbState getMcbState(uint8_t feederId1Based);
 
   // Actuation API
   FeederCommandAckState executeFeederSwitch(uint8_t feederId1Based, uint8_t action);

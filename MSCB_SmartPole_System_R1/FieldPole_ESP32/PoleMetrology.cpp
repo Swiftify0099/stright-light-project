@@ -503,6 +503,27 @@ MeasurementFreshness PoleMetrology::getChannelFreshness(uint8_t logicalChId1Base
   return channelFreshness[logicalChId1Based - 1];
 }
 
+MeasurementValidity PoleMetrology::getMeasurementValidity(uint8_t logicalChId1Based) const {
+  if (logicalChId1Based < 1 || logicalChId1Based > METROLOGY_TOTAL_ACTIVE_CH) {
+    return MEAS_UNKNOWN;
+  }
+  uint8_t idx = logicalChId1Based - 1;
+  if (channelStates[idx] == CHANNEL_ADC_NOT_CONNECTED) {
+    return MEAS_SENSOR_UNAVAILABLE;
+  }
+  if (!calibrationTable[idx].isValid) {
+    return MEAS_SENSOR_UNAVAILABLE;
+  }
+  if (channelStates[idx] != CHANNEL_STATE_OK) {
+    return MEAS_INVALID;
+  }
+  float val = channelRmsValues[idx];
+  if (isnan(val)) {
+    return MEAS_INVALID;
+  }
+  return MEAS_VALID;
+}
+
 float PoleMetrology::getChannelValue(uint8_t logicalChId1Based) const {
   if (logicalChId1Based < 1 || logicalChId1Based > METROLOGY_TOTAL_ACTIVE_CH) {
     return NAN;

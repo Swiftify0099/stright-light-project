@@ -230,7 +230,8 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           }
           gwRegistry.updateNodeTelemetry(hb.poleId, hb.primaryParent, hb.backupParent,
                                          hb.rank, hb.feederStateMask, hb.auxFeedbackMask, hb.mcbStatusMask,
-                                         hb.busVoltageV, hb.totalCurrentA, rssi, snr);
+                                         hb.busVoltageV, hb.totalCurrentA, rssi, snr,
+                                         hb.auxFeedbackValid, hb.mcbStatusValid);
 
           // Send Heartbeat ACK
           MeshWireFrame ackFrame;
@@ -404,6 +405,8 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
             p->feederStateMask = ack.currentRelayMask;
             p->auxFeedbackMask = ack.currentAuxMask;
             p->mcbStatusMask = ack.currentMcbMask;
+            p->auxFeedbackValid = ack.auxFeedbackValid;
+            p->mcbStatusValid = ack.mcbStatusValid;
           }
         }
         break;

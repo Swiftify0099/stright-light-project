@@ -115,6 +115,8 @@ struct PktHeartbeatPingPayload {
   uint8_t  feederStateMask;      // bits 0..5
   uint8_t  auxFeedbackMask;      // bits 0..5 contactor aux
   uint8_t  mcbStatusMask;        // bits 0..5 mcb aux
+  uint8_t  auxFeedbackValid;     // 1 = Valid physical contactor feedback, 0 = NOT_CONNECTED / UNKNOWN
+  uint8_t  mcbStatusValid;       // 1 = Valid MCB feedback, 0 = NOT_CONNECTED / UNKNOWN
   uint32_t uptimeSec;
   float    busVoltageV;          // R-phase bus voltage or avg
   float    totalCurrentA;        // aggregate current

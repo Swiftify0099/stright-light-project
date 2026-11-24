@@ -33,7 +33,19 @@ typedef bool boolean;
 #define HEX 16
 #define DEC 10
 
-static uint8_t g_pinStates[40] = {0};
+#if defined(ARDUINO_MOCK_IMPLEMENTATION)
+uint8_t g_pinStates[40] = {
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+};
+unsigned long g_simulatedMillis = 1000UL;
+#else
+extern uint8_t g_pinStates[40];
+extern unsigned long g_simulatedMillis;
+#endif
+
 inline void pinMode(uint8_t, uint8_t) {}
 inline void digitalWrite(uint8_t pin, uint8_t val) {
   if (pin < 40) g_pinStates[pin] = val;
@@ -43,7 +55,6 @@ inline int digitalRead(uint8_t pin) {
 }
 inline void delayMicroseconds(unsigned long) {}
 
-static unsigned long g_simulatedMillis = 1000UL;
 inline unsigned long millis() { return g_simulatedMillis; }
 inline void delay(unsigned long ms) { g_simulatedMillis += ms; }
 

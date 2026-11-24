@@ -29,22 +29,36 @@
 
 enum PoleHealthStateMonitor : uint8_t {
   POLE_STATE_ONLINE                 = 0,
-  POLE_STATE_DELAYED                = 1,
+  POLE_STATE_SUSPECTED              = 1,
+  POLE_STATE_DELAYED                = 1, // Alias for backward compatibility
   POLE_STATE_OFFLINE                = 2,
   POLE_STATE_RECOVERING             = 3,
-  POLE_STATE_UNREACHABLE_VIA_PARENT = 4
+  POLE_STATE_UNREACHABLE_VIA_PARENT = 4,
+  POLE_STATE_UNKNOWN                = 5
 };
 
 inline const char* poleHealthStateToString(PoleHealthStateMonitor st) {
   switch (st) {
     case POLE_STATE_ONLINE:                 return "ONLINE";
-    case POLE_STATE_DELAYED:                return "DELAYED";
+    case POLE_STATE_SUSPECTED:              return "SUSPECTED";
     case POLE_STATE_OFFLINE:                return "OFFLINE";
     case POLE_STATE_RECOVERING:             return "RECOVERING";
     case POLE_STATE_UNREACHABLE_VIA_PARENT: return "UNREACHABLE_VIA_PARENT";
+    case POLE_STATE_UNKNOWN:
     default:                                return "UNKNOWN";
   }
 }
+
+#define GW_ALERT_QUEUE_CAPACITY 16
+
+struct GwAlertEvent {
+  uint16_t               poleId;
+  PoleHealthStateMonitor newState;
+  uint32_t               eventTimestampEpoch;
+  uint16_t               parentId;
+  uint32_t               durationSec;
+  char                   reason[48];
+};
 
 struct PoleHeartbeatStatus {
   uint16_t               poleId;
@@ -53,6 +67,7 @@ struct PoleHeartbeatStatus {
   PoleHealthStateMonitor currentState;
   PoleHealthStateMonitor reportedState; // for alert deduplication
   uint32_t               stateChangeTimestamp;
+  uint32_t               lastAlertEpoch;       // per-pole cooldown tracking
 };
 
 class GwHeartbeatMonitor {
@@ -78,17 +93,25 @@ public:
   uint16_t getMissedCount(uint16_t poleId) const;
   uint32_t getLastSeen(uint16_t poleId) const;
 
-  // Telegram alert queue
-  bool hasPendingAlert() const { return alertPending; }
+  // Bounded Telegram alert queue API (R3.2.1)
+  bool hasPendingAlert() const { return alertQueueCount > 0; }
+  uint8_t getAlertQueueCount() const { return alertQueueCount; }
   const char* getNextAlertText();
-  void clearPendingAlert() { alertPending = false; }
+  bool popNextAlert(GwAlertEvent &outEvent);
+  void clearPendingAlert();
+
+  // Diagnostic counters
+  uint32_t getAlertsQueuedCount() const { return alertsQueuedCount; }
+  uint32_t getAlertsDroppedCount() const { return alertsDroppedCount; }
+  uint32_t getAlertsDeduplicatedCount() const { return alertsDeduplicatedCount; }
 
   // Record heartbeat ping received
   void onHeartbeatReceived(uint16_t poleId, uint32_t nowEpoch);
 
 private:
   int findIndex(uint16_t poleId) const;
-  void queueAlert(uint16_t poleId, PoleHealthStateMonitor newState, uint32_t outageDurationSec = 0, uint16_t parentId = 0);
+  void queueAlert(uint16_t poleId, PoleHealthStateMonitor newState, uint32_t outageDurationSec = 0,
+                  uint16_t parentId = 0, const char* reason = "TIMEOUT", uint32_t eventEpoch = 0);
 
   uint16_t            heartbeatIntervalSec;
   uint16_t            offlineTimeoutSec;
@@ -98,8 +121,16 @@ private:
   PoleHeartbeatStatus statuses[GW_MAX_MANAGED_POLES];
   uint8_t             statusCount;
 
-  bool                alertPending;
-  char                alertBuffer[192];
+  GwAlertEvent        alertQueue[GW_ALERT_QUEUE_CAPACITY];
+  uint8_t             alertQueueHead;
+  uint8_t             alertQueueTail;
+  uint8_t             alertQueueCount;
+
+  uint32_t            alertsQueuedCount;
+  uint32_t            alertsDroppedCount;
+  uint32_t            alertsDeduplicatedCount;
+
+  char                alertFormattedBuffer[384];
 
 #if defined(ARDUINO)
   Preferences         prefs;

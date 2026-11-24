@@ -56,7 +56,7 @@ public:
   void showDashboard(int64_t chatId);
   void showPolesMenu(int64_t chatId, uint8_t page = 0);
   void showPoleDetail(int64_t chatId, uint16_t poleId);
-  void showPoleFeederList(int64_t chatId, uint16_t poleId);
+  void showPoleFeederList(int64_t chatId, uint16_t poleId, uint8_t page = 0);
   void showFeederControlDetail(int64_t chatId, uint16_t poleId, uint8_t feederId);
   void showVoltageDashboard(int64_t chatId, uint16_t poleId = 0);
   void showFeederPoleSelectMenu(int64_t chatId, uint8_t page = 0);
@@ -68,7 +68,7 @@ public:
   void showConfirmAllPoles(int64_t chatId, uint8_t action);
   void showFeederScheduleMenu(int64_t chatId, uint8_t page = 0);
   void showSchedulePoleSelect(int64_t chatId, uint8_t page = 0);
-  void showScheduleFeederSelect(int64_t chatId, uint16_t poleId);
+  void showScheduleFeederSelect(int64_t chatId, uint16_t poleId, uint8_t page = 0);
   void showScheduleActionSelect(int64_t chatId, uint16_t poleId, uint8_t feederId);
   void showMeshTimeSync(int64_t chatId);
   void showWifiSettings(int64_t chatId);
@@ -132,6 +132,17 @@ private:
 public:
   const ActiveRegistrationWizard& getActiveWizard() const { return activeWizard; }
   void resetActiveWizard() { memset(&activeWizard, 0, sizeof(activeWizard)); }
+
+  const char* getLastSentKeyboardJson() const { return lastSentKeyboardJson; }
+  const char* getLastSentMessageText() const { return lastSentMessageText; }
+  void clearLastSent() {
+    lastSentKeyboardJson[0] = '\0';
+    lastSentMessageText[0] = '\0';
+  }
+
+private:
+  char lastSentKeyboardJson[1024];
+  char lastSentMessageText[1024];
 
 private:
 #if defined(ARDUINO)

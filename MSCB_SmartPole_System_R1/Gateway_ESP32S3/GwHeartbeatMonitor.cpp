@@ -16,10 +16,16 @@ GwHeartbeatMonitor::GwHeartbeatMonitor() :
   alertCooldownSec(300),
   lastCheckMs(0),
   statusCount(0),
-  alertPending(false)
+  alertQueueHead(0),
+  alertQueueTail(0),
+  alertQueueCount(0),
+  alertsQueuedCount(0),
+  alertsDroppedCount(0),
+  alertsDeduplicatedCount(0)
 {
   memset(statuses, 0, sizeof(statuses));
-  memset(alertBuffer, 0, sizeof(alertBuffer));
+  memset(alertQueue, 0, sizeof(alertQueue));
+  memset(alertFormattedBuffer, 0, sizeof(alertFormattedBuffer));
 }
 
 bool GwHeartbeatMonitor::begin() {
@@ -73,6 +79,7 @@ void GwHeartbeatMonitor::onHeartbeatReceived(uint16_t poleId, uint32_t nowEpoch)
       statuses[idx].currentState = POLE_STATE_ONLINE;
       statuses[idx].reportedState = POLE_STATE_ONLINE;
       statuses[idx].stateChangeTimestamp = nowEpoch;
+      statuses[idx].lastAlertEpoch = 0;
     } else {
       return;
     }
@@ -81,12 +88,16 @@ void GwHeartbeatMonitor::onHeartbeatReceived(uint16_t poleId, uint32_t nowEpoch)
   statuses[idx].lastSeenEpoch = nowEpoch;
   statuses[idx].missedCount = 0;
 
-  if (statuses[idx].currentState == POLE_STATE_OFFLINE) {
+  if (statuses[idx].currentState == POLE_STATE_OFFLINE ||
+      statuses[idx].currentState == POLE_STATE_UNREACHABLE_VIA_PARENT) {
     // Node recovering after being offline!
     statuses[idx].currentState = POLE_STATE_RECOVERING;
-    uint32_t outageDuration = nowEpoch - statuses[idx].stateChangeTimestamp;
+    uint32_t outageDuration = (nowEpoch >= statuses[idx].stateChangeTimestamp) ?
+                              (nowEpoch - statuses[idx].stateChangeTimestamp) : 0;
     statuses[idx].stateChangeTimestamp = nowEpoch;
-    queueAlert(poleId, POLE_STATE_RECOVERING, outageDuration);
+    queueAlert(poleId, POLE_STATE_RECOVERING, outageDuration, 0, "RESTORED_ONLINE", nowEpoch);
+    statuses[idx].reportedState = POLE_STATE_RECOVERING;
+    statuses[idx].lastAlertEpoch = nowEpoch;
   } else if (statuses[idx].currentState != POLE_STATE_ONLINE) {
     statuses[idx].currentState = POLE_STATE_ONLINE;
     statuses[idx].reportedState = POLE_STATE_ONLINE;
@@ -109,6 +120,7 @@ void GwHeartbeatMonitor::checkHealth(uint32_t nowEpoch) {
         statuses[idx].currentState = POLE_STATE_ONLINE;
         statuses[idx].reportedState = POLE_STATE_ONLINE;
         statuses[idx].stateChangeTimestamp = nowEpoch;
+        statuses[idx].lastAlertEpoch = 0;
       } else {
         continue;
       }
@@ -129,54 +141,123 @@ void GwHeartbeatMonitor::checkHealth(uint32_t nowEpoch) {
       }
 
       PoleHealthStateMonitor targetState = parentOffline ? POLE_STATE_UNREACHABLE_VIA_PARENT : POLE_STATE_OFFLINE;
+      char cascadeReasonBuf[48];
+      if (parentOffline) {
+        snprintf(cascadeReasonBuf, sizeof(cascadeReasonBuf), "Parent 0x%04X Offline", parentId);
+      }
+      const char* reason = parentOffline ? cascadeReasonBuf : "HEARTBEAT_TIMEOUT";
 
       if (statuses[idx].currentState != targetState) {
         statuses[idx].currentState = targetState;
         statuses[idx].stateChangeTimestamp = nowEpoch;
 
-        // Deduplication: Only queue alert if we haven't already reported this state
-        if (statuses[idx].reportedState != targetState) {
-          queueAlert(pid, targetState, elapsedSec, parentId);
+        // Deduplication & Cooldown: Only queue alert if state changed and cooldown elapsed
+        bool cooldownOk = (statuses[idx].lastAlertEpoch == 0) || 
+                          (nowEpoch >= statuses[idx].lastAlertEpoch + alertCooldownSec);
+
+        if (statuses[idx].reportedState != targetState && cooldownOk) {
+          queueAlert(pid, targetState, elapsedSec, parentId, reason, nowEpoch);
           statuses[idx].reportedState = targetState;
+          statuses[idx].lastAlertEpoch = nowEpoch;
+        } else if (statuses[idx].reportedState != targetState) {
+          alertsDeduplicatedCount++;
         }
       }
     } else if (elapsedSec >= heartbeatIntervalSec) {
       if (statuses[idx].currentState == POLE_STATE_ONLINE) {
-        statuses[idx].currentState = POLE_STATE_DELAYED;
+        statuses[idx].currentState = POLE_STATE_SUSPECTED;
       }
     }
   }
 }
 
-void GwHeartbeatMonitor::queueAlert(uint16_t poleId, PoleHealthStateMonitor newState, uint32_t durationSec, uint16_t parentId) {
-  RegisteredPole* pole = gwRegistry.findPoleById(poleId);
-  const char* poleName = pole ? pole->stringId : "POLE";
-
-  if (newState == POLE_STATE_OFFLINE) {
-    snprintf(alertBuffer, sizeof(alertBuffer),
-             "🚨 [ALERT: OFFLINE] %s (ID 0x%04X) is unreachable!\nMissed heartbeats: %lu s (Timeout: %u s)",
-             poleName, poleId, (unsigned long)durationSec, offlineTimeoutSec);
-    alertPending = true;
-  } else if (newState == POLE_STATE_UNREACHABLE_VIA_PARENT) {
-    snprintf(alertBuffer, sizeof(alertBuffer),
-             "⚠️ [CASCADE ISSUE: UNREACHABLE] %s (ID 0x%04X) unreachable via Parent 0x%04X!\nMissed heartbeats: %lu s",
-             poleName, poleId, parentId, (unsigned long)durationSec);
-    alertPending = true;
-  } else if (newState == POLE_STATE_RECOVERING) {
-    snprintf(alertBuffer, sizeof(alertBuffer),
-             "✅ [RESTORED: ONLINE] %s (ID 0x%04X) reconnected after %lu s outage.",
-             poleName, poleId, (unsigned long)durationSec);
-    alertPending = true;
+void GwHeartbeatMonitor::queueAlert(uint16_t poleId, PoleHealthStateMonitor newState,
+                                    uint32_t durationSec, uint16_t parentId,
+                                    const char* reason, uint32_t eventEpoch) {
+  if (alertQueueCount >= GW_ALERT_QUEUE_CAPACITY) {
+    alertsDroppedCount++;
+    return; // Safe queue overflow: do not corrupt or overwrite unread alerts
   }
+
+  GwAlertEvent &ev = alertQueue[alertQueueHead];
+  ev.poleId = poleId;
+  ev.newState = newState;
+  ev.eventTimestampEpoch = (eventEpoch != 0) ? eventEpoch : (uint32_t)millis() / 1000;
+  ev.parentId = parentId;
+  ev.durationSec = durationSec;
+  strncpy(ev.reason, (reason != NULL) ? reason : "TIMEOUT", sizeof(ev.reason) - 1);
+  ev.reason[sizeof(ev.reason) - 1] = '\0';
+
+  alertQueueHead = (alertQueueHead + 1) % GW_ALERT_QUEUE_CAPACITY;
+  alertQueueCount++;
+  alertsQueuedCount++;
 }
 
 const char* GwHeartbeatMonitor::getNextAlertText() {
-  return alertBuffer;
+  if (alertQueueCount == 0) return "";
+  const GwAlertEvent &ev = alertQueue[alertQueueTail];
+  RegisteredPole* pole = gwRegistry.findPoleById(ev.poleId);
+  const char* poleName = (pole && strlen(pole->displayName) > 0) ? pole->displayName : ((pole && strlen(pole->stringId) > 0) ? pole->stringId : "UNKNOWN");
+  const char* loc = (pole && strlen(pole->location) > 0) ? pole->location : "UNKNOWN";
+  const char* area = (pole && strlen(pole->area) > 0) ? pole->area : "UNKNOWN";
+
+  if (ev.newState == POLE_STATE_OFFLINE) {
+    snprintf(alertFormattedBuffer, sizeof(alertFormattedBuffer),
+             "🚨 [ALERT: OFFLINE] %s (ID 0x%04X)\n"
+             "• Location: %s (%s)\n"
+             "• State: OFFLINE\n"
+             "• Outage Duration: %lu s (Timeout: %u s)\n"
+             "• Reason: %s\n"
+             "• Timestamp: %lu",
+             poleName, ev.poleId, loc, area,
+             (unsigned long)ev.durationSec, offlineTimeoutSec,
+             ev.reason, (unsigned long)ev.eventTimestampEpoch);
+  } else if (ev.newState == POLE_STATE_UNREACHABLE_VIA_PARENT) {
+    snprintf(alertFormattedBuffer, sizeof(alertFormattedBuffer),
+             "⚠️ [CASCADE ISSUE: UNREACHABLE] %s (ID 0x%04X)\n"
+             "• Location: %s (%s)\n"
+             "• Parent ID: 0x%04X\n"
+             "• State: UNREACHABLE_VIA_PARENT\n"
+             "• Duration: %lu s\n"
+             "• Reason: Parent node unreachable / cascade\n"
+             "• Timestamp: %lu",
+             poleName, ev.poleId, loc, area, ev.parentId,
+             (unsigned long)ev.durationSec, (unsigned long)ev.eventTimestampEpoch);
+  } else if (ev.newState == POLE_STATE_RECOVERING) {
+    snprintf(alertFormattedBuffer, sizeof(alertFormattedBuffer),
+             "✅ [RESTORED: ONLINE] %s (ID 0x%04X)\n"
+             "• Location: %s (%s)\n"
+             "• State: ONLINE\n"
+             "• Outage Duration: %lu s\n"
+             "• Timestamp: %lu",
+             poleName, ev.poleId, loc, area,
+             (unsigned long)ev.durationSec, (unsigned long)ev.eventTimestampEpoch);
+  } else {
+    snprintf(alertFormattedBuffer, sizeof(alertFormattedBuffer),
+             "ℹ️ [STATUS UPDATE] %s (ID 0x%04X) state: %s",
+             poleName, ev.poleId, poleHealthStateToString(ev.newState));
+  }
+  return alertFormattedBuffer;
+}
+
+bool GwHeartbeatMonitor::popNextAlert(GwAlertEvent &outEvent) {
+  if (alertQueueCount == 0) return false;
+  outEvent = alertQueue[alertQueueTail];
+  alertQueueTail = (alertQueueTail + 1) % GW_ALERT_QUEUE_CAPACITY;
+  alertQueueCount--;
+  return true;
+}
+
+void GwHeartbeatMonitor::clearPendingAlert() {
+  if (alertQueueCount > 0) {
+    alertQueueTail = (alertQueueTail + 1) % GW_ALERT_QUEUE_CAPACITY;
+    alertQueueCount--;
+  }
 }
 
 PoleHealthStateMonitor GwHeartbeatMonitor::getPoleState(uint16_t poleId) const {
   int idx = findIndex(poleId);
-  if (idx < 0) return POLE_STATE_ONLINE;
+  if (idx < 0) return POLE_STATE_UNKNOWN;
   return statuses[idx].currentState;
 }
 

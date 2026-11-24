@@ -45,7 +45,8 @@
 #define MESH_MAX_HOPS                MSCB_DEFAULT_MAX_HOPS // 6
 #define MESH_PARENT_TIMEOUT_MS       90000UL // 90 seconds without parent packet = link loss
 #define MESH_MAX_TRACKED_CHILDREN    12
-#define MESH_CHILD_TIMEOUT_MS        90000UL
+#define MESH_CHILD_SUSPECTED_MS      45000UL // 45 seconds without packet = suspected
+#define MESH_CHILD_TIMEOUT_MS        90000UL // 90 seconds without packet = offline
 
 enum NodeRoutingState : uint8_t {
   ROUTING_UNINITIALIZED = 0,
@@ -66,12 +67,32 @@ inline const char* routingStateToString(NodeRoutingState st) {
   }
 }
 
+enum ChildNodeState : uint8_t {
+  CHILD_STATE_UNKNOWN   = 0,
+  CHILD_STATE_ONLINE    = 1,
+  CHILD_STATE_SUSPECTED = 2,
+  CHILD_STATE_OFFLINE   = 3
+};
+
+inline const char* childNodeStateToString(ChildNodeState st) {
+  switch (st) {
+    case CHILD_STATE_ONLINE:    return "ONLINE";
+    case CHILD_STATE_SUSPECTED: return "SUSPECTED";
+    case CHILD_STATE_OFFLINE:   return "OFFLINE";
+    default:                    return "UNKNOWN";
+  }
+}
+
 struct TrackedChildNode {
-  uint16_t childPoleId;
-  uint32_t lastSeenMs;
-  uint16_t missedPings;
-  bool     reportedFault;
-  uint32_t lastSeqNumber;
+  uint16_t       childPoleId;
+  uint32_t       lastSeenMs;
+  uint32_t       lastHeartbeatEpoch;
+  uint32_t       lastSeqNumber;
+  int16_t        lastRssi;
+  int8_t         lastSnr;
+  ChildNodeState state;
+  uint16_t       missedPings;
+  bool           reportedFault;
 };
 
 struct MeshNeighbor {
@@ -112,13 +133,16 @@ public:
   void declareOrphan();
 
   // Child Node Tracking (Parent monitors children)
-  void onChildPacketReceived(uint16_t childId, uint32_t seq);
+  void onChildPacketReceived(uint16_t childId, uint32_t seq, int16_t rssi = 0, int8_t snr = 0, uint8_t pktType = 0);
   uint8_t getTrackedChildCount() const { return childCount; }
   const TrackedChildNode* getTrackedChild(uint8_t idx) const;
+  const TrackedChildNode* findTrackedChild(uint16_t childId) const;
+  void checkChildTimeouts(uint32_t nowMs);
 
   // Gateway Reachability Verification
   bool isGatewayReachable() const {
-    return (state == ROUTING_CONNECTED || state == ROUTING_FAILOVER) && (primaryParent != 0) && (myRank < MESH_MAX_HOPS);
+    return (state == ROUTING_CONNECTED || state == ROUTING_FAILOVER) && 
+           (primaryParent != 0) && (primaryParent != myNodeId) && (myRank < MESH_MAX_HOPS);
   }
 
   // Status & Metrics
@@ -131,6 +155,10 @@ public:
 
   uint32_t getPacketsForwarded() const { return packetsForwarded; }
   uint32_t getPacketsDropped() const { return packetsDropped; }
+  uint32_t getPacketsDroppedSelfLoop() const { return packetsDroppedSelfLoop; }
+  uint32_t getPacketsDroppedHopLimit() const { return packetsDroppedHopLimit; }
+  uint32_t getPacketsDroppedMalformed() const { return packetsDroppedMalformed; }
+  uint32_t getPacketsDroppedDuplicate() const { return packetsDroppedDuplicate; }
 
 private:
   bool isDuplicate(uint16_t src, uint16_t seq);
@@ -149,6 +177,10 @@ private:
   uint32_t         lastBeaconMs;
   uint32_t         packetsForwarded;
   uint32_t         packetsDropped;
+  uint32_t         packetsDroppedSelfLoop;
+  uint32_t         packetsDroppedHopLimit;
+  uint32_t         packetsDroppedMalformed;
+  uint32_t         packetsDroppedDuplicate;
 
   MeshNeighbor     neighbors[MESH_MAX_NEIGHBORS];
   uint8_t          neighborCount;

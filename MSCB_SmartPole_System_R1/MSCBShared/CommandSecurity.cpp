@@ -2,7 +2,13 @@
 #include <string.h>
 
 #if defined(ARDUINO) && defined(ESP32)
-  #include <mbedtls/md.h>
+  #if __has_include(<mbedtls/sha256.h>)
+    #include <mbedtls/md.h>
+    #define MSCB_USE_LEGACY_MBEDTLS 1
+  #elif __has_include(<psa/crypto.h>)
+    #include <psa/crypto.h>
+    #define MSCB_USE_PSA_CRYPTO 1
+  #endif
 #endif
 
 CommandSecurity cmdSecurity;
@@ -43,6 +49,21 @@ void CommandSecurity::computeHmacSha256(
   if (!key || !data || !outHmac) return;
 
 #if defined(ARDUINO) && defined(ESP32)
+#if defined(MSCB_USE_PSA_CRYPTO)
+  psa_crypto_init();
+  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
+  psa_set_key_algorithm(&attributes, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+  psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
+
+  mbedtls_svc_key_id_t key_id = 0;
+  psa_status_t status = psa_import_key(&attributes, key, keyLen, &key_id);
+  if (status == PSA_SUCCESS) {
+    size_t mac_length = 0;
+    psa_mac_compute(key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256), data, dataLen, outHmac, MSCB_HMAC_TAG_BYTES, &mac_length);
+    psa_destroy_key(key_id);
+  }
+#elif defined(MSCB_USE_LEGACY_MBEDTLS)
   mbedtls_md_context_t ctx;
   mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
   mbedtls_md_init(&ctx);
@@ -51,6 +72,7 @@ void CommandSecurity::computeHmacSha256(
   mbedtls_md_hmac_update(&ctx, data, dataLen);
   mbedtls_md_hmac_finish(&ctx, outHmac);
   mbedtls_md_free(&ctx);
+#endif
 #else
   // Original compact keyed integrity tag for host simulation / unit test runner
   uint32_t state[8] = {

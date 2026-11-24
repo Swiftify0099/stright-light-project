@@ -104,6 +104,7 @@ public:
   // Channel Status & Measurements
   ChannelDataState getChannelState(uint8_t logicalChId1Based) const;
   MeasurementFreshness getChannelFreshness(uint8_t logicalChId1Based) const;
+  MeasurementValidity getMeasurementValidity(uint8_t logicalChId1Based) const;
   float getChannelValue(uint8_t logicalChId1Based) const;
 
   // Voltage Readings (Logical Ch 1..3: R, Y, B)

@@ -720,7 +720,8 @@ void GwNodeRegistry::updateNodeTelemetry(uint16_t poleId, uint16_t priParent,
                                          uint8_t feederMask, uint8_t auxMask,
                                          uint8_t mcbMask, float busVolt,
                                          float current, int16_t rssi,
-                                         int8_t snr) {
+                                         int8_t snr,
+                                         uint8_t auxValid, uint8_t mcbValid) {
   RegisteredPole *pole = findPoleById(poleId);
   if (!pole)
     return;
@@ -735,6 +736,10 @@ void GwNodeRegistry::updateNodeTelemetry(uint16_t poleId, uint16_t priParent,
   pole->feederStateMask = feederMask;
   pole->auxFeedbackMask = auxMask;
   pole->mcbStatusMask = mcbMask;
+  pole->auxFeedbackValid = auxValid;
+  pole->mcbStatusValid = mcbValid;
+  pole->voltageValid = (busVolt > 50.0f) ? MEAS_VALID : MEAS_SENSOR_UNAVAILABLE;
+  pole->currentValid = std::isnan(current) ? MEAS_SENSOR_UNAVAILABLE : (current > 0.0f ? MEAS_VALID : MEAS_SENSOR_UNAVAILABLE);
   pole->lastBusVoltage = busVolt;
   pole->lastCurrent = current;
   pole->lastRssi = rssi;

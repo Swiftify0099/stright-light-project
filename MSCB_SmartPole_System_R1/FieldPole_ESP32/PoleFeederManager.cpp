@@ -119,6 +119,20 @@ uint8_t PoleFeederManager::readMcbTripMask() {
 #endif
 }
 
+ContactorState PoleFeederManager::getContactorState(uint8_t feederId1Based) {
+  if (!auxHardwareDetected) return CONTACTOR_UNAVAILABLE;
+  if (feederId1Based < 1 || feederId1Based > 6) return CONTACTOR_UNKNOWN;
+  uint8_t mask = readContactorAuxMask();
+  return (mask & (1 << (feederId1Based - 1))) ? CONTACTOR_CLOSED : CONTACTOR_OPEN;
+}
+
+McbState PoleFeederManager::getMcbState(uint8_t feederId1Based) {
+  if (!auxHardwareDetected) return MCB_UNAVAILABLE;
+  if (feederId1Based < 1 || feederId1Based > 6) return MCB_UNKNOWN;
+  uint8_t mask = readMcbTripMask();
+  return (mask & (1 << (feederId1Based - 1))) ? MCB_TRIPPED : MCB_HEALTHY;
+}
+
 void PoleFeederManager::sendAckUplink(uint8_t feederId, uint32_t seqNumber, FeederCommandAckState ackState) {
   PktFeederAckPayload ack;
   ack.poleId = poleStorage.getAssignedPoleId();
@@ -294,6 +308,7 @@ void PoleFeederManager::emergencyShutdownAll(const char* reason) {
 }
 
 void PoleFeederManager::service() {
+  poleActuators.servicePhysicalAuthorization();
   if (pendingStaggerMask == 0) return;
 
   uint32_t now = millis();

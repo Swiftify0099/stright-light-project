@@ -35,10 +35,67 @@ enum FeederRelayState : uint8_t {
 };
 
 enum McbTripStatus : uint8_t {
-  MCB_STATUS_HEALTHY = 0, // Mains switch auxiliary contact closed (normal)
-  MCB_STATUS_TRIPPED = 1, // Auxiliary contact open (overload / short circuit)
-  MCB_STATUS_UNKNOWN = 2  // Input line disconnected / unmonitored
+  MCB_STATUS_HEALTHY     = 0, // Mains switch auxiliary contact closed (normal)
+  MCB_STATUS_TRIPPED     = 1, // Auxiliary contact open (overload / short circuit)
+  MCB_STATUS_UNKNOWN     = 2, // Input line disconnected / unmonitored
+  MCB_STATUS_UNAVAILABLE = 3  // Hardware unpopulated
 };
+
+// =====================================================================
+//  EXPLICIT TRUTHFUL HARDWARE FEEDBACK STATES (R3.2.1 P0)
+// =====================================================================
+enum ContactorState : uint8_t {
+  CONTACTOR_CLOSED      = 0,
+  CONTACTOR_OPEN        = 1,
+  CONTACTOR_UNKNOWN     = 2,
+  CONTACTOR_UNAVAILABLE = 3
+};
+
+inline const char* contactorStateToString(ContactorState st) {
+  switch (st) {
+    case CONTACTOR_CLOSED:      return "CLOSED";
+    case CONTACTOR_OPEN:        return "OPEN";
+    case CONTACTOR_UNKNOWN:     return "UNKNOWN";
+    case CONTACTOR_UNAVAILABLE: return "UNAVAILABLE";
+    default:                    return "UNKNOWN";
+  }
+}
+
+enum McbState : uint8_t {
+  MCB_HEALTHY     = 0,
+  MCB_TRIPPED     = 1,
+  MCB_UNKNOWN     = 2,
+  MCB_UNAVAILABLE = 3
+};
+
+inline const char* mcbStateToString(McbState st) {
+  switch (st) {
+    case MCB_HEALTHY:     return "HEALTHY";
+    case MCB_TRIPPED:     return "TRIPPED";
+    case MCB_UNKNOWN:     return "UNKNOWN";
+    case MCB_UNAVAILABLE: return "UNAVAILABLE";
+    default:              return "UNKNOWN";
+  }
+}
+
+enum MeasurementValidity : uint8_t {
+  MEAS_VALID              = 0,
+  MEAS_INVALID            = 1,
+  MEAS_SENSOR_UNAVAILABLE = 2,
+  MEAS_OUT_OF_RANGE       = 3,
+  MEAS_UNKNOWN            = 4
+};
+
+inline const char* measurementValidityToString(MeasurementValidity st) {
+  switch (st) {
+    case MEAS_VALID:              return "VALID";
+    case MEAS_INVALID:            return "INVALID";
+    case MEAS_SENSOR_UNAVAILABLE: return "SENSOR_UNAVAILABLE";
+    case MEAS_OUT_OF_RANGE:       return "OUT_OF_RANGE";
+    case MEAS_UNKNOWN:
+    default:                      return "UNKNOWN";
+  }
+}
 
 // Section 7 Mandatory Command State Progression & Explicit Truth States:
 // SENT -> RECEIVED -> ACCEPTED -> OUTPUT_CHANGED -> AUXILIARY_FEEDBACK_VERIFIED -> COMPLETED
@@ -150,9 +207,9 @@ enum AuxFeedbackState : uint8_t {
 };
 
 enum McbFeedbackState : uint8_t {
-  MCB_NOT_CONNECTED = 0,
-  MCB_UNKNOWN       = 1,
-  MCB_VALID         = 2
+  MCB_FEEDBACK_NOT_CONNECTED = 0,
+  MCB_FEEDBACK_UNKNOWN       = 1,
+  MCB_FEEDBACK_VALID         = 2
 };
 
 inline const char* auxFeedbackStateToString(AuxFeedbackState st) {
@@ -166,10 +223,10 @@ inline const char* auxFeedbackStateToString(AuxFeedbackState st) {
 
 inline const char* mcbFeedbackStateToString(McbFeedbackState st) {
   switch (st) {
-    case MCB_VALID:         return "VALID";
-    case MCB_UNKNOWN:       return "UNKNOWN";
-    case MCB_NOT_CONNECTED:
-    default:                return "NOT_CONNECTED";
+    case MCB_FEEDBACK_VALID:         return "VALID";
+    case MCB_FEEDBACK_UNKNOWN:       return "UNKNOWN";
+    case MCB_FEEDBACK_NOT_CONNECTED:
+    default:                         return "NOT_CONNECTED";
   }
 }
 

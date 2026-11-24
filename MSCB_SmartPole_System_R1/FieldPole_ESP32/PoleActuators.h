@@ -52,6 +52,12 @@ struct ActuatorChannelSpec {
     uint32_t          switchCount;      // Total operations counter (wear tracking)
 };
 
+enum PhysicalAuthStatus {
+    AUTH_STATUS_LOCKED       = 0,  // Production lock or unauthorized
+    AUTH_STATUS_UNAUTHORIZED = 1,  // Missing physical authorization
+    AUTH_STATUS_BENCH_ACTIVE = 2   // Authorized and low-voltage bench test active
+};
+
 // ─────────────────────────────────────────────────────────────
 //  POLE ACTUATORS CLASS
 // ─────────────────────────────────────────────────────────────
@@ -99,8 +105,11 @@ public:
     // 7. Low-Voltage Isolated DC Commissioning Profile & Local Physical Authorization
     void setBenchTestOverride(bool enabled) { benchTestOverride = enabled; }
     bool isBenchTestOverride() const { return benchTestOverride; }
-    void setLocalPhysicalAuthorization(bool authorized) { localPhysicalAuthGranted = authorized; }
-    bool isLocalPhysicalAuthorized() const { return localPhysicalAuthGranted; }
+    void setLocalPhysicalAuthorization(bool authorized);
+    bool isLocalPhysicalAuthorized() const;
+    void servicePhysicalAuthorization();
+    PhysicalAuthStatus getPhysicalAuthStatus() const;
+    const char* getPhysicalAuthStatusString() const;
 
     // 8. GPIO 12 Strapping Risk Audit
     bool auditStrappingPins();
@@ -114,7 +123,10 @@ private:
     bool                gpio12HazardPresent;
     bool                relaysLockedDisabled;
     bool                benchTestOverride;
-    bool                localPhysicalAuthGranted;
+    bool                softwareAuthRequested;
+    bool                physicalPinState;
+    uint32_t            physicalAuthExpiryMs;
+    uint8_t             physicalAuthDebounceCount;
 
     ActuatorChannelSpec channels[NUM_FEEDER_ACTUATORS];
 

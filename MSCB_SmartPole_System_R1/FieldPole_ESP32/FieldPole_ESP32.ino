@@ -113,7 +113,21 @@ void setup() {
     digitalWrite(POLE_FEEDER_RELAY_PINS[i], POLE_RELAY_OFF);
   }
 
-  // Initialize and audit relay actuators via driver (single source of truth: POLE_FEEDER_RELAY_PINS)
+  // Initialize Persistent Storage early to check for saved hardware pin configurations
+  poleStorage.begin();
+
+  // Load and apply saved persistent pin configuration or safely fallback
+  PoleHardwarePinConfig savedPinCfg;
+  bool pinCfgLoaded = poleStorage.loadPinConfig(savedPinCfg);
+  if (pinCfgLoaded && validateHardwarePinConfig(savedPinCfg)) {
+    Serial.println(F("[BOOT] Applying saved persistent hardware pin configuration..."));
+    poleActuators.applyPinConfiguration(savedPinCfg);
+  } else {
+    Serial.println(F("[BOOT] No valid saved pin configuration found. Falling back to default board pin mapping."));
+    poleActuators.configurePinMapping(POLE_FEEDER_RELAY_PINS);
+  }
+
+  // Initialize and audit relay actuators via driver
   poleActuators.init();
   bool diagOk = poleActuators.validateStartupState();
 
@@ -134,9 +148,6 @@ void setup() {
   // Initialize Metrology Subsystem (3x ADS131M08)
   SPI.begin(POLE_SPI_SCK_PIN, POLE_SPI_MISO_PIN, POLE_SPI_MOSI_PIN);
   bool metrologyOk = poleMetrology.begin();
-
-  // Initialize Persistent Storage
-  poleStorage.begin();
 
   // Initialize SX1278 RA-02 LoRa Radio
   bool radioOk = poleRadio.begin();

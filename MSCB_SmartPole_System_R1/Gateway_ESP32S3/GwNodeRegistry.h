@@ -114,6 +114,10 @@ struct RegisteredPole {
   uint8_t  feederStateMask;     // 6 feeders bitmask
   uint8_t  auxFeedbackMask;
   uint8_t  mcbStatusMask;
+  uint8_t  auxFeedbackValid;    // 1 = Valid physical contactor feedback, 0 = NOT_CONNECTED / UNKNOWN
+  uint8_t  mcbStatusValid;      // 1 = Valid MCB feedback, 0 = NOT_CONNECTED / UNKNOWN
+  uint8_t  voltageValid;        // MeasurementValidity
+  uint8_t  currentValid;        // MeasurementValidity
   float    lastBusVoltage;
   float    lastCurrent;
 };
@@ -192,7 +196,8 @@ public:
   // Heartbeat & Telemetry update
   void updateNodeTelemetry(uint16_t poleId, uint16_t priParent, uint16_t bkpParent,
                            uint8_t rank, uint8_t feederMask, uint8_t auxMask, uint8_t mcbMask,
-                           float busVolt, float current, int16_t rssi, int8_t snr);
+                           float busVolt, float current, int16_t rssi, int8_t snr,
+                           uint8_t auxValid = 0, uint8_t mcbValid = 0);
 
   // Handshake & Revocation Delivery Confirmations
   void confirmPoleHandshake(uint16_t poleId);

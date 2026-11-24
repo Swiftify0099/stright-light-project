@@ -17,7 +17,10 @@ PoleActuators::PoleActuators() :
     gpio12HazardPresent(false),
     relaysLockedDisabled(MSCB_RELAYS_LOCKED_DISABLED != 0),
     benchTestOverride(false),
-    localPhysicalAuthGranted(false)
+    softwareAuthRequested(false),
+    physicalPinState(false),
+    physicalAuthExpiryMs(0),
+    physicalAuthDebounceCount(0)
 {
     for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
         channels[i].pin = POLE_FEEDER_RELAY_PINS[i];
@@ -142,6 +145,14 @@ void PoleActuators::init(bool useSafeVerifiedPins) {
     Serial.printf("[ACTUATOR] Mode: %s | Polarity: Active-%s (OFF Level: %s)\n",
                   "DIAGNOSTIC_MODE", activeLow ? "LOW" : "HIGH", offLevel == HIGH ? "HIGH" : "LOW");
     Serial.println(F("[ACTUATOR] All relay outputs forced SAFE OFF during boot diagnostics."));
+
+    // 4. Configure dedicated physical commissioning authorization input
+    pinMode(POLE_PHYSICAL_AUTH_PIN, INPUT);
+    softwareAuthRequested = false;
+    physicalPinState = false;
+    physicalAuthExpiryMs = 0;
+    physicalAuthDebounceCount = 0;
+    servicePhysicalAuthorization();
 }
 
 bool PoleActuators::validateStartupState() {
@@ -198,21 +209,92 @@ ActuatorDriverState PoleActuators::getDriverState() const {
     return driverState;
 }
 
-bool PoleActuators::areRelaysLockedDisabled() const {
-#if (defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE != 0)) || \
-    (defined(MSCB_BENCH_TEST_PROFILE_ENABLED) && (MSCB_BENCH_TEST_PROFILE_ENABLED != 0))
-    // Isolated low-voltage DC commissioning profile:
-    // Requires BOTH build-time configuration AND explicit local physical authorization!
-    // Remote commands alone CANNOT enable relay switching.
-    if (benchTestOverride && localPhysicalAuthGranted) {
+void PoleActuators::servicePhysicalAuthorization() {
+    uint8_t raw = digitalRead(POLE_PHYSICAL_AUTH_PIN);
+    // Active LOW: Jumper closed to GND = LOW
+    bool pinActive = (raw == LOW);
+    if (pinActive) {
+        if (physicalAuthDebounceCount < 3) {
+            physicalAuthDebounceCount++;
+        }
+        if (physicalAuthDebounceCount >= 3) {
+            physicalPinState = true;
+        }
+    } else {
+        physicalAuthDebounceCount = 0;
+        physicalPinState = false;
+        physicalAuthExpiryMs = 0; // Immediate revocation when physical jumper is removed!
+        softwareAuthRequested = false;
+    }
+
+    // Auto-expiry check (strict 5-minute commissioning session)
+    if (physicalAuthExpiryMs > 0 && millis() >= physicalAuthExpiryMs) {
+        physicalPinState = false;
+        softwareAuthRequested = false;
+        physicalAuthExpiryMs = 0;
+    }
+
+    // If authorization lost while any relay is energized, immediate emergency shutdown!
+    if (!isLocalPhysicalAuthorized() && getActiveRelayMask() != 0) {
+        emergencyShutdownAll("PHYSICAL_AUTH_LOST");
+    }
+}
+
+void PoleActuators::setLocalPhysicalAuthorization(bool authorized) {
+    softwareAuthRequested = authorized;
+    servicePhysicalAuthorization();
+    if (authorized && physicalPinState) {
+        physicalAuthExpiryMs = millis() + POLE_PHYSICAL_AUTH_TIMEOUT_MS;
+    } else if (!authorized) {
+        physicalAuthExpiryMs = 0;
+    }
+}
+
+bool PoleActuators::isLocalPhysicalAuthorized() const {
+    // Requires BOTH physical input pin active AND software authorization request, within valid unexpired timeout!
+    // A software setter alone CANNOT grant physical authorization!
+    if (!physicalPinState || !softwareAuthRequested) {
         return false;
     }
-#endif
+    if (physicalAuthExpiryMs == 0 || millis() >= physicalAuthExpiryMs) {
+        return false;
+    }
+    return true;
+}
+
+PhysicalAuthStatus PoleActuators::getPhysicalAuthStatus() const {
+    if (areRelaysLockedDisabled()) {
+        if (!isLocalPhysicalAuthorized()) return AUTH_STATUS_UNAUTHORIZED;
+        return AUTH_STATUS_LOCKED;
+    }
+    if (benchTestOverride && isLocalPhysicalAuthorized()) {
+        return AUTH_STATUS_BENCH_ACTIVE;
+    }
+    return AUTH_STATUS_LOCKED;
+}
+
+const char* PoleActuators::getPhysicalAuthStatusString() const {
+    switch (getPhysicalAuthStatus()) {
+        case AUTH_STATUS_BENCH_ACTIVE: return "BENCH_ACTIVE";
+        case AUTH_STATUS_UNAUTHORIZED: return "UNAUTHORIZED";
+        case AUTH_STATUS_LOCKED:
+        default: return "LOCKED";
+    }
+}
+
+bool PoleActuators::areRelaysLockedDisabled() const {
+    // Isolated low-voltage DC bench test mode:
+    // Requires BOTH explicit benchTestOverride flag AND verified local physical authorization (debounced GPIO 39)!
+    // Remote commands alone CANNOT enable relay switching.
+    if (benchTestOverride && isLocalPhysicalAuthorized()) {
+        return false;
+    }
+
 #if defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
     // Production safety lock permanently enforced: Relay ON strictly blocked
     return true;
 #else
-    return relaysLockedDisabled && !(benchTestOverride && localPhysicalAuthGranted);
+    return relaysLockedDisabled;
 #endif
 }
 
@@ -227,9 +309,12 @@ void PoleActuators::setRelaysLockedDisabled(bool locked) {
 bool PoleActuators::requestRelayOn(uint8_t channel, const char* reason) {
     if (channel >= NUM_FEEDER_ACTUATORS) return false;
 
+    // Refresh and check physical authorization before any switching action
+    servicePhysicalAuthorization();
+
     // MANDATORY CRITICAL SAFETY INTERLOCK: Enforce MSCB_RELAYS_LOCKED_DISABLED
     if (areRelaysLockedDisabled()) {
-        Serial.printf("[ACTUATOR] ⛔ Relay ON Rejected: MSCB_RELAYS_LOCKED_DISABLED active (Channel %d)!\n", channel + 1);
+        Serial.printf("[ACTUATOR] ⛔ Relay ON Rejected: MSCB_RELAYS_LOCKED_DISABLED or unauthorized active (Channel %d)!\n", channel + 1);
         return false;
     }
 

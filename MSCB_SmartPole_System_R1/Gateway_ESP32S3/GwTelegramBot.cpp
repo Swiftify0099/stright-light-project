@@ -53,6 +53,8 @@ GwTelegramBot::GwTelegramBot() :
 {
   memset(botToken, 0, sizeof(botToken));
   memset(&activeWizard, 0, sizeof(activeWizard));
+  memset(lastSentKeyboardJson, 0, sizeof(lastSentKeyboardJson));
+  memset(lastSentMessageText, 0, sizeof(lastSentMessageText));
 }
 
 bool GwTelegramBot::begin() {
@@ -104,6 +106,13 @@ bool GwTelegramBot::isAuthorizedAdmin(int64_t chatId) const {
 }
 
 void GwTelegramBot::sendMessage(int64_t chatId, const char* text) {
+  if (text) {
+    strncpy(lastSentMessageText, text, sizeof(lastSentMessageText) - 1);
+    lastSentMessageText[sizeof(lastSentMessageText) - 1] = '\0';
+  } else {
+    lastSentMessageText[0] = '\0';
+  }
+
   if (!text || strlen(text) == 0) return;
   if (!gwWifi.isConnected()) return;
 
@@ -129,6 +138,19 @@ void GwTelegramBot::sendMessage(int64_t chatId, const char* text) {
 }
 
 void GwTelegramBot::sendMessageWithKeyboard(int64_t chatId, const char* text, const char* keyboardJson) {
+  if (keyboardJson) {
+    strncpy(lastSentKeyboardJson, keyboardJson, sizeof(lastSentKeyboardJson) - 1);
+    lastSentKeyboardJson[sizeof(lastSentKeyboardJson) - 1] = '\0';
+  } else {
+    lastSentKeyboardJson[0] = '\0';
+  }
+  if (text) {
+    strncpy(lastSentMessageText, text, sizeof(lastSentMessageText) - 1);
+    lastSentMessageText[sizeof(lastSentMessageText) - 1] = '\0';
+  } else {
+    lastSentMessageText[0] = '\0';
+  }
+
   if (!text || strlen(text) == 0) return;
   if (!gwWifi.isConnected()) return;
 
@@ -324,7 +346,35 @@ void GwTelegramBot::cmdPoleDetail(int64_t chatId, uint16_t poleId) {
   }
 
   PoleHealthStateMonitor state = gwHeartbeat.getPoleState(poleId);
-  char buf[448];
+
+  char auxStr[32];
+  if (p->auxFeedbackValid) {
+    snprintf(auxStr, sizeof(auxStr), "%c%c%c%c%c%c",
+             (p->auxFeedbackMask & 0x01) ? '1' : '0', (p->auxFeedbackMask & 0x02) ? '1' : '0',
+             (p->auxFeedbackMask & 0x04) ? '1' : '0', (p->auxFeedbackMask & 0x08) ? '1' : '0',
+             (p->auxFeedbackMask & 0x10) ? '1' : '0', (p->auxFeedbackMask & 0x20) ? '1' : '0');
+  } else {
+    strncpy(auxStr, "FEEDBACK NOT CONNECTED", sizeof(auxStr) - 1);
+  }
+
+  char mcbStr[32];
+  if (p->mcbStatusValid) {
+    snprintf(mcbStr, sizeof(mcbStr), "%c%c%c%c%c%c",
+             (p->mcbStatusMask & 0x01) ? '1' : '0', (p->mcbStatusMask & 0x02) ? '1' : '0',
+             (p->mcbStatusMask & 0x04) ? '1' : '0', (p->mcbStatusMask & 0x08) ? '1' : '0',
+             (p->mcbStatusMask & 0x10) ? '1' : '0', (p->mcbStatusMask & 0x20) ? '1' : '0');
+  } else {
+    strncpy(mcbStr, "FEEDBACK NOT CONNECTED", sizeof(mcbStr) - 1);
+  }
+
+  char voltStr[32];
+  if (p->lastBusVoltage > 50.0f) {
+    snprintf(voltStr, sizeof(voltStr), "%0.1f VAC", p->lastBusVoltage);
+  } else {
+    strncpy(voltStr, "SENSOR UNAVAILABLE", sizeof(voltStr) - 1);
+  }
+
+  char buf[512];
   snprintf(buf, sizeof(buf),
            "📍 *POLE DETAILS: %s*\n"
            "Logical ID: 0x%04X\n"
@@ -334,10 +384,10 @@ void GwTelegramBot::cmdPoleDetail(int64_t chatId, uint16_t poleId) {
            "Backup Parent: 0x%04X\n"
            "RF RSSI: %d dBm | SNR: %d dB\n"
            "Last Seen: %lu s ago\n"
-           "Bus Voltage: %0.1f VAC\n"
+           "Bus Voltage: %s\n"
            "Feeder Relays: %c%c%c%c%c%c (1..6)\n"
-           "Contactor Aux: %c%c%c%c%c%c\n"
-           "MCB Status:    %c%c%c%c%c%c\n"
+           "Contactor Aux: %s\n"
+           "MCB Status:    %s\n"
            "Delete: /delete_%u",
            p->stringId, p->poleId,
            p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5],
@@ -346,16 +396,12 @@ void GwTelegramBot::cmdPoleDetail(int64_t chatId, uint16_t poleId) {
            p->backupParent,
            p->lastRssi, p->lastSnr,
            (unsigned long)((millis() / 1000) - p->lastSeenTimestamp),
-           p->lastBusVoltage,
+           voltStr,
            (p->feederStateMask & 0x01) ? '1' : '0', (p->feederStateMask & 0x02) ? '1' : '0',
            (p->feederStateMask & 0x04) ? '1' : '0', (p->feederStateMask & 0x08) ? '1' : '0',
            (p->feederStateMask & 0x10) ? '1' : '0', (p->feederStateMask & 0x20) ? '1' : '0',
-           (p->auxFeedbackMask & 0x01) ? '1' : '0', (p->auxFeedbackMask & 0x02) ? '1' : '0',
-           (p->auxFeedbackMask & 0x04) ? '1' : '0', (p->auxFeedbackMask & 0x08) ? '1' : '0',
-           (p->auxFeedbackMask & 0x10) ? '1' : '0', (p->auxFeedbackMask & 0x20) ? '1' : '0',
-           (p->mcbStatusMask & 0x01) ? '1' : '0', (p->mcbStatusMask & 0x02) ? '1' : '0',
-           (p->mcbStatusMask & 0x04) ? '1' : '0', (p->mcbStatusMask & 0x08) ? '1' : '0',
-           (p->mcbStatusMask & 0x10) ? '1' : '0', (p->mcbStatusMask & 0x20) ? '1' : '0',
+           auxStr,
+           mcbStr,
            p->poleId);
   sendMessage(chatId, buf);
 }
@@ -601,7 +647,9 @@ void GwTelegramBot::showPolesMenu(int64_t chatId, uint8_t page) {
     return;
   }
 
-  uint8_t pageSize = 5;
+  // Strict maximum 6 buttons per menu:
+  // Using pageSize = 3 ensures: 3 poles (at most 2 rows) + nav row (at most 3 buttons) = max 6 buttons
+  uint8_t pageSize = 3;
   uint8_t totalPages = (total + pageSize - 1) / pageSize;
   if (page >= totalPages) page = totalPages - 1;
   uint8_t startIndex = page * pageSize;
@@ -616,19 +664,34 @@ void GwTelegramBot::showPolesMenu(int64_t chatId, uint8_t page) {
 
   String kb = "[";
   uint8_t count = 0;
-  for (uint8_t i = startIndex; i < total && count < pageSize; i++, count++) {
-    const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
-    if (!p) continue;
-    PoleHealthStateMonitor st = gwHeartbeat.getPoleState(p->poleId);
-    const char* stStr = (st == POLE_STATE_ONLINE) ? "🟢 ON" : (st == POLE_STATE_DELAYED ? "🟡 DLY" : "🔴 OFF");
-    const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
-    const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned";
-    char btn[160];
-    snprintf(btn, sizeof(btn), "[{\"text\":\"📍 %s (%s) - %s\",\"callback_data\":\"P_SEL:%u\"}],",
-             dName, stStr, loc, p->poleId);
-    kb += btn;
+  for (uint8_t i = startIndex; i < total && count < pageSize; i += 2) {
+    const RegisteredPole* p1 = gwRegistry.getPoleByIndex(i);
+    if (!p1) break;
+    count++;
+    PoleHealthStateMonitor st1 = gwHeartbeat.getPoleState(p1->poleId);
+    const char* stStr1 = (st1 == POLE_STATE_ONLINE) ? "🟢" : (st1 == POLE_STATE_SUSPECTED ? "🟡" : "🔴");
+    const char* dName1 = (strlen(p1->displayName) > 0) ? p1->displayName : p1->stringId;
+
+    const RegisteredPole* p2 = (i + 1 < total && count < pageSize) ? gwRegistry.getPoleByIndex(i + 1) : NULL;
+    if (p2) count++;
+
+    char row[280];
+    if (p2) {
+      PoleHealthStateMonitor st2 = gwHeartbeat.getPoleState(p2->poleId);
+      const char* stStr2 = (st2 == POLE_STATE_ONLINE) ? "🟢" : (st2 == POLE_STATE_SUSPECTED ? "🟡" : "🔴");
+      const char* dName2 = (strlen(p2->displayName) > 0) ? p2->displayName : p2->stringId;
+      snprintf(row, sizeof(row),
+               "[{\"text\":\"📍 %s %s\",\"callback_data\":\"P_SEL:%u\"},{\"text\":\"📍 %s %s\",\"callback_data\":\"P_SEL:%u\"}],",
+               dName1, stStr1, p1->poleId, dName2, stStr2, p2->poleId);
+    } else {
+      snprintf(row, sizeof(row),
+               "[{\"text\":\"📍 %s %s\",\"callback_data\":\"P_SEL:%u\"}],",
+               dName1, stStr1, p1->poleId);
+    }
+    kb += row;
   }
 
+  // Navigation row: at most 3 buttons (Prev, Next, Main) -> max 3 + 3 = 6 buttons total
   kb += "[";
   if (page > 0) {
     char prevBtn[48];
@@ -659,13 +722,21 @@ void GwTelegramBot::showPoleDetail(int64_t chatId, uint16_t poleId) {
   if (p->lastBusVoltage > 0.1f) {
     snprintf(voltBuf, sizeof(voltBuf), "%0.1f VAC", p->lastBusVoltage);
   } else {
-    snprintf(voltBuf, sizeof(voltBuf), "UNAVAILABLE");
+    snprintf(voltBuf, sizeof(voltBuf), "SENSOR UNAVAILABLE");
   }
 
   const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
   const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned Location";
   const char* area = (strlen(p->area) > 0) ? p->area : "None";
   const char* landmark = (strlen(p->landmark) > 0) ? p->landmark : "None";
+
+  const char* auxF[6];
+  const char* mcbF[6];
+  for (int f = 0; f < 6; f++) {
+    uint8_t bit = (1 << f);
+    auxF[f] = p->auxFeedbackValid ? ((p->auxFeedbackMask & bit) ? "CLOSED" : "OPEN") : "FEEDBACK NOT CONNECTED";
+    mcbF[f] = p->mcbStatusValid ? ((p->mcbStatusMask & bit) ? "TRIP" : "OK") : "SENSOR UNAVAILABLE";
+  }
 
   char buf[900];
   snprintf(buf, sizeof(buf),
@@ -693,12 +764,12 @@ void GwTelegramBot::showPoleDetail(int64_t chatId, uint16_t poleId) {
            p->lastRssi, p->lastSnr,
            p->primaryParent, p->rank, p->backupParent,
            voltBuf,
-           getFeederName(p->poleId, 1), (p->feederStateMask & 0x01) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x01) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x01) ? "TRIP" : "OK",
-           getFeederName(p->poleId, 2), (p->feederStateMask & 0x02) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x02) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x02) ? "TRIP" : "OK",
-           getFeederName(p->poleId, 3), (p->feederStateMask & 0x04) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x04) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x04) ? "TRIP" : "OK",
-           getFeederName(p->poleId, 4), (p->feederStateMask & 0x08) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x08) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x08) ? "TRIP" : "OK",
-           getFeederName(p->poleId, 5), (p->feederStateMask & 0x10) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x10) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x10) ? "TRIP" : "OK",
-           getFeederName(p->poleId, 6), (p->feederStateMask & 0x20) ? "⚡ ON" : "⭕ OFF", (p->auxFeedbackMask & 0x20) ? "CLOSED" : "OPEN", (p->mcbStatusMask & 0x20) ? "TRIP" : "OK");
+           getFeederName(p->poleId, 1), (p->feederStateMask & 0x01) ? "⚡ ON" : "⭕ OFF", auxF[0], mcbF[0],
+           getFeederName(p->poleId, 2), (p->feederStateMask & 0x02) ? "⚡ ON" : "⭕ OFF", auxF[1], mcbF[1],
+           getFeederName(p->poleId, 3), (p->feederStateMask & 0x04) ? "⚡ ON" : "⭕ OFF", auxF[2], mcbF[2],
+           getFeederName(p->poleId, 4), (p->feederStateMask & 0x08) ? "⚡ ON" : "⭕ OFF", auxF[3], mcbF[3],
+           getFeederName(p->poleId, 5), (p->feederStateMask & 0x10) ? "⚡ ON" : "⭕ OFF", auxF[4], mcbF[4],
+           getFeederName(p->poleId, 6), (p->feederStateMask & 0x20) ? "⚡ ON" : "⭕ OFF", auxF[5], mcbF[5]);
 
   char kb[512];
   snprintf(kb, sizeof(kb),
@@ -714,7 +785,7 @@ void GwTelegramBot::showPoleDetail(int64_t chatId, uint16_t poleId) {
   sendMessageWithKeyboard(chatId, buf, kb);
 }
 
-void GwTelegramBot::showPoleFeederList(int64_t chatId, uint16_t poleId) {
+void GwTelegramBot::showPoleFeederList(int64_t chatId, uint16_t poleId, uint8_t page) {
   RegisteredPole* p = gwRegistry.findPoleById(poleId);
   if (!p) {
     sendMessage(chatId, "❌ Pole not found.");
@@ -722,28 +793,40 @@ void GwTelegramBot::showPoleFeederList(int64_t chatId, uint16_t poleId) {
   }
   const char* poleName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
 
+  if (page > 1) page = 1;
+
   char buf[384];
   snprintf(buf, sizeof(buf),
-           "🔌 *FEEDER SELECTOR: %s (0x%04X)*\n"
+           "🔌 *FEEDER SELECTOR: %s (0x%04X) [Page %u/2]*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "Select a feeder below to inspect physical status or switch individual power:",
-           poleName, poleId);
+           poleName, poleId, page + 1);
 
   char kb[512];
-  snprintf(kb, sizeof(kb),
-           "["
-           "[{\"text\":\"F1: %s %s\",\"callback_data\":\"FDR_VIEW:%u:1\"},{\"text\":\"F2: %s %s\",\"callback_data\":\"FDR_VIEW:%u:2\"}],"
-           "[{\"text\":\"F3: %s %s\",\"callback_data\":\"FDR_VIEW:%u:3\"},{\"text\":\"F4: %s %s\",\"callback_data\":\"FDR_VIEW:%u:4\"}],"
-           "[{\"text\":\"F5: %s %s\",\"callback_data\":\"FDR_VIEW:%u:5\"},{\"text\":\"F6: %s %s\",\"callback_data\":\"FDR_VIEW:%u:6\"}],"
-           "[{\"text\":\"🔙 Back to Pole Details\",\"callback_data\":\"P_SEL:%u\"}]"
-           "]",
-           getFeederName(poleId, 1), (p->feederStateMask & 0x01) ? "⚡ON" : "⭕OFF", poleId,
-           getFeederName(poleId, 2), (p->feederStateMask & 0x02) ? "⚡ON" : "⭕OFF", poleId,
-           getFeederName(poleId, 3), (p->feederStateMask & 0x04) ? "⚡ON" : "⭕OFF", poleId,
-           getFeederName(poleId, 4), (p->feederStateMask & 0x08) ? "⚡ON" : "⭕OFF", poleId,
-           getFeederName(poleId, 5), (p->feederStateMask & 0x10) ? "⚡ON" : "⭕OFF", poleId,
-           getFeederName(poleId, 6), (p->feederStateMask & 0x20) ? "⚡ON" : "⭕OFF", poleId,
-           poleId);
+  if (page == 0) {
+    // Page 0: Feeders 1 to 4 + Next + Back = 6 buttons
+    snprintf(kb, sizeof(kb),
+             "["
+             "[{\"text\":\"F1: %s %s\",\"callback_data\":\"FDR_VIEW:%u:1\"},{\"text\":\"F2: %s %s\",\"callback_data\":\"FDR_VIEW:%u:2\"}],"
+             "[{\"text\":\"F3: %s %s\",\"callback_data\":\"FDR_VIEW:%u:3\"},{\"text\":\"F4: %s %s\",\"callback_data\":\"FDR_VIEW:%u:4\"}],"
+             "[{\"text\":\"Next ▶ (F5-F6)\",\"callback_data\":\"P_FDRS:%u:1\"},{\"text\":\"🔙 Back to Pole\",\"callback_data\":\"P_SEL:%u\"}]"
+             "]",
+             getFeederName(poleId, 1), (p->feederStateMask & 0x01) ? "⚡ON" : "⭕OFF", poleId,
+             getFeederName(poleId, 2), (p->feederStateMask & 0x02) ? "⚡ON" : "⭕OFF", poleId,
+             getFeederName(poleId, 3), (p->feederStateMask & 0x04) ? "⚡ON" : "⭕OFF", poleId,
+             getFeederName(poleId, 4), (p->feederStateMask & 0x08) ? "⚡ON" : "⭕OFF", poleId,
+             poleId, poleId);
+  } else {
+    // Page 1: Feeders 5 and 6 + Prev + Back = 4 buttons
+    snprintf(kb, sizeof(kb),
+             "["
+             "[{\"text\":\"F5: %s %s\",\"callback_data\":\"FDR_VIEW:%u:5\"},{\"text\":\"F6: %s %s\",\"callback_data\":\"FDR_VIEW:%u:6\"}],"
+             "[{\"text\":\"◀ Prev (F1-F4)\",\"callback_data\":\"P_FDRS:%u:0\"},{\"text\":\"🔙 Back to Pole\",\"callback_data\":\"P_SEL:%u\"}]"
+             "]",
+             getFeederName(poleId, 5), (p->feederStateMask & 0x10) ? "⚡ON" : "⭕OFF", poleId,
+             getFeederName(poleId, 6), (p->feederStateMask & 0x20) ? "⚡ON" : "⭕OFF", poleId,
+             poleId, poleId);
+  }
 
   sendMessageWithKeyboard(chatId, buf, kb);
 }
@@ -759,6 +842,9 @@ void GwTelegramBot::showFeederControlDetail(int64_t chatId, uint16_t poleId, uin
   bool isCmdOn = (p->feederStateMask & fBit) != 0;
   bool isAuxClosed = (p->auxFeedbackMask & fBit) != 0;
   bool isMcbTrip = (p->mcbStatusMask & fBit) != 0;
+
+  const char* auxDisp = p->auxFeedbackValid ? (isAuxClosed ? "✅ CLOSED" : "⭕ OPEN / DISCONNECTED") : "⚠️ FEEDBACK NOT CONNECTED";
+  const char* mcbDisp = p->mcbStatusValid ? (isMcbTrip ? "⚠️ TRIPPED" : "✅ HEALTHY") : "⚠️ SENSOR UNAVAILABLE";
 
   char buf[512];
   snprintf(buf, sizeof(buf),
@@ -776,8 +862,8 @@ void GwTelegramBot::showFeederControlDetail(int64_t chatId, uint16_t poleId, uin
            p->stringId, poleId,
            getFeederName(poleId, feederId),
            isCmdOn ? "⚡ ENERGIZED (ON)" : "⭕ DE-ENERGIZED (OFF)",
-           isAuxClosed ? "✅ CLOSED" : "⭕ OPEN / DISCONNECTED",
-           isMcbTrip ? "⚠️ TRIPPED" : "✅ HEALTHY");
+           auxDisp,
+           mcbDisp);
 
   char kb[384];
   snprintf(kb, sizeof(kb),
@@ -897,7 +983,7 @@ void GwTelegramBot::showFeederPoleSelectMenu(int64_t chatId, uint8_t page) {
     return;
   }
 
-  uint8_t pageSize = 5;
+  uint8_t pageSize = 3;
   uint8_t totalPages = (total + pageSize - 1) / pageSize;
   if (page >= totalPages) page = totalPages - 1;
   uint8_t startIndex = page * pageSize;
@@ -911,20 +997,27 @@ void GwTelegramBot::showFeederPoleSelectMenu(int64_t chatId, uint8_t page) {
 
   String kb = "[";
   uint8_t count = 0;
-  for (uint8_t i = startIndex; i < total && count < pageSize; i++, count++) {
-    const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
-    if (!p) continue;
-    const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
-    uint8_t activeFeeders = 0;
-    for (uint8_t f = 0; f < 6; f++) {
-      if (p->feederStateMask & (1 << f)) activeFeeders++;
-    }
+  for (uint8_t i = startIndex; i < total && count < pageSize; i += 2) {
+    const RegisteredPole* p1 = gwRegistry.getPoleByIndex(i);
+    if (!p1) break;
+    count++;
+    const char* dName1 = (strlen(p1->displayName) > 0) ? p1->displayName : p1->stringId;
 
-    char btn[160];
-    snprintf(btn, sizeof(btn),
-             "[{\"text\":\"📍 %s (0x%04X) [%u/6 ON]\",\"callback_data\":\"F_SEL:%u\"}],",
-             dName, p->poleId, activeFeeders, p->poleId);
-    kb += btn;
+    const RegisteredPole* p2 = (i + 1 < total && count < pageSize) ? gwRegistry.getPoleByIndex(i + 1) : NULL;
+    if (p2) count++;
+
+    char row[280];
+    if (p2) {
+      const char* dName2 = (strlen(p2->displayName) > 0) ? p2->displayName : p2->stringId;
+      snprintf(row, sizeof(row),
+               "[{\"text\":\"📍 %s\",\"callback_data\":\"F_SEL:%u\"},{\"text\":\"📍 %s\",\"callback_data\":\"F_SEL:%u\"}],",
+               dName1, p1->poleId, dName2, p2->poleId);
+    } else {
+      snprintf(row, sizeof(row),
+               "[{\"text\":\"📍 %s\",\"callback_data\":\"F_SEL:%u\"}],",
+               dName1, p1->poleId);
+    }
+    kb += row;
   }
 
   kb += "[";
@@ -948,63 +1041,7 @@ void GwTelegramBot::showFeederDashboard(int64_t chatId, uint16_t poleId) {
     showFeederPoleSelectMenu(chatId, 0);
     return;
   }
-
-  RegisteredPole* p = gwRegistry.findPoleById(poleId);
-  if (!p) {
-    sendMessage(chatId, "❌ Pole ID not found in active registry.");
-    showFeederPoleSelectMenu(chatId, 0);
-    return;
-  }
-
-  const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
-  const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned Location";
-
-  char buf[900];
-  snprintf(buf, sizeof(buf),
-           "🔌 *FEEDER DASHBOARD: %s*\n"
-           "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "🆔 Pole ID: `POLE-%04d (0x%04X)`\n"
-           "📍 Location: *%s*\n"
-           "⚡ Bus Voltage: *%0.1f VAC*\n"
-           "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "• F1 (%s): %s\n"
-           "• F2 (%s): %s\n"
-           "• F3 (%s): %s\n"
-           "• F4 (%s): %s\n"
-           "• F5 (%s): %s\n"
-           "• F6 (%s): %s\n"
-           "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "Explicit Feeder Controls (ON / OFF):",
-           dName, p->poleId, p->poleId, loc, p->lastBusVoltage,
-           getFeederName(p->poleId, 1), (p->feederStateMask & 0x01) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 2), (p->feederStateMask & 0x02) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 3), (p->feederStateMask & 0x04) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 4), (p->feederStateMask & 0x08) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 5), (p->feederStateMask & 0x10) ? "⚡ ON" : "⭕ OFF",
-           getFeederName(p->poleId, 6), (p->feederStateMask & 0x20) ? "⚡ ON" : "⭕ OFF");
-
-  char kb[768];
-  snprintf(kb, sizeof(kb),
-           "["
-           "[{\"text\":\"F1 ⚡ON\",\"callback_data\":\"F_SET:%u:1:1\"},{\"text\":\"F1 ⭕OFF\",\"callback_data\":\"F_SET:%u:1:0\"}],"
-           "[{\"text\":\"F2 ⚡ON\",\"callback_data\":\"F_SET:%u:2:1\"},{\"text\":\"F2 ⭕OFF\",\"callback_data\":\"F_SET:%u:2:0\"}],"
-           "[{\"text\":\"F3 ⚡ON\",\"callback_data\":\"F_SET:%u:3:1\"},{\"text\":\"F3 ⭕OFF\",\"callback_data\":\"F_SET:%u:3:0\"}],"
-           "[{\"text\":\"F4 ⚡ON\",\"callback_data\":\"F_SET:%u:4:1\"},{\"text\":\"F4 ⭕OFF\",\"callback_data\":\"F_SET:%u:4:0\"}],"
-           "[{\"text\":\"F5 ⚡ON\",\"callback_data\":\"F_SET:%u:5:1\"},{\"text\":\"F5 ⭕OFF\",\"callback_data\":\"F_SET:%u:5:0\"}],"
-           "[{\"text\":\"F6 ⚡ON\",\"callback_data\":\"F_SET:%u:6:1\"},{\"text\":\"F6 ⭕OFF\",\"callback_data\":\"F_SET:%u:6:0\"}],"
-           "[{\"text\":\"⚡ ALL ON\",\"callback_data\":\"F_ALL:%u:1\"},{\"text\":\"⭕ ALL OFF\",\"callback_data\":\"F_ALL:%u:0\"}],"
-           "[{\"text\":\"🔄 Refresh\",\"callback_data\":\"F_SEL:%u\"},{\"text\":\"⬅️ Select Pole\",\"callback_data\":\"MENU:FDR:0\"}]"
-           "]",
-           p->poleId, p->poleId,
-           p->poleId, p->poleId,
-           p->poleId, p->poleId,
-           p->poleId, p->poleId,
-           p->poleId, p->poleId,
-           p->poleId, p->poleId,
-           p->poleId, p->poleId,
-           p->poleId);
-
-  sendMessageWithKeyboard(chatId, buf, kb);
+  showPoleFeederList(chatId, poleId, 0);
 }
 
 void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
@@ -1019,7 +1056,7 @@ void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
     return;
   }
 
-  uint8_t pageSize = 4;
+  uint8_t pageSize = 2;
   uint8_t totalPages = (pCount + pageSize - 1) / pageSize;
   if (page >= totalPages) page = totalPages - 1;
   uint8_t startIndex = page * pageSize;
@@ -1030,7 +1067,7 @@ void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "Total Pending Nodes: %u / %d\n"
            "Unprovisioned hardware detected over LoRa mesh.\n"
-           "Tap [📝 Configure & Approve] to start registration wizard:",
+           "Tap [📝 Configure] to start registration wizard:",
            page + 1, totalPages, pCount, GW_MAX_PENDING_REGISTRATIONS);
 
   String kb = "[";
@@ -1043,7 +1080,7 @@ void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
              p->mac[0], p->mac[1], p->mac[2], p->mac[3], p->mac[4], p->mac[5]);
     char row[200];
     snprintf(row, sizeof(row),
-             "[{\"text\":\"📝 Configure & Approve %02X:%02X (%ddBm)\",\"callback_data\":\"REG:WIZ:%s\"},"
+             "[{\"text\":\"📝 %02X:%02X (%ddBm)\",\"callback_data\":\"REG:WIZ:%s\"},"
              "{\"text\":\"❌ Reject\",\"callback_data\":\"REG:REJ:%s\"}],",
              p->mac[4], p->mac[5], p->rssi, macHex, macHex);
     kb += row;
@@ -1060,7 +1097,7 @@ void GwTelegramBot::showRegistrationsMenu(int64_t chatId, uint8_t page) {
     snprintf(nextBtn, sizeof(nextBtn), "{\"text\":\"Next ▶\",\"callback_data\":\"MENU:REG:%u\"},", page + 1);
     kb += nextBtn;
   }
-  kb += "{\"text\":\"🔄 Refresh\",\"callback_data\":\"MENU:REG:0\"},{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
+  kb += "{\"text\":\"🔙 Main Menu\",\"callback_data\":\"MENU:MAIN\"}]]";
 
   sendMessageWithKeyboard(chatId, buf, kb.c_str());
 }
@@ -1164,7 +1201,7 @@ void GwTelegramBot::showDeleteMenu(int64_t chatId, uint8_t page) {
     return;
   }
 
-  uint8_t pageSize = 5;
+  uint8_t pageSize = 3;
   uint8_t totalPages = (total + pageSize - 1) / pageSize;
   if (page >= totalPages) page = totalPages - 1;
   uint8_t startIndex = page * pageSize;
@@ -1178,15 +1215,27 @@ void GwTelegramBot::showDeleteMenu(int64_t chatId, uint8_t page) {
 
   String kb = "[";
   uint8_t count = 0;
-  for (uint8_t i = startIndex; i < total && count < pageSize; i++, count++) {
-    const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
-    if (!p) continue;
-    const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
-    const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned";
-    char btn[160];
-    snprintf(btn, sizeof(btn), "[{\"text\":\"🗑️ Delete %s (%s)\",\"callback_data\":\"DEL_PROMPT:%u\"}],",
-             dName, loc, p->poleId);
-    kb += btn;
+  for (uint8_t i = startIndex; i < total && count < pageSize; i += 2) {
+    const RegisteredPole* p1 = gwRegistry.getPoleByIndex(i);
+    if (!p1) break;
+    count++;
+    const char* dName1 = (strlen(p1->displayName) > 0) ? p1->displayName : p1->stringId;
+
+    const RegisteredPole* p2 = (i + 1 < total && count < pageSize) ? gwRegistry.getPoleByIndex(i + 1) : NULL;
+    if (p2) count++;
+
+    char row[280];
+    if (p2) {
+      const char* dName2 = (strlen(p2->displayName) > 0) ? p2->displayName : p2->stringId;
+      snprintf(row, sizeof(row),
+               "[{\"text\":\"🗑️ %s\",\"callback_data\":\"DEL_PROMPT:%u\"},{\"text\":\"🗑️ %s\",\"callback_data\":\"DEL_PROMPT:%u\"}],",
+               dName1, p1->poleId, dName2, p2->poleId);
+    } else {
+      snprintf(row, sizeof(row),
+               "[{\"text\":\"🗑️ %s\",\"callback_data\":\"DEL_PROMPT:%u\"}],",
+               dName1, p1->poleId);
+    }
+    kb += row;
   }
  
   kb += "[";
@@ -1319,7 +1368,7 @@ void GwTelegramBot::showSchedulePoleSelect(int64_t chatId, uint8_t page) {
     showFeederScheduleMenu(chatId, 0);
     return;
   }
-  uint8_t pageSize = 5;
+  uint8_t pageSize = 3;
   uint8_t totalPages = (total + pageSize - 1) / pageSize;
   if (page >= totalPages) page = totalPages - 1;
   uint8_t startIndex = page * pageSize;
@@ -1333,15 +1382,27 @@ void GwTelegramBot::showSchedulePoleSelect(int64_t chatId, uint8_t page) {
 
   String kb = "[";
   uint8_t count = 0;
-  for (uint8_t i = startIndex; i < total && count < pageSize; i++, count++) {
-    const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
-    if (!p) continue;
-    const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
-    const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned";
-    char btn[160];
-    snprintf(btn, sizeof(btn), "[{\"text\":\"📍 %s (%s)\",\"callback_data\":\"SCHED:P:%u\"}],",
-             dName, loc, p->poleId);
-    kb += btn;
+  for (uint8_t i = startIndex; i < total && count < pageSize; i += 2) {
+    const RegisteredPole* p1 = gwRegistry.getPoleByIndex(i);
+    if (!p1) break;
+    count++;
+    const char* dName1 = (strlen(p1->displayName) > 0) ? p1->displayName : p1->stringId;
+
+    const RegisteredPole* p2 = (i + 1 < total && count < pageSize) ? gwRegistry.getPoleByIndex(i + 1) : NULL;
+    if (p2) count++;
+
+    char row[280];
+    if (p2) {
+      const char* dName2 = (strlen(p2->displayName) > 0) ? p2->displayName : p2->stringId;
+      snprintf(row, sizeof(row),
+               "[{\"text\":\"📍 %s\",\"callback_data\":\"SCHED:P:%u\"},{\"text\":\"📍 %s\",\"callback_data\":\"SCHED:P:%u\"}],",
+               dName1, p1->poleId, dName2, p2->poleId);
+    } else {
+      snprintf(row, sizeof(row),
+               "[{\"text\":\"📍 %s\",\"callback_data\":\"SCHED:P:%u\"}],",
+               dName1, p1->poleId);
+    }
+    kb += row;
   }
 
   kb += "[";
@@ -1360,7 +1421,7 @@ void GwTelegramBot::showSchedulePoleSelect(int64_t chatId, uint8_t page) {
   sendMessageWithKeyboard(chatId, buf, kb.c_str());
 }
 
-void GwTelegramBot::showScheduleFeederSelect(int64_t chatId, uint16_t poleId) {
+void GwTelegramBot::showScheduleFeederSelect(int64_t chatId, uint16_t poleId, uint8_t page) {
   RegisteredPole* p = gwRegistry.findPoleById(poleId);
   if (!p) {
     sendMessage(chatId, "❌ Pole not found in active registry.");
@@ -1370,27 +1431,43 @@ void GwTelegramBot::showScheduleFeederSelect(int64_t chatId, uint16_t poleId) {
   const char* dName = (strlen(p->displayName) > 0) ? p->displayName : p->stringId;
   const char* loc = (strlen(p->location) > 0) ? p->location : "Unassigned Location";
 
+  if (page > 1) page = 1;
+
   char buf[350];
   snprintf(buf, sizeof(buf),
-           "⏰ *SELECT FEEDER TARGET: %s*\n"
+           "⏰ *SELECT FEEDER TARGET: %s [Page %u/2]*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "Pole ID: `POLE-%04d (0x%04X)`\n"
            "Location: *%s*\n\n"
            "Choose a feeder (or ALL Feeders) to set timer or schedule:",
-           dName, p->poleId, p->poleId, loc);
+           dName, (unsigned int)(page + 1), p->poleId, p->poleId, loc);
 
-  String kb = "[";
-  char allBtn[128];
-  snprintf(allBtn, sizeof(allBtn), "[{\"text\":\"⚡ ALL Feeders (F1-F6)\",\"callback_data\":\"SCHED:F:%u:0\"}],", p->poleId);
-  kb += allBtn;
-  for (uint8_t f = 1; f <= 6; f++) {
-    char fBtn[128];
-    snprintf(fBtn, sizeof(fBtn), "[{\"text\":\"• F%u: %s\",\"callback_data\":\"SCHED:F:%u:%u\"}],",
-             f, getFeederName(p->poleId, f), p->poleId, f);
-    kb += fBtn;
+  char kb[512];
+  if (page == 0) {
+    // Page 0: ALL Feeders (1) + F1, F2 (2) + F3, F4 (2) + Next (1) = 6 buttons
+    snprintf(kb, sizeof(kb),
+             "["
+             "[{\"text\":\"⚡ ALL Feeders (F1-F6)\",\"callback_data\":\"SCHED:F:%u:0\"}],"
+             "[{\"text\":\"• F1: %s\",\"callback_data\":\"SCHED:F:%u:1\"},{\"text\":\"• F2: %s\",\"callback_data\":\"SCHED:F:%u:2\"}],"
+             "[{\"text\":\"• F3: %s\",\"callback_data\":\"SCHED:F:%u:3\"},{\"text\":\"• F4: %s\",\"callback_data\":\"SCHED:F:%u:4\"}],"
+             "[{\"text\":\"Next ▶ (F5-F6)\",\"callback_data\":\"SCHED:FDRS:%u:1\"}]"
+             "]",
+             p->poleId,
+             getFeederName(p->poleId, 1), p->poleId, getFeederName(p->poleId, 2), p->poleId,
+             getFeederName(p->poleId, 3), p->poleId, getFeederName(p->poleId, 4), p->poleId,
+             p->poleId);
+  } else {
+    // Page 1: F5, F6 (2) + Prev, Back (2) = 4 buttons
+    snprintf(kb, sizeof(kb),
+             "["
+             "[{\"text\":\"• F5: %s\",\"callback_data\":\"SCHED:F:%u:5\"},{\"text\":\"• F6: %s\",\"callback_data\":\"SCHED:F:%u:6\"}],"
+             "[{\"text\":\"◀ Prev (F1-F4)\",\"callback_data\":\"SCHED:FDRS:%u:0\"},{\"text\":\"🔙 Back\",\"callback_data\":\"SCHED:CHOOSE:0\"}]"
+             "]",
+             getFeederName(p->poleId, 5), p->poleId, getFeederName(p->poleId, 6), p->poleId,
+             p->poleId);
   }
-  kb += "[{\"text\":\"🔙 Back\",\"callback_data\":\"SCHED:CHOOSE:0\"}]]";
-  sendMessageWithKeyboard(chatId, buf, kb.c_str());
+
+  sendMessageWithKeyboard(chatId, buf, kb);
 }
 
 void GwTelegramBot::showScheduleActionSelect(int64_t chatId, uint16_t poleId, uint8_t feederId) {
@@ -1415,17 +1492,13 @@ void GwTelegramBot::showScheduleActionSelect(int64_t chatId, uint16_t poleId, ui
   char kb[600];
   snprintf(kb, sizeof(kb),
            "["
-           "[{\"text\":\"⏱️ 15m Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:15\"},{\"text\":\"⏱️ 30m Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:30\"}],"
-           "[{\"text\":\"⏱️ 1 Hour Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:60\"},{\"text\":\"⏱️ 2 Hours Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:120\"}],"
-           "[{\"text\":\"🌅 Daily (18:30 - 06:00)\",\"callback_data\":\"SCHED:DAILY:%u:%u:18:30:6:0\"}],"
-           "[{\"text\":\"🌃 Daily (20:00 - 05:00)\",\"callback_data\":\"SCHED:DAILY:%u:%u:20:0:5:0\"}],"
-           "[{\"text\":\"🔙 Back\",\"callback_data\":\"SCHED:P:%u\"}]"
+           "[{\"text\":\"⏱️ 30m Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:30\"},{\"text\":\"⏱️ 1h Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:60\"}],"
+           "[{\"text\":\"⏱️ 2h Auto-OFF\",\"callback_data\":\"SCHED:ARM:%u:%u:120\"},{\"text\":\"🌅 Daily (18:30 - 06:00)\",\"callback_data\":\"SCHED:DAILY:%u:%u:18:30:6:0\"}],"
+           "[{\"text\":\"🌃 Daily (20:00 - 05:00)\",\"callback_data\":\"SCHED:DAILY:%u:%u:20:0:5:0\"},{\"text\":\"🔙 Back\",\"callback_data\":\"SCHED:P:%u\"}]"
            "]",
            p->poleId, feederId, p->poleId, feederId,
            p->poleId, feederId, p->poleId, feederId,
-           p->poleId, feederId,
-           p->poleId, feederId,
-           p->poleId);
+           p->poleId, feederId, p->poleId);
 
   sendMessageWithKeyboard(chatId, buf, kb);
 }
@@ -2122,8 +2195,13 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
       showFeederDashboard(chatId, (uint16_t)pid);
     }
   } else if (strncmp(callbackData, "P_FDRS:", 7) == 0) {
-    uint16_t pid = (uint16_t)atoi(callbackData + 7);
-    showPoleFeederList(chatId, pid);
+    int pid = 0, page = 0;
+    if (sscanf(callbackData + 7, "%d:%d", &pid, &page) == 2) {
+      showPoleFeederList(chatId, (uint16_t)pid, (uint8_t)page);
+    } else {
+      uint16_t p = (uint16_t)atoi(callbackData + 7);
+      showPoleFeederList(chatId, p, 0);
+    }
   } else if (strncmp(callbackData, "FDR_VIEW:", 9) == 0) {
     int pid = 0, fid = 0;
     if (sscanf(callbackData + 9, "%d:%d", &pid, &fid) == 2) {
@@ -2341,6 +2419,14 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
   } else if (strncmp(callbackData, "SCHED:P:", 8) == 0) {
     uint16_t pid = (uint16_t)atoi(callbackData + 8);
     showScheduleFeederSelect(chatId, pid);
+  } else if (strncmp(callbackData, "SCHED:FDRS:", 11) == 0) {
+    int pid = 0, page = 0;
+    if (sscanf(callbackData + 11, "%d:%d", &pid, &page) == 2) {
+      showScheduleFeederSelect(chatId, (uint16_t)pid, (uint8_t)page);
+    } else {
+      uint16_t p = (uint16_t)atoi(callbackData + 11);
+      showScheduleFeederSelect(chatId, p, 0);
+    }
   } else if (strncmp(callbackData, "SCHED:F:", 8) == 0) {
     int pid = 0, fid = 0;
     if (sscanf(callbackData + 8, "%d:%d", &pid, &fid) == 2) {

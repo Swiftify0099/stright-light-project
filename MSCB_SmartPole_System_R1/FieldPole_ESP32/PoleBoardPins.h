@@ -40,6 +40,12 @@
 #include "../Tests/ArduinoMock.h"
 #endif
 
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stddef.h>
+#include <cstddef>
+
 // =====================================================================
 //  PRIMARY SPI BUS (VSPI NATIVE PINS)
 // =====================================================================
@@ -148,6 +154,12 @@ static const char *const POLE_FEEDER_RELAY_LABELS[6] = {
 #define POLE_ADC1_DRDY_PIN 34 // ADC 1 Data Ready Interrupt (Input Only)
 #define POLE_ADC2_DRDY_PIN 35 // ADC 2 Data Ready Interrupt (Input Only)
 #define POLE_ADC3_DRDY_PIN 36 // ADC 3 Data Ready Interrupt (Input Only / VP)
+
+// =====================================================================
+//  HARDWARE PHYSICAL COMMISSIONING AUTHORIZATION PIN
+// =====================================================================
+#define POLE_PHYSICAL_AUTH_PIN 39 // Hardware Physical Authorization Jumper (GPI 39 / Sensor_VN)
+#define POLE_PHYSICAL_AUTH_TIMEOUT_MS 300000UL // 5-minute auto-expiry window
 
 // =====================================================================
 //  ONBOARD DIAGNOSTIC LED

@@ -11,10 +11,16 @@
 #include <ctype.h>
 
 #if defined(ARDUINO) && defined(ESP32)
-  #include <mbedtls/sha256.h>
-  #include <mbedtls/ecdsa.h>
-  #include <mbedtls/ecp.h>
-  #include <mbedtls/bignum.h>
+  #if __has_include(<mbedtls/sha256.h>)
+    #include <mbedtls/sha256.h>
+    #include <mbedtls/ecdsa.h>
+    #include <mbedtls/ecp.h>
+    #include <mbedtls/bignum.h>
+    #define MSCB_USE_LEGACY_MBEDTLS 1
+  #elif __has_include(<psa/crypto.h>)
+    #include <psa/crypto.h>
+    #define MSCB_USE_PSA_CRYPTO 1
+  #endif
   #include <esp_ota_ops.h>
   #include <esp_partition.h>
 #endif
@@ -66,6 +72,35 @@ bool PoleFirmwareManager::verifyDigitalSignature(const char *sha256Hex, const ch
 
 #if defined(ARDUINO) && defined(ESP32)
   if (!hasPinnedKey) return false;
+#if defined(MSCB_USE_PSA_CRYPTO)
+  psa_crypto_init();
+  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_VERIFY_HASH);
+  psa_set_key_algorithm(&attributes, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
+  psa_set_key_type(&attributes, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
+
+  mbedtls_svc_key_id_t key_id = 0;
+  psa_status_t status = psa_import_key(&attributes, pinnedPublicKey, 65, &key_id);
+  if (status != PSA_SUCCESS) {
+    return false;
+  }
+
+  uint8_t sigBytes[64];
+  for (int i = 0; i < 64; i++) {
+    char bs[3] = { sigHex[i*2], sigHex[i*2 + 1], '\0' };
+    sigBytes[i] = (uint8_t)strtoul(bs, NULL, 16);
+  }
+
+  uint8_t hashBytes[32];
+  for (int i = 0; i < 32; i++) {
+    char bs[3] = { sha256Hex[i*2], sha256Hex[i*2 + 1], '\0' };
+    hashBytes[i] = (uint8_t)strtoul(bs, NULL, 16);
+  }
+
+  status = psa_verify_hash(key_id, PSA_ALG_ECDSA(PSA_ALG_SHA_256), hashBytes, 32, sigBytes, 64);
+  psa_destroy_key(key_id);
+  return (status == PSA_SUCCESS);
+#elif defined(MSCB_USE_LEGACY_MBEDTLS)
   mbedtls_ecp_group grp;
   mbedtls_ecp_point Q;
   mbedtls_mpi r, s;
@@ -109,6 +144,9 @@ bool PoleFirmwareManager::verifyDigitalSignature(const char *sha256Hex, const ch
   mbedtls_mpi_free(&s);
 
   return (ret == 0);
+#else
+  return false;
+#endif
 #else
   if (!hasPinnedKey) return false;
   uint8_t hashBytes[32];
@@ -167,12 +205,21 @@ bool PoleFirmwareManager::verifyImageSha256(const uint8_t *imageBuffer, size_t i
 
   uint8_t hash[32];
 #if defined(ARDUINO) && defined(ESP32)
+#if defined(MSCB_USE_PSA_CRYPTO)
+  psa_crypto_init();
+  size_t hashLen = 0;
+  psa_status_t status = psa_hash_compute(PSA_ALG_SHA_256, imageBuffer, imageLen, hash, sizeof(hash), &hashLen);
+  if (status != PSA_SUCCESS || hashLen != 32) {
+    return false;
+  }
+#elif defined(MSCB_USE_LEGACY_MBEDTLS)
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
   mbedtls_sha256_starts(&ctx, 0);
   mbedtls_sha256_update(&ctx, imageBuffer, imageLen);
   mbedtls_sha256_finish(&ctx, hash);
   mbedtls_sha256_free(&ctx);
+#endif
 #else
   memset(hash, 0, 32);
   for (size_t i = 0; i < imageLen; i++) {

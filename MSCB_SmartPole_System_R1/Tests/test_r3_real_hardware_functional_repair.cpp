@@ -14,6 +14,7 @@
  * 9. Real Metrology: Elimination of synthetic fallbacks (frequency returns NAN, bus voltage returns NAN).
  */
 
+#define ARDUINO_MOCK_IMPLEMENTATION
 #include "ArduinoMock.h"
 #include "../MSCBShared/Protocol.h"
 #include "../MSCBShared/NetworkTypes.h"
@@ -56,6 +57,95 @@ static int g_fail = 0;
       g_fail++; \
     } \
   } while (0)
+
+struct KeyboardParseResult {
+  bool isValid;
+  int rowCount;
+  int totalButtons;
+  std::vector<std::string> buttonsText;
+  std::vector<std::string> callbackList;
+  bool hasDuplicateCallbacks;
+  bool hasInvalidCallbackLength;
+};
+
+static KeyboardParseResult parseTelegramInlineKeyboard(const char* json) {
+  KeyboardParseResult res;
+  res.isValid = false;
+  res.rowCount = 0;
+  res.totalButtons = 0;
+  res.hasDuplicateCallbacks = false;
+  res.hasInvalidCallbackLength = false;
+
+  if (!json || strlen(json) == 0) return res;
+
+  std::string s(json);
+  size_t start = s.find_first_not_of(" \t\r\n");
+  size_t end = s.find_last_not_of(" \t\r\n");
+  if (start == std::string::npos) return res;
+  s = s.substr(start, end - start + 1);
+
+  if (s.empty() || s.front() != '[' || s.back() != ']') return res;
+
+  size_t pos = 1;
+  while (pos < s.length() - 1) {
+    while (pos < s.length() - 1 && (s[pos] == ' ' || s[pos] == ',' || s[pos] == '\t' || s[pos] == '\r' || s[pos] == '\n')) {
+      pos++;
+    }
+    if (pos >= s.length() - 1) break;
+    if (s[pos] != '[') {
+      return res;
+    }
+    size_t rowStart = pos;
+    size_t rowEnd = s.find(']', rowStart);
+    if (rowEnd == std::string::npos) return res;
+
+    std::string rowStr = s.substr(rowStart, rowEnd - rowStart + 1);
+    res.rowCount++;
+
+    size_t bPos = 0;
+    while ((bPos = rowStr.find('{', bPos)) != std::string::npos) {
+      size_t bEnd = rowStr.find('}', bPos);
+      if (bEnd == std::string::npos) return res;
+
+      std::string btnStr = rowStr.substr(bPos, bEnd - bPos + 1);
+      res.totalButtons++;
+
+      size_t textKey = btnStr.find("\"text\":\"");
+      if (textKey != std::string::npos) {
+        size_t tStart = textKey + 8;
+        size_t tEnd = btnStr.find('"', tStart);
+        if (tEnd != std::string::npos) {
+          res.buttonsText.push_back(btnStr.substr(tStart, tEnd - tStart));
+        }
+      }
+
+      size_t cbKey = btnStr.find("\"callback_data\":\"");
+      if (cbKey != std::string::npos) {
+        size_t cStart = cbKey + 17;
+        size_t cEnd = btnStr.find('"', cStart);
+        if (cEnd != std::string::npos) {
+          std::string cb = btnStr.substr(cStart, cEnd - cStart);
+          if (cb.empty() || cb.length() > 64) {
+            res.hasInvalidCallbackLength = true;
+          }
+          for (size_t k = 0; k < res.callbackList.size(); k++) {
+            if (res.callbackList[k] == cb) {
+              res.hasDuplicateCallbacks = true;
+            }
+          }
+          res.callbackList.push_back(cb);
+        }
+      }
+
+      bPos = bEnd + 1;
+    }
+
+    pos = rowEnd + 1;
+  }
+
+  res.isValid = true;
+  return res;
+}
 
 int main() {
   std::cout << "\n=====================================================================" << std::endl;
@@ -654,11 +744,17 @@ int main() {
   poleActuators.setRelaysLockedDisabled(false);
   TEST_ASSERT(poleActuators.areRelaysLockedDisabled(), "R.2 Remote unlock blocked without local physical authorization");
 
-  // R.3 Local physical authorization granted
+  // R.3 Local physical authorization granted (Active-low: jumper to GND = LOW)
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, LOW);
+  poleActuators.servicePhysicalAuthorization();
+  poleActuators.servicePhysicalAuthorization();
+  poleActuators.servicePhysicalAuthorization();
   poleActuators.setLocalPhysicalAuthorization(true);
   TEST_ASSERT(poleActuators.isLocalPhysicalAuthorized(), "R.3 Local physical authorization flag active");
   poleActuators.setLocalPhysicalAuthorization(false);
   TEST_ASSERT(!poleActuators.isLocalPhysicalAuthorized(), "R.4 Local physical authorization revokable");
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, HIGH);
+  poleActuators.servicePhysicalAuthorization();
 
   // R.5 Truth state strings
   TEST_ASSERT(strcmp(feederAckStateToString(FEEDER_ACK_CONTACTOR_CLOSED), "CONTACTOR_CLOSED") == 0,
@@ -714,57 +810,422 @@ int main() {
               "S.14 Pin configuration safely applied when all relays are OFF");
 
   // -------------------------------------------------------------------------
-  // SECTION T: R3.2 TELEGRAM 6-BUTTON MENU ERGONOMICS & CONFIRMATION
+  // SECTION T: R3.2.1 TELEGRAM MENU ERGONOMICS & JSON KEYBOARD STRUCTURE
   // -------------------------------------------------------------------------
-  std::cout << "\n--- SECTION T: R3.2 TELEGRAM 6-BUTTON MENU ERGONOMICS ---" << std::endl;
+  std::cout << "\n--- SECTION T: R3.2.1 TELEGRAM MENU ERGONOMICS & JSON STRUCTURE ---" << std::endl;
 
-  // T.1 Main menu button count check (max 6 buttons)
-  const int MAIN_MENU_BUTTONS = 6;
-  TEST_ASSERT(MAIN_MENU_BUTTONS <= 6, "T.1 Main menu capped at maximum 6 buttons (exactly 6)");
+  uint16_t testPoleIdT = 0x0002;
+  RegisteredPole* pT = gwRegistry.findPoleById(testPoleIdT);
+  if (!pT) {
+    if (gwRegistry.getActiveCount() > 0) {
+      const RegisteredPole* pAct = gwRegistry.getPoleByIndex(0);
+      if (pAct) {
+        testPoleIdT = pAct->poleId;
+        pT = gwRegistry.findPoleById(testPoleIdT);
+      }
+    }
+  }
+  if (!pT) {
+    uint8_t macT[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+    PktRegisterRequestPayload reqT;
+    PktRegisterResponsePayload respT;
+    memset(&reqT, 0, sizeof(reqT));
+    memcpy(reqT.macAddress, macT, 6);
+    gwRegistry.handleJoinRequest(reqT, -60, 10, respT);
+    uint16_t allocatedId = 0;
+    gwRegistry.approvePending(macT, allocatedId, "Test Highway Pole", "NH48 Junction", "Sector 5");
+    testPoleIdT = allocatedId;
+    pT = gwRegistry.findPoleById(testPoleIdT);
+  }
+  if (pT) {
+    pT->status = POLE_STATUS_ACTIVE;
+    gwRegistry.confirmPoleHandshake(testPoleIdT);
+  }
 
-  // T.2 Pole detail sub-menu button count check (max 6 buttons)
-  const int POLE_DETAIL_BUTTONS = 6;
-  TEST_ASSERT(POLE_DETAIL_BUTTONS <= 6, "T.2 Pole detail sub-menu capped at maximum 6 buttons (exactly 6)");
+  // T.1 Main Menu
+  gwTelegram.showMainMenu(adminChatId);
+  KeyboardParseResult kbMain = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbMain.isValid && kbMain.totalButtons <= 6, "T.1 Main menu parsed valid JSON with <= 6 buttons");
+  TEST_ASSERT(!kbMain.hasDuplicateCallbacks && !kbMain.hasInvalidCallbackLength, "T.2 Main menu has valid distinct callbacks");
 
-  // T.3 Feeder control detail sub-menu button count check (max 6 buttons)
-  const int FEEDER_CONTROL_BUTTONS = 4;
-  TEST_ASSERT(FEEDER_CONTROL_BUTTONS <= 6, "T.3 Feeder control sub-menu capped at maximum 6 buttons (4 buttons)");
+  // T.3 Poles Menu
+  gwTelegram.showPolesMenu(adminChatId, 0);
+  KeyboardParseResult kbPoles = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbPoles.isValid && kbPoles.totalButtons <= 6, "T.3 Poles menu parsed valid JSON with <= 6 buttons");
+
+  // T.4 Pole Details Menu
+  gwTelegram.showPoleDetail(adminChatId, testPoleIdT);
+  KeyboardParseResult kbPoleDetail = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbPoleDetail.isValid && kbPoleDetail.totalButtons <= 6, "T.4 Pole detail menu parsed valid JSON with <= 6 buttons");
+
+  // T.5 Feeder List Page 0 (Feeders 1-4 + Back + Next) -> exactly 6 buttons
+  gwTelegram.showPoleFeederList(adminChatId, testPoleIdT, 0);
+  KeyboardParseResult kbFdrP0 = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbFdrP0.isValid && kbFdrP0.totalButtons == 6, "T.5 Pole feeder list Page 0 has exactly 6 buttons");
+  TEST_ASSERT(!kbFdrP0.hasDuplicateCallbacks && !kbFdrP0.hasInvalidCallbackLength, "T.6 Pole feeder list Page 0 callbacks valid");
+
+  // T.7 Feeder List Page 1 (Feeders 5-6 + Back + Details) -> exactly 4 buttons
+  gwTelegram.showPoleFeederList(adminChatId, testPoleIdT, 1);
+  KeyboardParseResult kbFdrP1 = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbFdrP1.isValid && kbFdrP1.totalButtons == 4, "T.7 Pole feeder list Page 1 has exactly 4 buttons");
+
+  // T.8 Feeder Control Detail (ON, OFF, Toggle, Back) -> exactly 4 buttons
+  gwTelegram.showFeederControlDetail(adminChatId, testPoleIdT, 1);
+  KeyboardParseResult kbFdrCtrl = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbFdrCtrl.isValid && kbFdrCtrl.totalButtons == 4, "T.8 Feeder control menu has exactly 4 buttons");
+
+  // T.9 Voltage Dashboard
+  gwTelegram.showVoltageDashboard(adminChatId, testPoleIdT);
+  KeyboardParseResult kbVolt = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbVolt.isValid && kbVolt.totalButtons <= 6, "T.9 Voltage dashboard parsed valid JSON with <= 6 buttons");
+
+  // T.10 Feeder Pole Select Menu
+  gwTelegram.showFeederPoleSelectMenu(adminChatId, 0);
+  KeyboardParseResult kbFdrPoleSel = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbFdrPoleSel.isValid && kbFdrPoleSel.totalButtons <= 6, "T.10 Feeder pole select menu has <= 6 buttons");
+
+  // T.11 Registrations Menu
+  gwTelegram.showRegistrationsMenu(adminChatId, 0);
+  KeyboardParseResult kbReg = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbReg.isValid && kbReg.totalButtons <= 6, "T.11 Registrations menu has <= 6 buttons");
+
+  // T.12 Delete Menu
+  gwTelegram.showDeleteMenu(adminChatId, 0);
+  KeyboardParseResult kbDel = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbDel.isValid && kbDel.totalButtons <= 6, "T.12 Delete pole menu has <= 6 buttons");
+
+  // T.13 Delete Confirm Menu (Confirm, Cancel) -> exactly 2 buttons
+  gwTelegram.showDeleteConfirm(adminChatId, testPoleIdT);
+  KeyboardParseResult kbDelConf = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbDelConf.isValid && kbDelConf.totalButtons == 2, "T.13 Delete confirm menu has exactly 2 buttons");
+
+  // T.14 Confirm All Poles (Confirm, Cancel) -> exactly 2 buttons
+  gwTelegram.showConfirmAllPoles(adminChatId, 1);
+  KeyboardParseResult kbAllConf = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbAllConf.isValid && kbAllConf.totalButtons == 2, "T.14 Confirm all poles menu has exactly 2 buttons");
+
+  // T.15 Feeder Schedule Menu
+  gwTelegram.showFeederScheduleMenu(adminChatId, 0);
+  KeyboardParseResult kbSched = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbSched.isValid && kbSched.totalButtons <= 6, "T.15 Feeder schedule menu has <= 6 buttons");
+
+  // T.16 Schedule Pole Select
+  gwTelegram.showSchedulePoleSelect(adminChatId, 0);
+  KeyboardParseResult kbSchedPoleSel = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbSchedPoleSel.isValid && kbSchedPoleSel.totalButtons <= 6, "T.16 Schedule pole select menu has <= 6 buttons");
+
+  // T.17 Schedule Feeder Select Page 0 (F1-F4 + Back + Next) -> exactly 6 buttons
+  gwTelegram.showScheduleFeederSelect(adminChatId, testPoleIdT, 0);
+  KeyboardParseResult kbSchedFdr0 = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbSchedFdr0.isValid && kbSchedFdr0.totalButtons == 6, "T.17 Schedule feeder select Page 0 has exactly 6 buttons");
+
+  // T.18 Schedule Feeder Select Page 1 (F5-F6 + Back + Sched) -> exactly 4 buttons
+  gwTelegram.showScheduleFeederSelect(adminChatId, testPoleIdT, 1);
+  KeyboardParseResult kbSchedFdr1 = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbSchedFdr1.isValid && kbSchedFdr1.totalButtons == 4, "T.18 Schedule feeder select Page 1 has exactly 4 buttons");
+
+  // T.19 Schedule Action Select (6 actions) -> exactly 6 buttons
+  gwTelegram.showScheduleActionSelect(adminChatId, testPoleIdT, 1);
+  KeyboardParseResult kbSchedAct = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbSchedAct.isValid && kbSchedAct.totalButtons == 6, "T.19 Schedule action select menu has exactly 6 buttons");
+
+  // T.20 Settings Menu
+  gwTelegram.showSettingsMenu(adminChatId);
+  KeyboardParseResult kbSet = parseTelegramInlineKeyboard(gwTelegram.getLastSentKeyboardJson());
+  TEST_ASSERT(kbSet.isValid && kbSet.totalButtons <= 6, "T.20 Settings menu has <= 6 buttons");
+
+  // T.21 Unauthorized User Rejection
+  const int64_t unauthorizedChatId = 9876543210LL;
+  gwTelegram.clearLastSent();
+  gwTelegram.handleCallback(unauthorizedChatId, "F:2:1:1");
+  TEST_ASSERT(strstr(gwTelegram.getLastSentMessageText(), "Access Denied") != nullptr,
+              "T.21 Unauthorized callback rejected with Access Denied");
+  gwTelegram.clearLastSent();
+  gwTelegram.handleCommand(unauthorizedChatId, "/feeder 2 1 on");
+  TEST_ASSERT(strstr(gwTelegram.getLastSentMessageText(), "Access Denied") != nullptr,
+              "T.22 Unauthorized slash command rejected with Access Denied");
 
   // -------------------------------------------------------------------------
-  // SECTION U: R3.2 MULTI-HOP MESH, CHILD TRACKING & CASCADE FAILURE
+  // SECTION U: R3.2.1 MULTI-HOP MESH, SELF-LOOP & REAL CHILD TRACKING
   // -------------------------------------------------------------------------
-  std::cout << "\n--- SECTION U: R3.2 MULTI-HOP MESH & CASCADE FAILURE DIFFERENTIATION ---" << std::endl;
+  std::cout << "\n--- SECTION U: R3.2.1 MULTI-HOP MESH & CHILD TRACKING ---" << std::endl;
 
-  // U.1 Mesh self-loop prevention
   poleMesh.begin();
+  MeshWireFrame outF;
+  bool sendAction = false;
+
+  // U.1 Self-Loop Drop
   MeshWireFrame selfFrame;
   memset(&selfFrame, 0, sizeof(selfFrame));
+  selfFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+  selfFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+  selfFrame.header.version = MSCB_PROTOCOL_VERSION;
   selfFrame.header.srcAddress = poleStorage.getAssignedPoleId(); // Originated from self!
   selfFrame.header.dstAddress = MSCB_GATEWAY_NODE_ID;
   selfFrame.header.seqNumber = 1001;
   selfFrame.header.hopCount = 0;
   selfFrame.header.maxHops = 6;
-  MeshWireFrame outF;
-  bool sendAction = false;
   bool handled = poleMesh.handleReceivedWireFrame(selfFrame, -70, 8, outF, sendAction);
   TEST_ASSERT(!handled && !sendAction, "U.1 Mesh router drops self-originating packet (loop prevention)");
+  TEST_ASSERT(poleMesh.getPacketsDroppedSelfLoop() > 0, "U.2 packetsDroppedSelfLoop incremented");
 
-  // U.2 Mesh child packet tracking
+  // U.3 Hop Count Limit Drop
+  MeshWireFrame hopLimitFrame = selfFrame;
+  hopLimitFrame.header.srcAddress = 0x0055;
+  hopLimitFrame.header.hopCount = 6;
+  hopLimitFrame.header.maxHops = 6;
+  handled = poleMesh.handleReceivedWireFrame(hopLimitFrame, -70, 8, outF, sendAction);
+  TEST_ASSERT(!handled && !sendAction, "U.3 Frame exceeding hop limit dropped");
+  TEST_ASSERT(poleMesh.getPacketsDroppedHopLimit() > 0, "U.4 packetsDroppedHopLimit incremented");
+
+  // U.5 Malformed Packet Drop (Invalid Magic)
+  MeshWireFrame malformedFrame = selfFrame;
+  malformedFrame.header.srcAddress = 0x0055;
+  malformedFrame.header.magic[0] = 0x00; // Bad magic
+  malformedFrame.header.magic[1] = 0x00;
+  handled = poleMesh.handleReceivedWireFrame(malformedFrame, -70, 8, outF, sendAction);
+  TEST_ASSERT(!handled && !sendAction, "U.5 Malformed frame (invalid magic) dropped");
+  TEST_ASSERT(poleMesh.getPacketsDroppedMalformed() > 0, "U.6 packetsDroppedMalformed incremented");
+
+  // U.7 Duplicate Packet Drop
+  MeshWireFrame validF = selfFrame;
+  validF.header.srcAddress = 0x0055;
+  validF.header.dstAddress = MSCB_GATEWAY_NODE_ID;
+  validF.header.seqNumber = 5501;
+  validF.header.hopCount = 1;
+  validF.header.maxHops = 6;
+  handled = poleMesh.handleReceivedWireFrame(validF, -70, 8, outF, sendAction);
+  TEST_ASSERT(handled && sendAction, "U.7 First valid frame forwarded once");
+  handled = poleMesh.handleReceivedWireFrame(validF, -70, 8, outF, sendAction);
+  TEST_ASSERT(!handled && !sendAction, "U.8 Duplicate frame (same src and seq) dropped");
+  TEST_ASSERT(poleMesh.getPacketsDroppedDuplicate() > 0, "U.9 packetsDroppedDuplicate incremented");
+
+  // U.10 Routing Cycle Prevention
+  uint16_t myNodeId = poleStorage.getAssignedPoleId();
+  uint8_t prevNeigh = poleMesh.getNeighborCount();
+  poleMesh.updateNeighborsFromBeacon(myNodeId, 1, 0, -60, 10);
+  TEST_ASSERT(poleMesh.getNeighborCount() == prevNeigh, "U.10 Self cannot be added as candidate parent neighbor (cycle prevention)");
+  poleMesh.updateNeighborsFromBeacon(0x0099, 2, myNodeId, -60, 10);
+  TEST_ASSERT(poleMesh.getNeighborCount() == prevNeigh, "U.11 Candidate with primary parent pointing to this node rejected (cycle prevention)");
+
+  // U.12 Real Child Tracking on Received Wire Frames
   MeshWireFrame childFrame;
   memset(&childFrame, 0, sizeof(childFrame));
+  childFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+  childFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+  childFrame.header.version = MSCB_PROTOCOL_VERSION;
   childFrame.header.srcAddress = 0x0008; // Child pole 8
-  childFrame.header.dstAddress = MSCB_GATEWAY_NODE_ID; // Uplink to Gateway
+  childFrame.header.dstAddress = MSCB_GATEWAY_NODE_ID;
+  childFrame.header.nextHop = poleStorage.getAssignedPoleId();
+  childFrame.header.payloadLen = 10;
   childFrame.header.seqNumber = 2001;
   childFrame.header.hopCount = 1;
   childFrame.header.maxHops = 6;
   poleMesh.handleReceivedWireFrame(childFrame, -75, 7, outF, sendAction);
-  TEST_ASSERT(poleMesh.getTrackedChildCount() > 0, "U.2 Forwarded child packet registered in trackedChildren");
+  TEST_ASSERT(poleMesh.getTrackedChildCount() > 0, "U.12 Forwarded child packet registered in trackedChildren");
   const TrackedChildNode* ch = poleMesh.getTrackedChild(0);
-  TEST_ASSERT(ch != NULL && ch->childPoleId == 0x0008, "U.3 Tracked child ID is 0x0008");
+  TEST_ASSERT(ch != NULL && ch->childPoleId == 0x0008, "U.13 Tracked child ID is 0x0008");
+  if (ch) {
+    TEST_ASSERT(ch->state == CHILD_STATE_ONLINE, "U.14 Initial child state is CHILD_STATE_ONLINE");
+    TEST_ASSERT(ch->lastSeqNumber == 2001, "U.15 Child lastSeqNumber correctly recorded");
+    TEST_ASSERT(ch->lastRssi == -75 && ch->lastSnr == 7, "U.16 Child link metrics accurately recorded");
+  }
 
-  // U.4 Cascade state string mapping
-  TEST_ASSERT(strcmp(poleHealthStateToString(POLE_STATE_UNREACHABLE_VIA_PARENT), "UNREACHABLE_VIA_PARENT") == 0,
-              "U.4 POLE_STATE_UNREACHABLE_VIA_PARENT maps to 'UNREACHABLE_VIA_PARENT'");
+  // U.17 Child Inactivity Timeout Transition
+  delay(95000); // Exceed 90s MESH_CHILD_TIMEOUT_MS
+  poleMesh.checkChildTimeouts(millis());
+  ch = poleMesh.getTrackedChild(0);
+  TEST_ASSERT(ch != NULL && ch->state == CHILD_STATE_OFFLINE, "U.17 Inactive child transitioned to CHILD_STATE_OFFLINE");
+
+  // U.18 Child Recovery on Valid Packet
+  childFrame.header.seqNumber = 2002;
+  childFrame.header.nextHop = poleStorage.getAssignedPoleId();
+  childFrame.header.payloadLen = 10;
+  poleMesh.handleReceivedWireFrame(childFrame, -71, 9, outF, sendAction);
+  ch = poleMesh.getTrackedChild(0);
+  TEST_ASSERT(ch != NULL && ch->state == CHILD_STATE_ONLINE, "U.18 Subsequent valid packet restores child to CHILD_STATE_ONLINE");
+  TEST_ASSERT(poleMesh.getTrackedChildCount() == 1, "U.19 Child record updated in-place without duplicate entries");
+
+  // U.20 Child cannot be selected as Parent (Cycle Prevention)
+  poleMesh.updateNeighborsFromBeacon(0x0008, 1, 0, -60, 10);
+  TEST_ASSERT(poleMesh.getNeighborCount() == prevNeigh, "U.20 Child node 0x0008 rejected as parent (cycle prevention)");
+
+  // -------------------------------------------------------------------------
+  // SECTION V: R3.2.1 GATEWAY HEARTBEAT, CASCADE ALERT & BOUNDED QUEUE
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION V: R3.2.1 GATEWAY HEARTBEAT & CASCADE FAILURE ---" << std::endl;
+
+  // V.1 Unknown pole query
+  TEST_ASSERT(gwHeartbeat.getPoleState(0x9999) == POLE_STATE_UNKNOWN,
+              "V.1 Unregistered pole query returns POLE_STATE_UNKNOWN (never false ONLINE)");
+
+  // V.2 Register test hierarchy: Pole 0x0010 (Gateway direct, parent=0), Pole 0x0020 (parent=0x0010)
+  uint8_t mac10[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0x10, 0x10};
+  uint8_t mac20[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0x20, 0x20};
+  PktRegisterRequestPayload req10, req20;
+  PktRegisterResponsePayload resp10, resp20;
+  memset(&req10, 0, sizeof(req10));
+  memset(&req20, 0, sizeof(req20));
+  memcpy(req10.macAddress, mac10, 6);
+  memcpy(req20.macAddress, mac20, 6);
+  gwRegistry.handleJoinRequest(req10, -60, 10, resp10);
+  gwRegistry.handleJoinRequest(req20, -65, 9, resp20);
+  uint16_t id10 = 0, id20 = 0;
+  gwRegistry.approvePending(mac10, id10, "Pole 10 Direct", "NH48 Km 10", "Sector 1");
+  gwRegistry.approvePending(mac20, id20, "Pole 20 Child", "NH48 Km 20", "Sector 2");
+  RegisteredPole* p10 = gwRegistry.findPoleByMac(mac10);
+  RegisteredPole* p20 = gwRegistry.findPoleByMac(mac20);
+  p10->primaryParent = MSCB_GATEWAY_NODE_ID;
+  p20->primaryParent = p10->poleId;
+
+  // Keep other registered poles refreshed so only our test hierarchy times out
+  for (uint8_t i = 0; i < gwRegistry.getActiveCount(); i++) {
+    const RegisteredPole* ap = gwRegistry.getPoleByIndex(i);
+    if (ap && ap->poleId != p10->poleId && ap->poleId != p20->poleId) {
+      gwHeartbeat.onHeartbeatReceived(ap->poleId, 2500);
+    }
+  }
+  // Clear any pre-existing alerts from earlier test sections
+  GwAlertEvent discardEv;
+  while (gwHeartbeat.popNextAlert(discardEv)) {}
+
+  // Both report heartbeat at epoch 2000
+  gwHeartbeat.onHeartbeatReceived(p10->poleId, 2000);
+  gwHeartbeat.onHeartbeatReceived(p20->poleId, 2000);
+  TEST_ASSERT(gwHeartbeat.getPoleState(p10->poleId) == POLE_STATE_ONLINE, "V.2 Pole 10 is ONLINE");
+  TEST_ASSERT(gwHeartbeat.getPoleState(p20->poleId) == POLE_STATE_ONLINE, "V.3 Pole 20 is ONLINE");
+
+  // Advance clock to 2500 (> 360s timeout). Neither pole reports.
+  gwHeartbeat.checkHealth(2500);
+  TEST_ASSERT(gwHeartbeat.getPoleState(p10->poleId) == POLE_STATE_OFFLINE,
+              "V.4 Direct parent Pole 10 classified POLE_STATE_OFFLINE");
+  TEST_ASSERT(gwHeartbeat.getPoleState(p20->poleId) == POLE_STATE_UNREACHABLE_VIA_PARENT,
+              "V.5 Descendant Pole 20 classified POLE_STATE_UNREACHABLE_VIA_PARENT (Cascade Failure)");
+
+  // V.6 Bounded Alert Queue & Popping Events
+  TEST_ASSERT(gwHeartbeat.hasPendingAlert(), "V.6 Gateway heartbeat monitor has queued alert events");
+  TEST_ASSERT(gwHeartbeat.getAlertQueueCount() <= GW_ALERT_QUEUE_CAPACITY,
+              "V.7 Alert queue count is bounded at GW_ALERT_QUEUE_CAPACITY");
+
+  GwAlertEvent evP10, evP20;
+  bool pop1 = gwHeartbeat.popNextAlert(evP10);
+  bool pop2 = gwHeartbeat.popNextAlert(evP20);
+  TEST_ASSERT(pop1 && evP10.poleId == p10->poleId && evP10.newState == POLE_STATE_OFFLINE,
+              "V.8 First alert event correctly identified Pole 10 direct OFFLINE");
+  TEST_ASSERT(pop2 && evP20.poleId == p20->poleId && evP20.newState == POLE_STATE_UNREACHABLE_VIA_PARENT,
+              "V.9 Second alert event correctly identified Pole 20 UNREACHABLE_VIA_PARENT");
+  TEST_ASSERT(strstr(evP20.reason, "Parent 0x") != nullptr,
+              "V.10 Cascade alert reason explicitly identifies parent dependency");
+
+  // V.11 Alert Cooldown & Deduplication
+  gwHeartbeat.checkHealth(2510); // 10s later, within cooldown
+  TEST_ASSERT(!gwHeartbeat.hasPendingAlert(), "V.11 Deduplication and cooldown suppressed duplicate alert storm");
+
+  // -------------------------------------------------------------------------
+  // SECTION W: R3.2.1 PHYSICAL AUTHORIZATION & RELAY SAFETY LOCK
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION W: R3.2.1 PHYSICAL AUTHORIZATION & RELAY SAFETY ---" << std::endl;
+
+  // W.1 Production Safety Lock
+  TEST_ASSERT(MSCB_RELAYS_LOCKED_DISABLED == 1, "W.1 MSCB_RELAYS_LOCKED_DISABLED production lock preserved (1)");
+  TEST_ASSERT(poleActuators.areRelaysLockedDisabled(), "W.2 areRelaysLockedDisabled() returns true");
+  poleActuators.setRelaysLockedDisabled(false);
+  TEST_ASSERT(poleActuators.areRelaysLockedDisabled(), "W.3 Remote unlock rejected without local physical authorization");
+
+  // W.4 Software Setter alone cannot authorize without Physical Pin 39 (open circuit HIGH)
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, HIGH);
+  poleActuators.servicePhysicalAuthorization();
+  poleActuators.setLocalPhysicalAuthorization(true);
+  TEST_ASSERT(!poleActuators.isLocalPhysicalAuthorized(),
+              "W.4 Software setter alone cannot grant physical auth while GPIO 39 is open (HIGH)");
+
+  // W.5 Physical Pin 39 Activation with Debounce (Active-low: jumper to GND = LOW)
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, LOW);
+  poleActuators.servicePhysicalAuthorization(); // debounce 1
+  poleActuators.servicePhysicalAuthorization(); // debounce 2
+  poleActuators.servicePhysicalAuthorization(); // debounce 3
+  poleActuators.setLocalPhysicalAuthorization(true);
+  TEST_ASSERT(poleActuators.isLocalPhysicalAuthorized(),
+              "W.5 Physical auth granted when GPIO 39 is grounded (LOW) and debounced");
+
+  // W.6 Auto-Expiry after 5 minutes (300,000 ms)
+  delay(300005UL);
+  poleActuators.servicePhysicalAuthorization();
+  TEST_ASSERT(!poleActuators.isLocalPhysicalAuthorized(),
+              "W.6 Physical authorization automatically expired after 5 minutes");
+
+  // W.7 Emergency Shutdown on Loss of Physical Jumper
+  poleActuators.resetEmergencyState();
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, LOW);
+  poleActuators.servicePhysicalAuthorization();
+  poleActuators.servicePhysicalAuthorization();
+  poleActuators.servicePhysicalAuthorization();
+  poleActuators.setLocalPhysicalAuthorization(true);
+  poleActuators.setBenchTestOverride(true);
+  poleActuators.requestRelayOn(0, "BENCH_TEST");
+  TEST_ASSERT(poleActuators.isRelayCommandedOn(0),
+              "W.7 Test relay energized in authorized low-voltage bench mode");
+  // Physical jumper removed while energized!
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, HIGH);
+  poleActuators.servicePhysicalAuthorization();
+  TEST_ASSERT(!poleActuators.isLocalPhysicalAuthorized(),
+              "W.8 Physical auth revoked immediately when jumper removed");
+  TEST_ASSERT(!poleActuators.isRelayCommandedOn(0),
+              "W.9 Emergency shutdown instantly de-energized relay upon auth loss");
+
+  // W.10 Truthful Auxiliary Feedback States
+  TEST_ASSERT(strcmp(contactorStateToString(CONTACTOR_CLOSED), "CLOSED") == 0, "W.10 ContactorState string CLOSED");
+  TEST_ASSERT(strcmp(contactorStateToString(CONTACTOR_OPEN), "OPEN") == 0, "W.11 ContactorState string OPEN");
+  TEST_ASSERT(strcmp(contactorStateToString(CONTACTOR_UNAVAILABLE), "UNAVAILABLE") == 0, "W.12 ContactorState string UNAVAILABLE");
+  TEST_ASSERT(strcmp(mcbStateToString(MCB_HEALTHY), "HEALTHY") == 0, "W.13 McbState string HEALTHY");
+  TEST_ASSERT(strcmp(mcbStateToString(MCB_TRIPPED), "TRIPPED") == 0, "W.14 McbState string TRIPPED");
+  TEST_ASSERT(strcmp(mcbStateToString(MCB_UNAVAILABLE), "UNAVAILABLE") == 0, "W.15 McbState string UNAVAILABLE");
+  TEST_ASSERT(strcmp(measurementValidityToString(MEAS_SENSOR_UNAVAILABLE), "SENSOR_UNAVAILABLE") == 0,
+              "W.16 MeasurementValidity string SENSOR_UNAVAILABLE");
+
+  // W.17 Disconnected Aux Hardware returns UNAVAILABLE (never fake OPEN or HEALTHY)
+  poleFeederMgr.begin();
+  TEST_ASSERT(poleFeederMgr.getContactorState(1) == CONTACTOR_UNAVAILABLE,
+              "W.17 Disconnected aux hardware returns CONTACTOR_UNAVAILABLE (never fake OPEN or CLOSED)");
+  TEST_ASSERT(poleFeederMgr.getMcbState(1) == MCB_UNAVAILABLE,
+              "W.18 Disconnected aux hardware returns MCB_UNAVAILABLE (never fake HEALTHY)");
+
+  // -------------------------------------------------------------------------
+  // SECTION X: R3.2.1 21-CHANNEL METROLOGY TRUTH & BOOT PIN CONFIG
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION X: R3.2.1 METROLOGY TRUTH & BOOT PIN CONFIG ---" << std::endl;
+
+  // X.1 Missing ADC metrology returns NAN (never fabricated 0.0V or 0.0A)
+  poleMetrology.setAdcChipDetected(0, false);
+  poleMetrology.setAdcChipDetected(1, false);
+  poleMetrology.setAdcChipDetected(2, false);
+  float v1 = poleMetrology.getBusVoltageR();
+  TEST_ASSERT(std::isnan(v1), "X.1 Missing ADC returns NAN for phase voltage (never fabricated 0.0V)");
+  float i1 = poleMetrology.getFeederCurrent(0, 0);
+  TEST_ASSERT(std::isnan(i1), "X.2 Missing ADC returns NAN for feeder current (never fabricated 0.0A)");
+  TEST_ASSERT(poleMetrology.getMeasurementValidity(1) == MEAS_SENSOR_UNAVAILABLE,
+              "X.3 Measurement validity returns MEAS_SENSOR_UNAVAILABLE");
+
+  // X.4 Telegram Truthful Reporting for Missing Sensors & Feedbacks
+  RegisteredPole* pTestDisp = gwRegistry.findPoleById(testPoleIdT);
+  if (pTestDisp) {
+    pTestDisp->auxFeedbackValid = false;
+    pTestDisp->mcbStatusValid = false;
+    pTestDisp->lastBusVoltage = 0.0f; // Sensor unavailable
+    gwTelegram.showPoleDetail(adminChatId, testPoleIdT);
+    TEST_ASSERT(strstr(gwTelegram.getLastSentMessageText(), "FEEDBACK NOT CONNECTED") != nullptr,
+                "X.4 Telegram detail shows 'FEEDBACK NOT CONNECTED' when aux valid flag is false");
+    TEST_ASSERT(strstr(gwTelegram.getLastSentMessageText(), "SENSOR UNAVAILABLE") != nullptr,
+                "X.5 Telegram detail shows 'SENSOR UNAVAILABLE' when voltage sensor is missing");
+  }
+
+  // X.6 Boot Pin Configuration Recovery & Validation
+  PoleHardwarePinConfig badCrcCfg = getDefaultHardwarePinConfig();
+  badCrcCfg.crc32 ^= 0xFFFFFFFF; // Corrupt CRC
+  TEST_ASSERT(calculatePinConfigCrc(badCrcCfg) != badCrcCfg.crc32, "X.6 Corrupted CRC detected");
+  PoleHardwarePinConfig safeDefaultCfg = getDefaultHardwarePinConfig();
+  TEST_ASSERT(validateHardwarePinConfig(safeDefaultCfg), "X.7 Default pin mapping passes strict hardware validation");
+  TEST_ASSERT(poleActuators.applyPinConfiguration(safeDefaultCfg), "X.8 Safe default configuration applied cleanly");
 
   // Final Summary
   std::cout << "\n=====================================================================" << std::endl;
