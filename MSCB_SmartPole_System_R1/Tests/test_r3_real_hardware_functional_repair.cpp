@@ -381,6 +381,7 @@ int main() {
 
   // Simulate mid-write power failure (magic marker not written)
   uint8_t targetSlot = 1 - gwRegistry.getActiveSlot();
+  (void)targetSlot;
   gwRegistry.simulatePowerFailureMidWrite(true);
   bool interruptedSave = gwRegistry.saveRegistry();
   TEST_ASSERT(!interruptedSave, "I.5 Mid-write power failure triggers save failure without corrupting active slot");
@@ -499,7 +500,7 @@ int main() {
   std::cout << "\n--- SECTION M: R3.1 TELEGRAM REGISTRATION WIZARD & CONTROLS ---" << std::endl;
 
   gwTelegram.begin();
-  const int64_t adminChatId = 5505296197LL;
+  const int64_t adminChatId = 123456789LL;
   uint8_t wizMac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
   PktRegisterRequestPayload wizReq;
   memset(&wizReq, 0, sizeof(wizReq));
@@ -620,6 +621,7 @@ int main() {
   // Test Time-Sync check for recurring schedule
   // When unsynced: addSchedule is gated by UI check in Telegram bot
   bool isSynced = gwSchedule.isTimeSynced();
+  (void)isSynced;
   // Verify schedule validation rejects invalid hours/minutes
   bool invalidHour = gwSchedule.addSchedule(0x0005, 1, 25, 0, 6, 0, true);
   TEST_ASSERT(!invalidHour, "Q.8 addSchedule rejects invalid hour (25)");
