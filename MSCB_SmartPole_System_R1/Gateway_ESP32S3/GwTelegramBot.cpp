@@ -346,6 +346,11 @@ void GwTelegramBot::cmdPending(int64_t chatId) {
   sendMessage(chatId, buf);
 }
 
+void GwTelegramBot::cmdPending(int64_t chatId, uint8_t page) {
+  (void)page;
+  cmdPending(chatId);
+}
+
 void GwTelegramBot::cmdPoleDetail(int64_t chatId, uint16_t poleId) {
   RegisteredPole* p = gwRegistry.findPoleById(poleId);
   if (!p) {

@@ -90,7 +90,8 @@ private:
   void cmdStart(int64_t chatId);
   void cmdStatus(int64_t chatId);
   void cmdPoles(int64_t chatId, uint8_t page = 0);
-  void cmdPending(int64_t chatId, uint8_t page = 0);
+  void cmdPending(int64_t chatId);
+  void cmdPending(int64_t chatId, uint8_t page);
   void cmdPoleDetail(int64_t chatId, uint16_t poleId);
   void cmdFeeder(int64_t chatId, uint16_t poleId, uint8_t feederId, uint8_t action);
   void cmdGroup(int64_t chatId, uint16_t poleId, uint8_t groupMask, uint8_t action);
