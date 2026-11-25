@@ -36,9 +36,11 @@
 // =====================================================================
 //  GLOBAL STATE & TIMING VARIABLES
 // =====================================================================
-static uint32_t s_lastHeartbeatMs = 0;
-static uint32_t s_bootTimeMs = 0;
-static bool     s_hardwareAuditPassed = false;
+static uint32_t    s_lastHeartbeatMs = 0;
+static uint32_t    s_bootTimeMs = 0;
+static bool        s_hardwareAuditPassed = false;
+static const char* s_pinConfigSource = "DEFAULT_BOARD_PINS";
+static bool        s_pinConfigValid = true;
 
 // =====================================================================
 //  SAFE DIAGNOSTIC SYSTEM BANNER
@@ -66,39 +68,46 @@ void printPoleDiagnosticBanner() {
   Serial.printf("Free Heap DRAM   : %u bytes\n", ESP.getFreeHeap());
 
   Serial.println(F("--------------------------------------------------------"));
-  Serial.println(F("VERIFIED HARDWARE PIN ALLOCATION (ESP32-WROOM-32):"));
+  Serial.printf("Pin Config Source: %s (Validation: %s)\n",
+                s_pinConfigSource, s_pinConfigValid ? "PASS" : "FAIL");
+  Serial.println(F("ACTIVE RUNTIME HARDWARE PIN ALLOCATION (ESP32-WROOM-32):"));
   Serial.println(F("  [VSPI Bus & LoRa SX1278]:"));
   Serial.printf("    LoRa SCK     : GPIO %d (VSPI Native)\n", POLE_LORA_SCK_PIN);
   Serial.printf("    LoRa MISO    : GPIO %d (VSPI Native)\n", POLE_LORA_MISO_PIN);
   Serial.printf("    LoRa MOSI    : GPIO %d (VSPI Native)\n", POLE_LORA_MOSI_PIN);
-  Serial.printf("    LoRa NSS / CS: GPIO %d (VSPI Native, 10k Pullup Required)\n", POLE_LORA_NSS_PIN);
-  Serial.printf("    LoRa RESET   : GPIO %d (Active LOW)\n", POLE_LORA_RST_PIN);
-  Serial.printf("    LoRa DIO0    : GPIO %d (Safe IRQ; Replaced GPIO 2)\n", POLE_LORA_DIO0_PIN);
-  Serial.println(F("  [6 Feeder Relays - Confirmed Schematic Pin Allocation]:"));
+  Serial.printf("    LoRa NSS / CS: GPIO %d (Runtime Active, 10k Pullup Required)\n", poleRadio.getNssPin());
+  Serial.printf("    LoRa RESET   : GPIO %d (Runtime Active, LOW=Reset)\n", poleRadio.getRstPin());
+  Serial.printf("    LoRa DIO0    : GPIO %d (Runtime Active IRQ)\n", poleRadio.getDio0Pin());
+  Serial.println(F("  [6 Feeder Relays - Active Runtime Pin Mapping]:"));
   for (uint8_t i = 0; i < 6; ++i) {
-    Serial.printf("    Feeder %d     : Physical Pin %2d | Board Label %-4s | GPIO %2d (State: LOCKED OFF)\n",
-                  i + 1, POLE_FEEDER_RELAY_PHYS_PINS[i], POLE_FEEDER_RELAY_LABELS[i], POLE_FEEDER_RELAY_PINS[i]);
+    Serial.printf("    Feeder %d     : Board Pin %2d | Label %-4s | Active GPIO %2d (State: LOCKED OFF)\n",
+                  i + 1, POLE_FEEDER_RELAY_PHYS_PINS[i], POLE_FEEDER_RELAY_LABELS[i],
+                  poleActuators.getFeederPin(i));
   }
   Serial.println(F("    CRITICAL: Physical Pin 24 = Board Label D26 = GPIO 26. (GPIO 24 is NOT used!)"));
   Serial.println(F("  [Analog & Auxiliary Expansion - 74HC139 Decoder & MCP23S17]:"));
-  Serial.printf("    Decoder /1E  : GPIO %d (Active LOW Enable)\n", POLE_DECODER_ENABLE_PIN);
-  Serial.printf("    Decoder A0   : GPIO %d (Address Bit 0)\n", POLE_DECODER_A0_PIN);
-  Serial.printf("    Decoder A1   : GPIO %d (Address Bit 1)\n", POLE_DECODER_A1_PIN);
-  Serial.println(F("    /1Y0 (0,0)   : ADS131M08 #1 CS (Feeders 1-3 Currents: Ch 0-7)"));
-  Serial.println(F("    /1Y1 (0,1)   : ADS131M08 #2 CS (Feeders 4-6 Currents: Ch 0-7)"));
-  Serial.println(F("    /1Y2 (1,0)   : ADS131M08 #3 CS (3-Phase Bus Voltages: Ch 0-4)"));
+  Serial.printf("    Decoder /1E  : GPIO %d (Runtime Active LOW Enable)\n", poleMetrology.getDecoderEnablePin());
+  Serial.printf("    Decoder A0   : GPIO %d (Runtime Address Bit 0)\n", poleMetrology.getDecoderA0Pin());
+  Serial.printf("    Decoder A1   : GPIO %d (Runtime Address Bit 1)\n", poleMetrology.getDecoderA1Pin());
+  Serial.println(F("    /1Y0 (0,0)   : ADS131M08 #1 CS (Feeders 1-3 Currents)"));
+  Serial.println(F("    /1Y1 (0,1)   : ADS131M08 #2 CS (Feeders 4-5 Currents + Spare 1)"));
+  Serial.println(F("    /1Y2 (1,0)   : ADS131M08 #3 CS (Feeder 6 + Bus V R/Y/B + Spares 2,3)"));
   Serial.println(F("    /1Y3 (1,1)   : MCP23S17 Daughterboard CS (6 MCB + 6 Contactor Aux Inputs)"));
-  Serial.printf("    ADC SYNC     : GPIO %d (Common Simultaneous Conversion Sync)\n", POLE_ADC_SYNC_PIN);
-  Serial.printf("    ADC 1 DRDY   : GPIO %d (Input-Only Pin)\n", POLE_ADC1_DRDY_PIN);
-  Serial.printf("    ADC 2 DRDY   : GPIO %d (Input-Only Pin)\n", POLE_ADC2_DRDY_PIN);
-  Serial.printf("    ADC 3 DRDY   : GPIO %d (Input-Only Pin)\n", POLE_ADC3_DRDY_PIN);
+  Serial.printf("    ADC SYNC     : GPIO %d (Runtime Simultaneous Conversion Sync)\n", poleMetrology.getAdcSyncPin());
+  Serial.printf("    ADC 1 DRDY   : GPIO %d (Input-Only Pin)\n", poleMetrology.getAdcDrdyPin(0));
+  Serial.printf("    ADC 2 DRDY   : GPIO %d (Input-Only Pin)\n", poleMetrology.getAdcDrdyPin(1));
+  Serial.printf("    ADC 3 DRDY   : GPIO %d (Input-Only Pin)\n", poleMetrology.getAdcDrdyPin(2));
+  Serial.printf("    GPIO39 Auth  : GPIO %d (Ext 10k Pull-up + 100nF RC + Active-LOW Jumper to GND)\n",
+                POLE_PHYSICAL_AUTH_PIN);
   Serial.println(F("--------------------------------------------------------"));
   Serial.println(F("SAFETY INTERLOCK STATUS:"));
-  Serial.println(F("  [ENFORCED] All 6 Feeder Relay pins set to HIGH/OFF at boot."));
-  Serial.println(F("  [ENFORCED] Relay coil drive strictly prohibited in Prompt 06."));
-  Serial.println(F("  [ENFORCED] Strapping Pin 12 completely detached from relays."));
-  Serial.println(F("  [STANDBY]  LoRa SX1278 RF link: Pinout verified; RF radio offline."));
-  Serial.println(F("  [STANDBY]  ADC Subsystem: Pin allocation verified; SPI offline."));
+  Serial.printf("  [PROFILE]  Active Safety Profile : %s\n", poleActuators.getSafetyProfileName());
+  Serial.printf("  [LOCK]     Relays Locked Disabled: %s\n",
+                poleActuators.areRelaysLockedDisabled() ? "YES (FAIL-CLOSED)" : "UNLOCKED (LVDC ONLY)");
+  Serial.printf("  [HW-EMER]  Hardware Relay Interlock: %s\n",
+                poleActuators.isHardwareEmergencyInterlockImplemented() ? "IMPLEMENTED" : "NOT IMPLEMENTED");
+  Serial.println(F("  [ENFORCED] All 6 Feeder Relay pins set to OFF at boot before peripheral init."));
+  Serial.println(F("  [ENFORCED] Strapping Pin 12 detached from feeder relays."));
   Serial.println(F("========================================================\n"));
 }
 
@@ -107,7 +116,7 @@ void printPoleDiagnosticBanner() {
 // =====================================================================
 void setup() {
   // CRITICAL SAFETY STEP 1: IMMEDIATELY DE-ASSERT ALL RELAY OUTPUTS!
-  // Configure all 6 feeder outputs to OFF state before touching any other peripheral.
+  // Configure all 6 default feeder outputs to OFF state before touching NVS or peripherals.
   for (uint8_t i = 0; i < 6; ++i) {
     pinMode(POLE_FEEDER_RELAY_PINS[i], OUTPUT);
     digitalWrite(POLE_FEEDER_RELAY_PINS[i], POLE_RELAY_OFF);
@@ -116,33 +125,46 @@ void setup() {
   // Initialize Persistent Storage early to check for saved hardware pin configurations
   poleStorage.begin();
 
-  // Load and apply saved persistent pin configuration or safely fallback
-  PoleHardwarePinConfig savedPinCfg;
-  bool pinCfgLoaded = poleStorage.loadPinConfig(savedPinCfg);
-  if (pinCfgLoaded && validateHardwarePinConfig(savedPinCfg)) {
-    Serial.println(F("[BOOT] Applying saved persistent hardware pin configuration..."));
-    poleActuators.applyPinConfiguration(savedPinCfg);
+  // Load and apply saved persistent pin configuration or safely fallback (Option A)
+  PoleHardwarePinConfig activePinCfg;
+  bool pinCfgLoaded = poleStorage.loadPinConfig(activePinCfg);
+  if (pinCfgLoaded && validateHardwarePinConfig(activePinCfg)) {
+    s_pinConfigSource = "NVS_STORED_PIN_CONFIG";
+    s_pinConfigValid = true;
+    Serial.println(F("[BOOT] Applying validated NVS hardware pin configuration (schema v2)..."));
   } else {
+    s_pinConfigSource = "FACTORY_DEFAULT_FALLBACK";
     Serial.println(F("[BOOT] No valid saved pin configuration found. Falling back to default board pin mapping."));
-    poleActuators.configurePinMapping(POLE_FEEDER_RELAY_PINS);
+    activePinCfg = getDefaultHardwarePinConfig();
+    s_pinConfigValid = validateHardwarePinConfig(activePinCfg);
   }
 
-  // Initialize and audit relay actuators via driver
-  poleActuators.init();
+  // Apply complete dynamic pin configuration to all subsystems BEFORE peripheral init
+  if (!poleActuators.applyPinConfiguration(activePinCfg)) {
+    s_pinConfigSource = "EMERGENCY_SAFE_FALLBACK";
+    activePinCfg = getDefaultHardwarePinConfig();
+    poleActuators.applyPinConfiguration(activePinCfg);
+  }
+  poleRadio.configurePins(activePinCfg.loraNssPin, activePinCfg.loraRstPin, activePinCfg.loraDio0Pin);
+  poleMetrology.configurePins(activePinCfg.decoderEnablePin, activePinCfg.decoderA0Pin, activePinCfg.decoderA1Pin,
+                              activePinCfg.adcSyncPin, activePinCfg.adcDrdyPins, activePinCfg.adcChannelMap);
+
+  // Initialize and audit relay actuators WITHOUT overwriting applied pin configuration!
+  poleActuators.init(false);
   bool diagOk = poleActuators.validateStartupState();
 
   // De-select LoRa Chip Select
-  pinMode(POLE_LORA_NSS_PIN, OUTPUT);
-  digitalWrite(POLE_LORA_NSS_PIN, HIGH);
+  pinMode(poleRadio.getNssPin(), OUTPUT);
+  digitalWrite(poleRadio.getNssPin(), HIGH);
 
   // Keep LoRa Reset HIGH (Inactive)
-  pinMode(POLE_LORA_RST_PIN, OUTPUT);
-  digitalWrite(POLE_LORA_RST_PIN, HIGH);
+  pinMode(poleRadio.getRstPin(), OUTPUT);
+  digitalWrite(poleRadio.getRstPin(), HIGH);
 
   // Initialize 74HC139 SPI Address Decoder & Deselect all SPI devices
-  pinMode(POLE_DECODER_ENABLE_PIN, OUTPUT);
-  pinMode(POLE_DECODER_A0_PIN, OUTPUT);
-  pinMode(POLE_DECODER_A1_PIN, OUTPUT);
+  pinMode(poleMetrology.getDecoderEnablePin(), OUTPUT);
+  pinMode(poleMetrology.getDecoderA0Pin(), OUTPUT);
+  pinMode(poleMetrology.getDecoderA1Pin(), OUTPUT);
   poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
 
   // Initialize Metrology Subsystem (3x ADS131M08)
@@ -151,6 +173,20 @@ void setup() {
 
   // Initialize SX1278 RA-02 LoRa Radio
   bool radioOk = poleRadio.begin();
+
+  // Initialize Mesh Time Synchronization Manager
+  poleTimeMgr.begin();
+
+  // Security & Key Provisioning Audit (provision before registration/mesh state check!)
+#if defined(MSCB_PROVISIONED_AES_KEY)
+  const uint8_t provKey[MSCB_KEY_LEN_BYTES] = MSCB_PROVISIONED_AES_KEY;
+  cmdSecurity.provisionKey(provKey, sizeof(provKey), MSCB_PROVISIONED_KEY_EPOCH);
+#endif
+  if (!cmdSecurity.isKeyProvisioned()) {
+    Serial.println(F("[SECURITY] ⚠️ No secure key provisioned. Operating in Fail-Closed mode."));
+  } else {
+    Serial.println(F("[SECURITY] ✅ Network security key provisioned (HMAC-SHA256 active)."));
+  }
 
   // Initialize Mesh Router
   poleMesh.begin();
@@ -177,20 +213,6 @@ void setup() {
 
   // Print diagnostic audit
   printPoleDiagnosticBanner();
-
-  // Initialize Mesh Time Synchronization Manager
-  poleTimeMgr.begin();
-
-  // Security & Key Provisioning Audit
-#if defined(MSCB_PROVISIONED_AES_KEY)
-  const uint8_t provKey[MSCB_KEY_LEN_BYTES] = MSCB_PROVISIONED_AES_KEY;
-  cmdSecurity.provisionKey(provKey, sizeof(provKey), MSCB_PROVISIONED_KEY_EPOCH);
-#endif
-  if (!cmdSecurity.isKeyProvisioned()) {
-    Serial.println(F("[SECURITY] ⚠️ No secure key provisioned. Operating in Fail-Closed mode."));
-  } else {
-    Serial.println(F("[SECURITY] ✅ Network security key provisioned (HMAC-SHA256 active)."));
-  }
 
   s_bootTimeMs = millis();
   s_lastHeartbeatMs = s_bootTimeMs;
@@ -232,8 +254,8 @@ void loop() {
         poleRadio.sendPacket(actionFrame);
       }
 
-      // Local Packet Dispatch
-      if (forMe) {
+      // Local Packet Dispatch (only when packet targets this node or broadcast, not pure relay)
+      if (forMe && (!sendAction || inFrame.header.dstAddress == MSCB_BROADCAST_NODE_ID)) {
         switch (inFrame.header.type) {
           case PKT_REGISTER_RESPONSE: {
             if (inFrame.header.payloadLen >= sizeof(PktRegisterResponsePayload)) {

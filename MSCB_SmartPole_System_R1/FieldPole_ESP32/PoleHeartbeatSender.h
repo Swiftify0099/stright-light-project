@@ -48,6 +48,7 @@ private:
   uint32_t lastHeartbeatMs;
   uint32_t heartbeatsSent;
   uint32_t acksReceived;
+  uint32_t hbSeqNonce;
 };
 
 extern PoleHeartbeatSender poleHeartbeat;

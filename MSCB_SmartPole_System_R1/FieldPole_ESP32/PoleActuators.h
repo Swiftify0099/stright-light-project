@@ -78,6 +78,8 @@ public:
     ActuatorDriverState getDriverState() const;
     bool areRelaysLockedDisabled() const;
     void setRelaysLockedDisabled(bool locked);
+    void setBenchTestOverride(bool override);
+    bool getBenchTestOverride() const { return benchTestOverride; }
 
     // 3. Relay Switching Requests
     bool requestRelayOn(uint8_t channel, const char* reason = "CMD");
@@ -96,6 +98,7 @@ public:
     uint8_t getActiveRelayMask() const;
     uint8_t getFaultMask() const;
     uint8_t getPinForChannel(uint8_t channel) const;
+    inline uint8_t getFeederPin(uint8_t channel) const { return getPinForChannel(channel); }
 
     // 6. Emergency & Safety Controls
     void emergencyShutdownAll(const char* reason = "EMERGENCY_SHUTDOWN");
@@ -103,7 +106,6 @@ public:
     bool isEmergencyActive() const;
 
     // 7. Low-Voltage Isolated DC Commissioning Profile & Local Physical Authorization
-    void setBenchTestOverride(bool enabled) { benchTestOverride = enabled; }
     bool isBenchTestOverride() const { return benchTestOverride; }
     void setLocalPhysicalAuthorization(bool authorized);
     bool isLocalPhysicalAuthorized() const;
@@ -111,9 +113,11 @@ public:
     PhysicalAuthStatus getPhysicalAuthStatus() const;
     const char* getPhysicalAuthStatusString() const;
 
-    // 8. GPIO 12 Strapping Risk Audit
+    // 8. GPIO 12 Strapping Risk Audit & Safety Profile Introspection
     bool auditStrappingPins();
     bool isGpio12Safe() const;
+    const char* getSafetyProfileName() const;
+    bool isHardwareEmergencyInterlockImplemented() const { return false; }
 
 private:
     ActuatorDriverState driverState;
@@ -126,7 +130,11 @@ private:
     bool                softwareAuthRequested;
     bool                physicalPinState;
     uint32_t            physicalAuthExpiryMs;
+    bool                physicalLowTracking;
+    uint32_t            physicalLowStartMs;
     uint8_t             physicalAuthDebounceCount;
+    bool                physicalAuthSessionActive;
+    uint32_t            physicalAuthGrantedMs;
 
     ActuatorChannelSpec channels[NUM_FEEDER_ACTUATORS];
 

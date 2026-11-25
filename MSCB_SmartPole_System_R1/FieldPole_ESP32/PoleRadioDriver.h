@@ -66,8 +66,25 @@ public:
   void setModeRxContinuous();
   void setModeSleep();
 
+  // Dynamic Pin Configuration (Option A)
+  void configurePins(uint8_t nss, uint8_t rst, uint8_t dio0);
+  uint8_t getNssPin() const { return pinNss; }
+  uint8_t getRstPin() const { return pinRst; }
+  uint8_t getDio0Pin() const { return pinDio0; }
+
+#if !defined(ARDUINO)
+  void setRadioDetected(bool d) { radioDetected = d; }
+  void setForceTxFail(bool f) { forceTxFail = f; }
+#endif
+
 private:
+  uint8_t  pinNss;
+  uint8_t  pinRst;
+  uint8_t  pinDio0;
   bool     radioDetected;
+#if !defined(ARDUINO)
+  bool     forceTxFail;
+#endif
   uint32_t packetsTx;
   uint32_t packetsRx;
   uint32_t crcErrors;

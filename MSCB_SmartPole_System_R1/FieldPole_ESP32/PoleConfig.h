@@ -43,8 +43,9 @@
 //  NODE IDENTIFIER & ADDRESSING
 // =====================================================================
 #define POLE_FIRMWARE_NAME            "MSCB_FieldPole_ESP32"
-#define POLE_DEFAULT_NODE_ADDRESS     0x0002 // Default address for Pole #2 (modifiable via NVS)
-#define POLE_DEFAULT_STRING_ID        "POLE_02"
+#define POLE_DEFAULT_NODE_ADDRESS     0x0002 // Legacy test default ID
+#define POLE_UNASSIGNED_NODE_ADDRESS  0xFFFE // Explicit unassigned address prior to Gateway approval
+#define POLE_DEFAULT_STRING_ID        "POLE_UNASSIGNED"
 
 // =====================================================================
 //  RELAY DRIVE SAFETY SPECIFICATIONS

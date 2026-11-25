@@ -99,8 +99,10 @@ void GwScheduleManager::broadcastMeshTimeSync() {
   frame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
   frame.header.dstAddress = MSCB_BROADCAST_NODE_ID;
   frame.header.nextHop = MSCB_BROADCAST_NODE_ID;
+  frame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
   frame.header.payloadLen = sizeof(PktTimeSyncPayload);
   memcpy(frame.payload, &syncPkt, sizeof(PktTimeSyncPayload));
+  frame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(frame);
 
   gwRadio.sendPacket(frame);
   #if defined(ARDUINO)

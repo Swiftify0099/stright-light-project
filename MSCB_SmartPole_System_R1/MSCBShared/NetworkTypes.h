@@ -83,15 +83,19 @@ enum MeasurementValidity : uint8_t {
   MEAS_INVALID            = 1,
   MEAS_SENSOR_UNAVAILABLE = 2,
   MEAS_OUT_OF_RANGE       = 3,
-  MEAS_UNKNOWN            = 4
+  MEAS_UNKNOWN            = 4,
+  MEAS_NOT_CALIBRATED     = 5,
+  MEAS_STALE              = 6
 };
 
 inline const char* measurementValidityToString(MeasurementValidity st) {
   switch (st) {
     case MEAS_VALID:              return "VALID";
-    case MEAS_INVALID:            return "INVALID";
+    case MEAS_INVALID:            return "INVALID_READING";
     case MEAS_SENSOR_UNAVAILABLE: return "SENSOR_UNAVAILABLE";
     case MEAS_OUT_OF_RANGE:       return "OUT_OF_RANGE";
+    case MEAS_NOT_CALIBRATED:     return "NOT_CALIBRATED";
+    case MEAS_STALE:              return "STALE";
     case MEAS_UNKNOWN:
     default:                      return "UNKNOWN";
   }

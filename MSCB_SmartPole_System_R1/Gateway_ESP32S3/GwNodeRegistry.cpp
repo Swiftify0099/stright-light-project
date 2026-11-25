@@ -49,14 +49,20 @@ calculateRegistryCrc(uint8_t activeCnt, const RegisteredPole *pPoles,
 GwNodeRegistry::GwNodeRegistry()
     : activeCount(0), pendingCount(0), revokedCount(0),
       currentGeneration(0), activeSlot(0), simulateInterruptedWrite(false),
-      reappearedAlertPending(false) {
+      revokedAlertHead(0), revokedAlertTail(0), revokedAlertCount(0),
+      revokedIncidentCount(0) {
   memset(poles, 0, sizeof(poles));
   memset(pending, 0, sizeof(pending));
   memset(revoked, 0, sizeof(revoked));
-  memset(reappearedAlertBuf, 0, sizeof(reappearedAlertBuf));
+  memset(revokedAlertQueue, 0, sizeof(revokedAlertQueue));
+  memset(revokedIncidents, 0, sizeof(revokedIncidents));
 }
 
-bool GwNodeRegistry::begin() { return loadRegistry(); }
+bool GwNodeRegistry::begin() {
+  bool regOk = loadRegistry();
+  loadRevokedIncidents();
+  return regOk;
+}
 
 bool GwNodeRegistry::isMacRevoked(const uint8_t mac[6]) const {
   if (!mac)
@@ -117,20 +123,223 @@ GwNodeRegistry::getRevokedByIndex(uint8_t index) const {
   return &revoked[index];
 }
 
-void GwNodeRegistry::setReappearedRevokedAlert(const uint8_t mac[6],
+#if !defined(ARDUINO)
+struct SimRevokedIncidentStore {
+  bool initialized;
+  uint32_t magic;
+  uint8_t count;
+  RevokedIncidentTracker items[GW_MAX_REVOKED_INCIDENTS];
+  uint32_t crc;
+};
+static SimRevokedIncidentStore s_simRevokedIncidents = {false, 0, 0, {}, 0};
+#endif
+
+bool GwNodeRegistry::saveRevokedIncidents() {
+  uint32_t crc = mscbStorageCrc32((const uint8_t*)revokedIncidents,
+                                   revokedIncidentCount * sizeof(RevokedIncidentTracker));
+#if !defined(ARDUINO)
+  s_simRevokedIncidents.initialized = true;
+  s_simRevokedIncidents.magic = MSCB_SLOT_MAGIC;
+  s_simRevokedIncidents.count = revokedIncidentCount;
+  memcpy(s_simRevokedIncidents.items, revokedIncidents, sizeof(revokedIncidents));
+  s_simRevokedIncidents.crc = crc;
+  return true;
+#else
+  Preferences pInc;
+  if (!pInc.begin("mscb_rev_inc", false)) return false;
+  pInc.putUInt("magic", MSCB_SLOT_MAGIC);
+  pInc.putUChar("cnt", revokedIncidentCount);
+  if (revokedIncidentCount > 0) {
+    pInc.putBytes("items", revokedIncidents, revokedIncidentCount * sizeof(RevokedIncidentTracker));
+  }
+  pInc.putUInt("crc", crc);
+  pInc.end();
+  return true;
+#endif
+}
+
+bool GwNodeRegistry::loadRevokedIncidents() {
+  memset(revokedIncidents, 0, sizeof(revokedIncidents));
+  revokedIncidentCount = 0;
+#if !defined(ARDUINO)
+  if (!s_simRevokedIncidents.initialized || s_simRevokedIncidents.magic != MSCB_SLOT_MAGIC ||
+      s_simRevokedIncidents.count > GW_MAX_REVOKED_INCIDENTS) {
+    return false;
+  }
+  uint32_t expected = mscbStorageCrc32((const uint8_t*)s_simRevokedIncidents.items,
+                                        s_simRevokedIncidents.count * sizeof(RevokedIncidentTracker));
+  if (expected != s_simRevokedIncidents.crc) return false;
+  revokedIncidentCount = s_simRevokedIncidents.count;
+  memcpy(revokedIncidents, s_simRevokedIncidents.items, sizeof(revokedIncidents));
+#else
+  Preferences pInc;
+  if (!pInc.begin("mscb_rev_inc", true)) return false;
+  uint32_t magic = pInc.getUInt("magic", 0);
+  uint8_t cnt = pInc.getUChar("cnt", 0);
+  uint32_t storedCrc = pInc.getUInt("crc", 0);
+  RevokedIncidentTracker temp[GW_MAX_REVOKED_INCIDENTS];
+  memset(temp, 0, sizeof(temp));
+  bool ok = (magic == MSCB_SLOT_MAGIC && cnt <= GW_MAX_REVOKED_INCIDENTS);
+  if (ok && cnt > 0) {
+    size_t sz = cnt * sizeof(RevokedIncidentTracker);
+    ok = (pInc.getBytes("items", temp, sz) == sz);
+  }
+  pInc.end();
+  if (!ok) return false;
+  if (mscbStorageCrc32((const uint8_t*)temp, cnt * sizeof(RevokedIncidentTracker)) != storedCrc) {
+    return false;
+  }
+  revokedIncidentCount = cnt;
+  memcpy(revokedIncidents, temp, sizeof(temp));
+#endif
+  uint32_t bootNow = millis() / 1000UL;
+  for (uint8_t i = 0; i < revokedIncidentCount; i++) {
+    if (revokedIncidents[i].activeIncident && revokedIncidents[i].lastAlertEpoch > bootNow) {
+      // Gateway rebooted while incident active: anchor post-reboot cooldown cleanly
+      revokedIncidents[i].lastAlertEpoch = bootNow;
+    }
+  }
+  return true;
+}
+
+void GwNodeRegistry::clearReappearedRevokedAlert() {
+  if (revokedAlertCount > 0) {
+    memset(&revokedAlertQueue[revokedAlertHead], 0, sizeof(GwRevokedAlertItem));
+    revokedAlertHead = (revokedAlertHead + 1) % GW_REVOKED_ALERT_QUEUE_CAP;
+    revokedAlertCount--;
+  }
+}
+
+bool GwNodeRegistry::setReappearedRevokedAlert(const uint8_t mac[6],
                                                const char *prevLogicalId,
                                                uint16_t prevPoleId) {
-  reappearedAlertPending = true;
-  snprintf(reappearedAlertBuf, sizeof(reappearedAlertBuf),
+  if (!mac) return false;
+  uint32_t nowEpoch = millis() / 1000UL;
+
+  // Search for an active incident for this MAC
+  int foundIdx = -1;
+  for (uint8_t i = 0; i < revokedIncidentCount; i++) {
+    if (memcmp(revokedIncidents[i].mac, mac, 6) == 0) {
+      foundIdx = (int)i;
+      break;
+    }
+  }
+
+  bool emitAlert = false;
+  uint32_t totalOcc = 1;
+
+  if (foundIdx >= 0) {
+    // Incident already active: update diagnostic counters and timestamps
+    revokedIncidents[foundIdx].lastSeenEpoch = nowEpoch;
+    revokedIncidents[foundIdx].occurrences++;
+    totalOcc = revokedIncidents[foundIdx].occurrences;
+    if (prevPoleId != 0) revokedIncidents[foundIdx].poleId = prevPoleId;
+
+    // Check rearm window: allow a new alert only after 3600 seconds of ongoing incident
+    if (nowEpoch >= revokedIncidents[foundIdx].lastAlertEpoch + 3600UL) {
+      revokedIncidents[foundIdx].lastAlertEpoch = nowEpoch;
+      emitAlert = true;
+    }
+  } else {
+    // New incident!
+    if (revokedIncidentCount < GW_MAX_REVOKED_INCIDENTS) {
+      foundIdx = revokedIncidentCount++;
+    } else {
+      // Evict oldest seen incident
+      foundIdx = 0;
+      for (uint8_t i = 1; i < revokedIncidentCount; i++) {
+        if (revokedIncidents[i].lastSeenEpoch < revokedIncidents[foundIdx].lastSeenEpoch) {
+          foundIdx = (int)i;
+        }
+      }
+    }
+
+    memcpy(revokedIncidents[foundIdx].mac, mac, 6);
+    revokedIncidents[foundIdx].poleId = prevPoleId;
+    revokedIncidents[foundIdx].firstSeenEpoch = nowEpoch;
+    revokedIncidents[foundIdx].lastSeenEpoch = nowEpoch;
+    revokedIncidents[foundIdx].lastAlertEpoch = nowEpoch;
+    revokedIncidents[foundIdx].occurrences = 1;
+    revokedIncidents[foundIdx].activeIncident = true;
+    emitAlert = true;
+  }
+
+  saveRevokedIncidents();
+
+  if (!emitAlert) {
+    return false;
+  }
+
+  // Enqueue without overwriting unread alerts for OTHER MACs
+  int queueSlot = -1;
+  for (uint8_t k = 0; k < revokedAlertCount; k++) {
+    uint8_t idx = (revokedAlertHead + k) % GW_REVOKED_ALERT_QUEUE_CAP;
+    if (memcmp(revokedAlertQueue[idx].mac, mac, 6) == 0) {
+      queueSlot = (int)idx;
+      break;
+    }
+  }
+  if (queueSlot < 0) {
+    if (revokedAlertCount < GW_REVOKED_ALERT_QUEUE_CAP) {
+      queueSlot = (int)revokedAlertTail;
+      revokedAlertTail = (revokedAlertTail + 1) % GW_REVOKED_ALERT_QUEUE_CAP;
+      revokedAlertCount++;
+    } else {
+      // Preserve unread queued alerts for distinct MACs
+      return false;
+    }
+  }
+
+  GwRevokedAlertItem &item = revokedAlertQueue[queueSlot];
+  memcpy(item.mac, mac, 6);
+  item.poleId = prevPoleId;
+  item.occurrences = totalOcc;
+  snprintf(item.text, sizeof(item.text),
            "🚨 *REVOKED DEVICE REAPPEARED*\n"
-           "MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
-           "Previous ID: %s (0x%04X)\n"
-           "Status: PERMANENTLY REVOKED (Relays locked OFF)\n"
-           "Action: Device rejected from network.\n"
-           "To re-authorize: /restore_%02X%02X%02X%02X%02X%02X",
+           "• MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
+           "• Previous ID: %s (0x%04X)\n"
+           "• Status: PERMANENTLY REVOKED (Relays locked OFF)\n"
+           "• Total Occurrences: %u\n"
+           "• Action: Device rejected from network.\n"
+           "• To re-authorize: /restore_%02X%02X%02X%02X%02X%02X",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-           prevLogicalId ? prevLogicalId : "UNKNOWN", prevPoleId, mac[0],
-           mac[1], mac[2], mac[3], mac[4], mac[5]);
+           prevLogicalId ? prevLogicalId : "UNKNOWN", prevPoleId,
+           (unsigned)totalOcc,
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return true;
+}
+
+void GwNodeRegistry::resetRevokedIncidentDeduplication(const uint8_t mac[6]) {
+  if (!mac) {
+    memset(revokedIncidents, 0, sizeof(revokedIncidents));
+    revokedIncidentCount = 0;
+    memset(revokedAlertQueue, 0, sizeof(revokedAlertQueue));
+    revokedAlertHead = 0;
+    revokedAlertTail = 0;
+    revokedAlertCount = 0;
+    saveRevokedIncidents();
+    return;
+  }
+  for (uint8_t i = 0; i < revokedIncidentCount; i++) {
+    if (memcmp(revokedIncidents[i].mac, mac, 6) == 0) {
+      for (uint8_t j = i; j < revokedIncidentCount - 1; j++) {
+        revokedIncidents[j] = revokedIncidents[j + 1];
+      }
+      revokedIncidentCount--;
+      break;
+    }
+  }
+  saveRevokedIncidents();
+}
+
+uint32_t GwNodeRegistry::getRevokedIncidentOccurrences(const uint8_t mac[6]) const {
+  if (!mac) return 0;
+  for (uint8_t i = 0; i < revokedIncidentCount; i++) {
+    if (memcmp(revokedIncidents[i].mac, mac, 6) == 0) {
+      return revokedIncidents[i].occurrences;
+    }
+  }
+  return 0;
 }
 
 RegisteredPole *GwNodeRegistry::findPoleById(uint16_t poleId) {
@@ -199,13 +408,22 @@ uint16_t GwNodeRegistry::allocateNextPoleId() {
 uint8_t GwNodeRegistry::handleJoinRequest(const PktRegisterRequestPayload &req,
                                           int16_t rssi, int8_t snr,
                                           PktRegisterResponsePayload &outResp) {
+  memset(&outResp, 0, sizeof(outResp));
   memcpy(outResp.macAddress, req.macAddress, 6);
   outResp.assignedPoleId = 0x0000;
   outResp.assignedParent = MSCB_GATEWAY_NODE_ID;
   outResp.heartbeatIntervalSec = 30;
-  outResp.networkKeyEpoch = 1;
+  outResp.networkKeyEpoch = cmdSecurity.getActiveKeyEpoch() ? cmdSecurity.getActiveKeyEpoch() : 1;
+  outResp.sessionToken = req.sessionToken;
+  outResp.nonce = req.nonce;
 
-  // 1. Check Permanent Revocation Blacklist
+  // 0. Reject invalid MAC addresses (all-zero / all-FF)
+  if (!mscbIsValidMac(req.macAddress, false)) {
+    outResp.status = REG_RESP_REJECTED_UNAUTHORIZED;
+    return REG_RESP_REJECTED_UNAUTHORIZED;
+  }
+
+  // 1. Check Permanent Revocation Blacklist (Immediate fail-closed before cryptographic auth)
   if (isMacRevoked(req.macAddress)) {
     const PermanentRevocationRecord *rev = findRevokedByMac(req.macAddress);
     setReappearedRevokedAlert(req.macAddress, rev ? rev->logicalId : "UNKNOWN",
@@ -215,48 +433,76 @@ uint8_t GwNodeRegistry::handleJoinRequest(const PktRegisterRequestPayload &req,
                   req.macAddress[0], req.macAddress[1], req.macAddress[2],
                   req.macAddress[3], req.macAddress[4], req.macAddress[5]);
     outResp.status = REG_RESP_REJECTED_REVOKED;
+    if (cmdSecurity.isKeyProvisioned()) {
+      cmdSecurity.computeRegisterResponseAuth(outResp, outResp.authTag);
+    }
     return REG_RESP_REJECTED_REVOKED;
   }
 
-  // 2. Check if already actively registered (e.g. node rebooted)
+  // 0b. Enforce Fail-Closed Cryptographic Request Authentication when key provisioned
+  if (cmdSecurity.isKeyProvisioned()) {
+    if (req.sessionToken == 0 || req.nonce == 0 || !cmdSecurity.verifyRegisterRequestAuth(req)) {
+      Serial.println(F("[SECURITY] ❌ Rejected unauthenticated JOIN_REQ (invalid session/nonce/authTag)"));
+      outResp.status = REG_RESP_REJECTED_UNAUTHORIZED;
+      if (outResp.sessionToken != 0 && outResp.nonce != 0) {
+        cmdSecurity.computeRegisterResponseAuth(outResp, outResp.authTag);
+      }
+      return REG_RESP_REJECTED_UNAUTHORIZED;
+    }
+  }
+
+  // 2. Check if already actively registered or waiting handshake (e.g. node rebooted or retrying response)
   RegisteredPole *existing = findPoleByMac(req.macAddress);
   if (existing) {
     existing->sessionToken = req.sessionToken;
+    existing->lastReqNonce = req.nonce;
     existing->firmwareVersion = req.firmwareVersion;
     existing->lastRssi = rssi;
     existing->lastSnr = snr;
     existing->lastSeenTimestamp = millis() / 1000;
+    saveRegistry();
 
     outResp.status = REG_RESP_APPROVED;
     outResp.assignedPoleId = existing->poleId;
     outResp.assignedParent = existing->primaryParent ? existing->primaryParent
                                                      : MSCB_GATEWAY_NODE_ID;
+    if (cmdSecurity.isKeyProvisioned()) {
+      cmdSecurity.computeRegisterResponseAuth(outResp, outResp.authTag);
+    }
     return REG_RESP_APPROVED;
   }
 
   // 3. Enforce 50-Pole Capacity Limit
   if (activeCount >= GW_MAX_MANAGED_POLES) {
     outResp.status = REG_RESP_REJECTED_CAPACITY;
+    if (cmdSecurity.isKeyProvisioned()) {
+      cmdSecurity.computeRegisterResponseAuth(outResp, outResp.authTag);
+    }
     return REG_RESP_REJECTED_CAPACITY;
   }
 
-  // 4. Check / Enqueue in Pending Queue
+  // 4. Check / Enqueue in Pending Queue (never duplicate same MAC, never re-trigger notifiedAdmin!)
   int pendingIdx = findPendingIndex(req.macAddress);
   if (pendingIdx >= 0) {
     // Update existing pending record
     pending[pendingIdx].requestedParent = req.candidateParent1;
     pending[pendingIdx].firmwareVersion = req.firmwareVersion;
     pending[pendingIdx].sessionToken = req.sessionToken;
+    pending[pendingIdx].lastReqNonce = req.nonce;
     pending[pendingIdx].rssi = rssi;
     pending[pendingIdx].snr = snr;
     pending[pendingIdx].requestTimestamp = millis() / 1000;
+    saveRegistry();
   } else if (pendingCount < GW_MAX_PENDING_REGISTRATIONS) {
     // Add new pending record
     PendingRegistration &p = pending[pendingCount++];
+    memset(&p, 0, sizeof(PendingRegistration));
     memcpy(p.mac, req.macAddress, 6);
     p.requestedParent = req.candidateParent1;
     p.firmwareVersion = req.firmwareVersion;
     p.sessionToken = req.sessionToken;
+    p.lastReqNonce = req.nonce;
+    p.firstHopAddress = MSCB_GATEWAY_NODE_ID;
     p.rssi = rssi;
     p.snr = snr;
     p.requestTimestamp = millis() / 1000;
@@ -265,11 +511,128 @@ uint8_t GwNodeRegistry::handleJoinRequest(const PktRegisterRequestPayload &req,
   } else {
     // Pending queue is full: return capacity rejection
     outResp.status = REG_RESP_REJECTED_CAPACITY;
+    if (cmdSecurity.isKeyProvisioned()) {
+      cmdSecurity.computeRegisterResponseAuth(outResp, outResp.authTag);
+    }
     return REG_RESP_REJECTED_CAPACITY;
   }
 
   outResp.status = REG_RESP_PENDING_APPROVAL;
+  if (cmdSecurity.isKeyProvisioned()) {
+    cmdSecurity.computeRegisterResponseAuth(outResp, outResp.authTag);
+  }
   return REG_RESP_PENDING_APPROVAL;
+}
+
+bool GwNodeRegistry::hasPendingRegistrationAlert() const {
+  for (uint8_t i = 0; i < pendingCount; i++) {
+    if (!pending[i].notifiedAdmin) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const char* GwNodeRegistry::getNextPendingRegistrationAlertText(int &outPendingIndex) {
+  outPendingIndex = -1;
+  for (uint8_t i = 0; i < pendingCount; i++) {
+    if (!pending[i].notifiedAdmin) {
+      outPendingIndex = (int)i;
+      static char buf[384];
+      snprintf(buf, sizeof(buf),
+               "🆕 *NEW POLE REGISTRATION REQUEST*\n"
+               "• MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
+               "• Firmware: v%u.%u\n"
+               "• Signal: RSSI %d dBm | SNR %d dB\n"
+               "• Requested Parent: 0x%04X\n"
+               "• Status: PENDING APPROVAL\n\n"
+               "ℹ️ _Open Registrations menu or use `/pending` to configure and approve._",
+               pending[i].mac[0], pending[i].mac[1], pending[i].mac[2],
+               pending[i].mac[3], pending[i].mac[4], pending[i].mac[5],
+               pending[i].firmwareVersion / 10, pending[i].firmwareVersion % 10,
+               pending[i].rssi, pending[i].snr,
+               pending[i].requestedParent);
+      return buf;
+    }
+  }
+  return "";
+}
+
+void GwNodeRegistry::markPendingRegistrationNotified(int pendingIndex) {
+  if (pendingIndex >= 0 && pendingIndex < pendingCount) {
+    pending[pendingIndex].notifiedAdmin = true;
+    saveRegistry();
+  }
+}
+
+void GwNodeRegistry::setPendingSourceRoute(const uint8_t mac[6], uint32_t reqNonce, uint16_t firstHop, uint16_t srcAddr) {
+  if (!mac) return;
+  int pIdx = findPendingIndex(mac);
+  if (pIdx >= 0) {
+    pending[pIdx].lastReqNonce = reqNonce;
+    pending[pIdx].firstHopAddress = firstHop;
+    pending[pIdx].lastSrcAddress = srcAddr;
+    saveRegistry();
+  }
+  RegisteredPole* rp = findPoleByMac(mac);
+  if (rp) {
+    rp->lastReqNonce = reqNonce;
+    rp->firstHopAddress = firstHop;
+  }
+}
+
+void GwNodeRegistry::recordRegResponseAttempt(const uint8_t mac[6], bool txSuccess) {
+  RegisteredPole* rp = findPoleByMac(mac);
+  if (!rp) return;
+  rp->regResponseAttempts++;
+  rp->lastRegResponseMs = millis();
+  if (rp->status == POLE_STATUS_PENDING_ACK) {
+    rp->regDeliveryState = txSuccess ? 1 : 2;
+  }
+}
+
+bool GwNodeRegistry::hasHandshakeConfirmAlert() const {
+  for (uint8_t i = 0; i < activeCount; i++) {
+    if (poles[i].status == POLE_STATUS_ACTIVE &&
+        poles[i].regDeliveryState == 3 &&
+        !poles[i].handshakeNotifiedAdmin) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const char* GwNodeRegistry::getNextHandshakeConfirmAlertText(int &outPoleIndex) {
+  outPoleIndex = -1;
+  for (uint8_t i = 0; i < activeCount; i++) {
+    if (poles[i].status == POLE_STATUS_ACTIVE &&
+        poles[i].regDeliveryState == 3 &&
+        !poles[i].handshakeNotifiedAdmin) {
+      outPoleIndex = (int)i;
+      static char buf[384];
+      snprintf(buf, sizeof(buf),
+               "✅ *POLE REGISTRATION CONFIRMED ACTIVE*\n"
+               "• Pole: *%s* (`POLE-%04d` / `0x%04X`)\n"
+               "• MAC: `%02X:%02X:%02X:%02X:%02X:%02X`\n"
+               "• Location: %s\n"
+               "• Parent: `0x%04X` (Rank %u)\n"
+               "• Status: First authenticated heartbeat received.",
+               poles[i].displayName, poles[i].poleId, poles[i].poleId,
+               poles[i].mac[0], poles[i].mac[1], poles[i].mac[2],
+               poles[i].mac[3], poles[i].mac[4], poles[i].mac[5],
+               poles[i].location,
+               poles[i].primaryParent, poles[i].rank);
+      return buf;
+    }
+  }
+  return "";
+}
+
+void GwNodeRegistry::markHandshakeConfirmNotified(int poleIndex) {
+  if (poleIndex >= 0 && poleIndex < activeCount) {
+    poles[poleIndex].handshakeNotifiedAdmin = true;
+    saveRegistry();
+  }
 }
 
 bool GwNodeRegistry::approvePending(const uint8_t mac[6],
@@ -282,13 +645,16 @@ bool GwNodeRegistry::approvePending(const uint8_t mac[6],
   if (activeCount >= GW_MAX_MANAGED_POLES)
     return false;
 
+  // Copy ALL pending data BEFORE mutating pending[] or poles[]
+  PendingRegistration pendingCopy = pending[pIdx];
+
   // Determine Display Name and Location (Wizard draft or argument)
   const char *nameToUse = (displayName && strlen(displayName) > 0)
                               ? displayName
-                              : pending[pIdx].draftDisplayName;
+                              : pendingCopy.draftDisplayName;
   const char *locToUse = (location && strlen(location) > 0)
                              ? location
-                             : pending[pIdx].draftLocation;
+                             : pendingCopy.draftLocation;
 
   // Enforce mandatory non-empty Display Name and Installation Location!
   if (!nameToUse || strlen(nameToUse) == 0 || !locToUse ||
@@ -312,28 +678,28 @@ bool GwNodeRegistry::approvePending(const uint8_t mac[6],
 
   RegisteredPole &newPole = poles[activeCount++];
   memset(&newPole, 0, sizeof(RegisteredPole));
-  memcpy(newPole.mac, mac, 6);
+  memcpy(newPole.mac, pendingCopy.mac, 6);
   newPole.poleId = newId;
   snprintf(newPole.stringId, sizeof(newPole.stringId), "POLE_%02d", newId);
   strncpy(newPole.displayName, nameToUse, sizeof(newPole.displayName) - 1);
   strncpy(newPole.location, locToUse, sizeof(newPole.location) - 1);
-  if (strlen(pending[pIdx].draftArea) > 0) {
-    strncpy(newPole.area, pending[pIdx].draftArea, sizeof(newPole.area) - 1);
+  if (strlen(pendingCopy.draftArea) > 0) {
+    strncpy(newPole.area, pendingCopy.draftArea, sizeof(newPole.area) - 1);
   }
-  if (strlen(pending[pIdx].draftLandmark) > 0) {
-    strncpy(newPole.landmark, pending[pIdx].draftLandmark,
+  if (strlen(pendingCopy.draftLandmark) > 0) {
+    strncpy(newPole.landmark, pendingCopy.draftLandmark,
             sizeof(newPole.landmark) - 1);
   }
-  newPole.latitude = pending[pIdx].draftLatitude;
-  newPole.longitude = pending[pIdx].draftLongitude;
-  newPole.hasGps = pending[pIdx].draftHasGps;
+  newPole.latitude = pendingCopy.draftLatitude;
+  newPole.longitude = pendingCopy.draftLongitude;
+  newPole.hasGps = pendingCopy.draftHasGps;
   strncpy(newPole.adminId, adminId ? adminId : "TELEGRAM_ADMIN",
           sizeof(newPole.adminId) - 1);
 
   // Initialize Feeder Names
   for (uint8_t f = 0; f < 6; f++) {
-    if (strlen(pending[pIdx].draftFeederNames[f]) > 0) {
-      strncpy(newPole.feederNames[f], pending[pIdx].draftFeederNames[f],
+    if (strlen(pendingCopy.draftFeederNames[f]) > 0) {
+      strncpy(newPole.feederNames[f], pendingCopy.draftFeederNames[f],
               sizeof(newPole.feederNames[f]) - 1);
     } else {
       snprintf(newPole.feederNames[f], sizeof(newPole.feederNames[f]),
@@ -342,17 +708,33 @@ bool GwNodeRegistry::approvePending(const uint8_t mac[6],
   }
 
   newPole.status = POLE_STATUS_PENDING_ACK; // Handshake pending until confirmed over mesh
-  newPole.firmwareVersion = pending[pIdx].firmwareVersion;
-  newPole.primaryParent = pending[pIdx].requestedParent
-                              ? pending[pIdx].requestedParent
-                              : MSCB_GATEWAY_NODE_ID;
+  newPole.firmwareVersion = pendingCopy.firmwareVersion;
+  uint16_t priParent = (pendingCopy.requestedParent != 0 &&
+                        pendingCopy.requestedParent < MSCB_EPHEMERAL_JOIN_MIN &&
+                        pendingCopy.requestedParent != newId)
+                           ? pendingCopy.requestedParent
+                           : MSCB_GATEWAY_NODE_ID;
+  newPole.primaryParent = priParent;
   newPole.backupParent = MSCB_GATEWAY_NODE_ID;
-  newPole.rank = 1;
-  newPole.sessionToken = pending[pIdx].sessionToken;
+  if (priParent == MSCB_GATEWAY_NODE_ID) {
+    newPole.rank = 1;
+  } else {
+    RegisteredPole* par = findPoleById(priParent);
+    newPole.rank = (par && par->rank > 0 && par->rank < 254) ? (uint8_t)(par->rank + 1) : 2;
+  }
+  newPole.sessionToken = pendingCopy.sessionToken;
+  newPole.lastReqNonce = pendingCopy.lastReqNonce;
+  newPole.firstHopAddress = pendingCopy.firstHopAddress ? pendingCopy.firstHopAddress : MSCB_GATEWAY_NODE_ID;
+  newPole.regResponseAttempts = 0;
+  newPole.lastRegResponseMs = 0;
+  newPole.regDeliveryState = 0;
+  newPole.handshakeNotifiedAdmin = false;
+  newPole.lastHeartbeatSeq = 0;
+  newPole.lastUptimeSec = 0;
   newPole.registeredTimestamp = millis() / 1000;
   newPole.lastSeenTimestamp = newPole.registeredTimestamp;
-  newPole.lastRssi = pending[pIdx].rssi;
-  newPole.lastSnr = pending[pIdx].snr;
+  newPole.lastRssi = pendingCopy.rssi;
+  newPole.lastSnr = pendingCopy.snr;
   newPole.feederStateMask = 0;
   newPole.auxFeedbackMask = 0;
   newPole.mcbStatusMask = 0;
@@ -666,6 +1048,8 @@ void GwNodeRegistry::confirmPoleHandshake(uint16_t poleId) {
   for (uint8_t i = 0; i < activeCount; i++) {
     if (poles[i].poleId == poleId && poles[i].status == POLE_STATUS_PENDING_ACK) {
       poles[i].status = POLE_STATUS_ACTIVE;
+      poles[i].regDeliveryState = 3; // HANDSHAKE_CONFIRMED
+      poles[i].handshakeNotifiedAdmin = false;
       Serial.printf("[REGISTRY] 🤝 Pole 0x%04X handshake confirmed -> POLE_STATUS_ACTIVE\n", poleId);
       saveRegistry();
       break;
@@ -800,8 +1184,12 @@ void GwNodeRegistry::resetStorageToDefault() {
   currentGeneration = 0;
   activeSlot = 0;
   simulateInterruptedWrite = false;
-  reappearedAlertPending = false;
-  reappearedAlertBuf[0] = '\0';
+  memset(revokedAlertQueue, 0, sizeof(revokedAlertQueue));
+  revokedAlertHead = 0;
+  revokedAlertTail = 0;
+  revokedAlertCount = 0;
+  memset(revokedIncidents, 0, sizeof(revokedIncidents));
+  revokedIncidentCount = 0;
   memset(poles, 0, sizeof(poles));
   memset(pending, 0, sizeof(pending));
   memset(revoked, 0, sizeof(revoked));
@@ -812,8 +1200,9 @@ void GwNodeRegistry::resetStorageToDefault() {
   s_simSlotB.valid = false;
   memset(&s_simSlotA, 0, sizeof(s_simSlotA));
   memset(&s_simSlotB, 0, sizeof(s_simSlotB));
+  memset(&s_simRevokedIncidents, 0, sizeof(s_simRevokedIncidents));
 #else
-  Preferences pA, pB;
+  Preferences pA, pB, pInc;
   if (pA.begin("mscb_reg_a", false)) {
     pA.clear();
     pA.end();
@@ -821,6 +1210,10 @@ void GwNodeRegistry::resetStorageToDefault() {
   if (pB.begin("mscb_reg_b", false)) {
     pB.clear();
     pB.end();
+  }
+  if (pInc.begin("mscb_rev_inc", false)) {
+    pInc.clear();
+    pInc.end();
   }
 #endif
 }

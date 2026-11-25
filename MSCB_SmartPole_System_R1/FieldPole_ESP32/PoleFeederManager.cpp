@@ -228,7 +228,7 @@ bool PoleFeederManager::processCommandPayload(const PktFeederCmdPayload &cmd) {
   env.commandParam = cmd.commandAction;
   env.sequenceNumber = cmd.sequenceNumber;
   env.expiryEpochSec = cmd.expiryEpochSec;
-  env.keyEpoch = 1;
+  env.keyEpoch = cmdSecurity.getActiveKeyEpoch();
   memcpy(env.hmacTag, cmd.hmacTag, sizeof(env.hmacTag));
 
   // Derive current UTC epoch from authenticated mesh time anchor

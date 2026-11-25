@@ -68,6 +68,11 @@ struct PoleHeartbeatStatus {
   PoleHealthStateMonitor reportedState; // for alert deduplication
   uint32_t               stateChangeTimestamp;
   uint32_t               lastAlertEpoch;       // per-pole cooldown tracking
+  bool                   hasPendingAlert;      // True if transition could not be queued (queue was full)
+  PoleHealthStateMonitor pendingState;         // Pending state transition to retry
+  uint16_t               pendingParentId;      // Pending parent ID
+  uint32_t               pendingDurationSec;   // Outage duration at transition
+  char                   pendingReason[48];    // Reason at transition
 };
 
 class GwHeartbeatMonitor {
@@ -93,30 +98,51 @@ public:
   uint16_t getMissedCount(uint16_t poleId) const;
   uint32_t getLastSeen(uint16_t poleId) const;
 
-  // Bounded Telegram alert queue API (R3.2.1)
+  // Bounded Telegram alert queue API (R3.2.1 / R3.2.2 Reliable Retry)
   bool hasPendingAlert() const { return alertQueueCount > 0; }
   uint8_t getAlertQueueCount() const { return alertQueueCount; }
   const char* getNextAlertText();
+  bool peekNextAlert(GwAlertEvent &outEvent) const;
+  bool peekAlertAt(uint8_t offset, GwAlertEvent &outEvent) const;
+  bool formatAlertEvent(const GwAlertEvent &ev, char* outBuf, size_t outBufLen) const;
   bool popNextAlert(GwAlertEvent &outEvent);
+  bool confirmAlertsDelivered(uint8_t count, uint32_t nowEpoch = 0);
   void clearPendingAlert();
+
+  // Explicit queue insertion with retry support (R3.2.2 P0)
+  bool queueAlert(uint16_t poleId, PoleHealthStateMonitor newState, uint32_t outageDurationSec = 0,
+                  uint16_t parentId = 0, const char* reason = "TIMEOUT", uint32_t eventEpoch = 0);
+  bool queueAlert(const GwAlertEvent &ev) {
+    return queueAlert(ev.poleId, ev.newState, ev.durationSec, ev.parentId, ev.reason, ev.eventTimestampEpoch);
+  }
+  void drainPendingAlerts(uint32_t nowEpoch = 0);
+
+  // Child propagation from upstream reporting parent pole
+  void recordChildOfflineFromParent(uint16_t childPoleId, uint16_t parentPoleId, uint32_t eventEpoch, const char* reason = "CHILD_OFFLINE_VIA_PARENT");
+  void recordChildRecoveredFromParent(uint16_t childPoleId, uint16_t parentPoleId, uint32_t eventEpoch);
 
   // Diagnostic counters
   uint32_t getAlertsQueuedCount() const { return alertsQueuedCount; }
+  uint32_t getAlertsDeliveredCount() const { return alertsDeliveredCount; }
+  uint32_t getAlertsPendingCount() const { return alertsPendingCount; }
+  uint32_t getAlertsRetriedCount() const { return alertsRetriedCount; }
   uint32_t getAlertsDroppedCount() const { return alertsDroppedCount; }
   uint32_t getAlertsDeduplicatedCount() const { return alertsDeduplicatedCount; }
+  uint8_t  getPendingPolesCount() const;
 
   // Record heartbeat ping received
   void onHeartbeatReceived(uint16_t poleId, uint32_t nowEpoch);
 
 private:
   int findIndex(uint16_t poleId) const;
-  void queueAlert(uint16_t poleId, PoleHealthStateMonitor newState, uint32_t outageDurationSec = 0,
-                  uint16_t parentId = 0, const char* reason = "TIMEOUT", uint32_t eventEpoch = 0);
+  void setPendingAlert(uint8_t idx, PoleHealthStateMonitor pendingState, uint16_t parentId,
+                       uint32_t durationSec, const char* reason);
 
   uint16_t            heartbeatIntervalSec;
   uint16_t            offlineTimeoutSec;
   uint16_t            alertCooldownSec;
   uint32_t            lastCheckMs;
+  uint32_t            lastEpochSec;
 
   PoleHeartbeatStatus statuses[GW_MAX_MANAGED_POLES];
   uint8_t             statusCount;
@@ -127,6 +153,9 @@ private:
   uint8_t             alertQueueCount;
 
   uint32_t            alertsQueuedCount;
+  uint32_t            alertsDeliveredCount;
+  uint32_t            alertsPendingCount;
+  uint32_t            alertsRetriedCount;
   uint32_t            alertsDroppedCount;
   uint32_t            alertsDeduplicatedCount;
 

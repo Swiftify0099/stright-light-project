@@ -19,8 +19,36 @@
 // =====================================================================
 #define MSCB_PROTOCOL_MAGIC_0          0x4D // 'M'
 #define MSCB_PROTOCOL_MAGIC_1          0x53 // 'S'
-#define MSCB_PROTOCOL_VERSION          0x01
+#define MSCB_PROTOCOL_VERSION          0x02
 #define MSCB_MAX_PAYLOAD_SIZE          128
+#define MSCB_UNASSIGNED_NODE_ID        0xFFFE
+#define MSCB_EPHEMERAL_JOIN_MIN        0xFE00
+#define MSCB_EPHEMERAL_JOIN_MAX        0xFEFD
+
+inline bool mscbIsValidMac(const uint8_t mac[6], bool requireUnicast = true) {
+  if (!mac) return false;
+  bool anyNonZero = false;
+  bool anyNonFF = false;
+  for (uint8_t i = 0; i < 6; i++) {
+    if (mac[i] != 0x00) anyNonZero = true;
+    if (mac[i] != 0xFF) anyNonFF = true;
+  }
+  if (!anyNonZero || !anyNonFF) return false;
+  if (requireUnicast && (mac[0] & 0x01) != 0) return false;
+  return true;
+}
+
+inline bool mscbIsValidAssignedPoleId(uint16_t poleId) {
+  return (poleId >= 0x0002 && poleId < MSCB_EPHEMERAL_JOIN_MIN);
+}
+
+inline uint16_t mscbMakeEphemeralJoinAddr(const uint8_t mac[6]) {
+  if (!mac) return MSCB_UNASSIGNED_NODE_ID;
+  uint16_t h = (uint16_t)(((uint16_t)mac[4] << 8) | mac[5]) ^
+               (uint16_t)(((uint16_t)mac[2] << 8) | mac[3]);
+  uint16_t span = (uint16_t)(MSCB_EPHEMERAL_JOIN_MAX - MSCB_EPHEMERAL_JOIN_MIN + 1);
+  return (uint16_t)(MSCB_EPHEMERAL_JOIN_MIN + (h % span));
+}
 
 // =====================================================================
 //  PACKET TYPE ENUMERATION
@@ -39,6 +67,8 @@ enum PacketType : uint8_t {
   PKT_ALERT_OVERCURRENT        = 0x12, // Automatic trip alert from pole to gateway
   PKT_ALERT_VOLTAGE_FAULT      = 0x13, // Phase loss, under-voltage, over-voltage alert
   PKT_ALERT_REVOKED_REAPPEAR   = 0x14, // Dedicated Revoked Pole Reappearance Alert
+  PKT_ALERT_CHILD_OFFLINE      = 0x15, // Reporting parent pole notifies Gateway of child offline (R3.2.2 P0)
+  PKT_ALERT_CHILD_RECOVERED    = 0x16, // Reporting parent pole notifies Gateway of child recovered (R3.2.2 P0)
 
   // Command & Actuation
   PKT_CMD_FEEDER_SWITCH        = 0x20, // Gateway commands feeder relay ON/OFF
@@ -54,21 +84,23 @@ enum PacketType : uint8_t {
 };
 
 // =====================================================================
-//  FIXED BINARY PACKET HEADER (16 BYTES)
+//  FIXED BINARY PACKET HEADER (23 BYTES - R3.2.2)
 // =====================================================================
 #pragma pack(push, 1)
 struct MeshPacketHeader {
-  uint8_t  magic[2];     // MSCB_PROTOCOL_MAGIC_0, MSCB_PROTOCOL_MAGIC_1
-  uint8_t  version;      // MSCB_PROTOCOL_VERSION
-  uint8_t  type;         // PacketType
-  uint8_t  priority;     // PacketPriority
-  uint8_t  hopCount;     // Current hop count (incremented each forward)
-  uint8_t  maxHops;      // Max allowed hops (e.g., 6)
-  uint16_t seqNumber;    // Monotonically increasing sequence number
-  uint16_t srcAddress;   // Originating node address (0x0001 = Gateway)
-  uint16_t dstAddress;   // Final destination (0xFFFF = Broadcast)
-  uint16_t nextHop;      // Immediate recipient address
-  uint16_t payloadLen;   // Payload length in bytes (excluding header and CRC)
+  uint8_t  magic[2];            // MSCB_PROTOCOL_MAGIC_0, MSCB_PROTOCOL_MAGIC_1
+  uint8_t  version;             // MSCB_PROTOCOL_VERSION (0x02)
+  uint8_t  type;                // PacketType
+  uint8_t  priority;            // PacketPriority
+  uint8_t  hopCount;            // Current hop count (incremented each forward)
+  uint8_t  maxHops;             // Max allowed hops (e.g., 6)
+  uint16_t seqNumber;           // Monotonically increasing sequence number
+  uint16_t srcAddress;          // Originating node address (0x0001 = Gateway)
+  uint16_t dstAddress;          // Final destination (0xFFFF = Broadcast)
+  uint16_t nextHop;             // Immediate recipient address
+  uint16_t previousHopAddress;  // Immediate transmitting node address (R3.2.2 P0)
+  uint32_t hopAuthToken;        // Authenticated 32-bit hop verification token (R3.2.2 P0)
+  uint16_t payloadLen;          // Payload length in bytes (excluding header and CRC)
 };
 #pragma pack(pop)
 
@@ -104,6 +136,9 @@ struct PktRegisterResponsePayload {
   uint16_t assignedParent;
   uint16_t heartbeatIntervalSec;
   uint32_t networkKeyEpoch;
+  uint32_t sessionToken;         // Correlated registration session token (R3.2.2 P0)
+  uint32_t nonce;                // Correlated request nonce (R3.2.2 P0)
+  uint8_t  authTag[16];          // Cryptographic authentication tag (R3.2.2 P0)
 };
 
 struct PktHeartbeatPingPayload {
@@ -120,6 +155,10 @@ struct PktHeartbeatPingPayload {
   uint32_t uptimeSec;
   float    busVoltageV;          // R-phase bus voltage or avg
   float    totalCurrentA;        // aggregate current
+  uint8_t  macAddress[6];        // Hardware MAC for identity & handshake binding (R3.2.2)
+  uint32_t sessionToken;         // Active registration session token (R3.2.2)
+  uint32_t seqNonce;             // Fresh monotonic heartbeat nonce (R3.2.2)
+  uint8_t  authTag[16];          // Cryptographic authentication tag (R3.2.2)
 };
 
 enum HeartbeatAckStatus : uint8_t {
@@ -208,6 +247,15 @@ struct PktBeaconAnnouncePayload {
   uint16_t primaryParent;
   uint8_t  capacitySlotsFree;
   uint32_t beaconTimestamp;
+};
+
+struct PktChildStatusEventPayload {
+  uint16_t parentPoleId;      // Reporting parent pole
+  uint16_t childPoleId;       // Downstream child pole ID
+  uint8_t  eventType;         // 0 = CHILD_EVENT_OFFLINE, 1 = CHILD_EVENT_RECOVERED
+  uint8_t  reason;            // 1 = TIMEOUT, 2 = PACKET_RECEIVED
+  uint32_t eventTimestamp;    // Timestamp of event
+  uint32_t eventSeqNumber;    // Monotonic event sequence number
 };
 
 /**

@@ -16,6 +16,11 @@
 
 PoleMetrology poleMetrology;
 
+// Global dynamic decoder pin definitions
+uint8_t g_poleDecoderEnablePin = POLE_DECODER_ENABLE_PIN;
+uint8_t g_poleDecoderA0Pin = POLE_DECODER_A0_PIN;
+uint8_t g_poleDecoderA1Pin = POLE_DECODER_A1_PIN;
+
 // Authoritative 24-Raw-Channel Physical Mapping (Verified against Fifth-Pass Audit & Document 09)
 const RawAdcChannelMap AUTHORITATIVE_ADC_MAP[METROLOGY_TOTAL_RAW_CH] = {
   // ── ADC #1 (Device 0, CS via Decoder /1Y0): Feeders 1 to 3 Currents ──
@@ -53,12 +58,23 @@ PoleMetrology::PoleMetrology() :
   allAdcsDetected(false),
   lastFrameTimestampMs(0),
   measuredFrequency(NAN),
+  pinDecEn(POLE_DECODER_ENABLE_PIN),
+  pinDecA0(POLE_DECODER_A0_PIN),
+  pinDecA1(POLE_DECODER_A1_PIN),
+  pinAdcSync(POLE_ADC_SYNC_PIN),
   sampleCountInWindow(0),
   zeroCrossings(0),
   lastZeroCrossVal(0)
 {
+  pinAdcDrdy[0] = POLE_ADC1_DRDY_PIN;
+  pinAdcDrdy[1] = POLE_ADC2_DRDY_PIN;
+  pinAdcDrdy[2] = POLE_ADC3_DRDY_PIN;
+  for (uint8_t r = 0; r < METROLOGY_TOTAL_RAW_CH; r++) {
+    adcChannelMap[r] = AUTHORITATIVE_ADC_MAP[r].logicalChId;
+  }
   for (uint8_t i = 0; i < METROLOGY_NUM_ADC_CHIPS; i++) {
     chipDetected[i] = false;
+    chipStatusWords[i] = 0x0000;
   }
   for (uint8_t i = 0; i < METROLOGY_TOTAL_ACTIVE_CH; i++) {
     channelStates[i] = CHANNEL_ADC_NOT_CONNECTED;
@@ -114,20 +130,49 @@ void PoleMetrology::resetCalibrationToDefaults() {
   }
 }
 
+bool PoleMetrology::validateAds131m08DeviceId(uint16_t rawIdReg) {
+  if (rawIdReg == 0x0000 || rawIdReg == 0xFFFF) {
+    return false;
+  }
+  // TI ADS131M08 ID register [15:8] identifies 8-channel device family (0x28xx)
+  return ((rawIdReg & 0xFF00) == 0x2800);
+}
+
+bool PoleMetrology::validateAds131m08StatusWord(uint16_t statusWord) {
+  if (statusWord == 0x0000 || statusWord == 0xFFFF) {
+    return false;
+  }
+  // Reject status word with fault/reset bit asserted (Bit 9 = RESET)
+  if ((statusWord & 0x0200) != 0) {
+    return false;
+  }
+  // Require at least one conversion DRDY bit asserted in lower byte
+  return ((statusWord & 0x00FF) != 0x0000);
+}
+
+uint16_t PoleMetrology::getAdcStatusWord(uint8_t chipIdx) const {
+  if (chipIdx >= METROLOGY_NUM_ADC_CHIPS) return 0x0000;
+  return chipStatusWords[chipIdx];
+}
+
 void PoleMetrology::setAdcChipDetected(uint8_t chipIdx, bool detected) {
   if (chipIdx < METROLOGY_NUM_ADC_CHIPS) {
     chipDetected[chipIdx] = detected;
+    chipStatusWords[chipIdx] = detected ? 0x05FF : 0x0000;
     allAdcsDetected = (chipDetected[0] && chipDetected[1] && chipDetected[2]);
-    // Update channels depending on this chip
+    // Update channels depending on this chip using active channel map
     for (uint8_t r = 0; r < METROLOGY_TOTAL_RAW_CH; r++) {
-      const RawAdcChannelMap &m = AUTHORITATIVE_ADC_MAP[r];
-      if (m.chipIndex == chipIdx && !m.isSpare && m.logicalChId != 0) {
-        uint8_t lIdx = m.logicalChId - 1;
+      uint8_t rChip = r / METROLOGY_CHANNELS_PER_ADC;
+      uint8_t lCh = adcChannelMap[r];
+      if (rChip == chipIdx && lCh >= 1 && lCh <= METROLOGY_TOTAL_ACTIVE_CH) {
+        uint8_t lIdx = lCh - 1;
         if (!detected) {
           channelStates[lIdx] = CHANNEL_ADC_NOT_CONNECTED;
+          channelFreshness[lIdx] = MEAS_FRESHNESS_UNKNOWN;
           channelRmsValues[lIdx] = NAN;
         } else {
-          channelStates[lIdx] = calibrationTable[lIdx].isValid ? CHANNEL_STATE_OK : CHANNEL_UNCALIBRATED;
+          channelStates[lIdx] = calibrationTable[lIdx].isValid ? CHANNEL_DATA_UNAVAILABLE : CHANNEL_UNCALIBRATED;
+          channelFreshness[lIdx] = MEAS_FRESHNESS_UNKNOWN;
         }
       }
     }
@@ -160,11 +205,12 @@ bool PoleMetrology::detectHardware() {
     uint16_t response = SPI.transfer16(0x0000);
     poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
 
-    // ADS131M08 ID register contains non-zero ID and is not floating 0x0000 or 0xFFFF
-    if (response != 0x0000 && response != 0xFFFF) {
+    if (validateAds131m08DeviceId(response)) {
       chipDetected[c] = true;
+      chipStatusWords[c] = 0x05FF;
     } else {
       chipDetected[c] = false;
+      chipStatusWords[c] = 0x0000;
     }
   }
 #else
@@ -172,36 +218,84 @@ bool PoleMetrology::detectHardware() {
   chipDetected[0] = false;
   chipDetected[1] = false;
   chipDetected[2] = false;
+  chipStatusWords[0] = 0x0000;
+  chipStatusWords[1] = 0x0000;
+  chipStatusWords[2] = 0x0000;
 #endif
 
   allAdcsDetected = (chipDetected[0] && chipDetected[1] && chipDetected[2]);
 
-  // Update per-channel states based on actual chip detection
+  // Update per-channel states based on actual chip detection & active channel map
   for (uint8_t r = 0; r < METROLOGY_TOTAL_RAW_CH; r++) {
-    const RawAdcChannelMap &m = AUTHORITATIVE_ADC_MAP[r];
-    if (m.isSpare || m.logicalChId == 0) continue;
-    uint8_t lIdx = m.logicalChId - 1;
+    uint8_t rChip = r / METROLOGY_CHANNELS_PER_ADC;
+    uint8_t lCh = adcChannelMap[r];
+    if (lCh < 1 || lCh > METROLOGY_TOTAL_ACTIVE_CH) continue;
+    uint8_t lIdx = lCh - 1;
 
-    if (!chipDetected[m.chipIndex]) {
+    if (!chipDetected[rChip]) {
       channelStates[lIdx] = CHANNEL_ADC_NOT_CONNECTED;
       channelFreshness[lIdx] = MEAS_FRESHNESS_UNKNOWN;
       channelRmsValues[lIdx] = NAN;
     } else {
       channelStates[lIdx] = calibrationTable[lIdx].isValid ? CHANNEL_DATA_UNAVAILABLE : CHANNEL_UNCALIBRATED;
+      channelFreshness[lIdx] = MEAS_FRESHNESS_UNKNOWN;
     }
   }
 
   return allAdcsDetected;
 }
 
+void PoleMetrology::configurePins(uint8_t decEn, uint8_t decA0, uint8_t decA1, uint8_t sync, const uint8_t drdyPins[3],
+                                  const uint8_t adcChMap[METROLOGY_TOTAL_RAW_CH]) {
+  pinDecEn = decEn;
+  pinDecA0 = decA0;
+  pinDecA1 = decA1;
+  pinAdcSync = sync;
+  g_poleDecoderEnablePin = decEn;
+  g_poleDecoderA0Pin = decA0;
+  g_poleDecoderA1Pin = decA1;
+  if (drdyPins) {
+    for (uint8_t i = 0; i < 3; i++) pinAdcDrdy[i] = drdyPins[i];
+  }
+  if (adcChMap) {
+    // Validate 1..21 bijection + 3 spares before activating runtime map
+    uint8_t seen[METROLOGY_TOTAL_ACTIVE_CH + 1];
+    memset(seen, 0, sizeof(seen));
+    uint8_t spares = 0;
+    bool valid = true;
+    for (uint8_t r = 0; r < METROLOGY_TOTAL_RAW_CH; r++) {
+      uint8_t ch = adcChMap[r];
+      if (ch == 0) {
+        spares++;
+      } else if (ch <= METROLOGY_TOTAL_ACTIVE_CH && seen[ch] == 0) {
+        seen[ch] = 1;
+      } else {
+        valid = false;
+        break;
+      }
+    }
+    if (valid && spares == 3) {
+      for (uint8_t c = 1; c <= METROLOGY_TOTAL_ACTIVE_CH; c++) {
+        if (seen[c] != 1) {
+          valid = false;
+          break;
+        }
+      }
+      if (valid) {
+        memcpy(adcChannelMap, adcChMap, METROLOGY_TOTAL_RAW_CH);
+      }
+    }
+  }
+}
+
 bool PoleMetrology::begin() {
 #if defined(ARDUINO)
-  pinMode(POLE_ADC_SYNC_PIN, OUTPUT);
-  digitalWrite(POLE_ADC_SYNC_PIN, HIGH);
+  pinMode(pinAdcSync, OUTPUT);
+  digitalWrite(pinAdcSync, HIGH);
 
-  pinMode(POLE_ADC1_DRDY_PIN, INPUT);
-  pinMode(POLE_ADC2_DRDY_PIN, INPUT);
-  pinMode(POLE_ADC3_DRDY_PIN, INPUT);
+  pinMode(pinAdcDrdy[0], INPUT);
+  pinMode(pinAdcDrdy[1], INPUT);
+  pinMode(pinAdcDrdy[2], INPUT);
 #endif
 
   // Load saved calibration from storage
@@ -228,8 +322,9 @@ bool PoleMetrology::checkZeroFrame(const int32_t rawSamples[METROLOGY_TOTAL_RAW_
 }
 
 int PoleMetrology::findRawIndexForLogicalCh(uint8_t logicalChId1Based) const {
+  if (logicalChId1Based < 1 || logicalChId1Based > METROLOGY_TOTAL_ACTIVE_CH) return -1;
   for (uint8_t r = 0; r < METROLOGY_TOTAL_RAW_CH; r++) {
-    if (AUTHORITATIVE_ADC_MAP[r].logicalChId == logicalChId1Based) {
+    if (adcChannelMap[r] == logicalChId1Based) {
       return r;
     }
   }
@@ -237,6 +332,16 @@ int PoleMetrology::findRawIndexForLogicalCh(uint8_t logicalChId1Based) const {
 }
 
 bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_RAW_CH], uint32_t timestampMs) {
+  uint16_t nominalStatus[METROLOGY_NUM_ADC_CHIPS];
+  for (uint8_t c = 0; c < METROLOGY_NUM_ADC_CHIPS; c++) {
+    nominalStatus[c] = chipDetected[c] ? 0x05FF : 0x0000;
+  }
+  return processRawAdcFrameWithStatus(nominalStatus, rawSamples, timestampMs);
+}
+
+bool PoleMetrology::processRawAdcFrameWithStatus(const uint16_t statusWords[METROLOGY_NUM_ADC_CHIPS],
+                                                 const int32_t rawSamples[METROLOGY_TOTAL_RAW_CH],
+                                                 uint32_t timestampMs) {
   // 1. Zero-Frame & Dead-Bus Rejection
   if (checkZeroFrame(rawSamples)) {
     for (uint8_t i = 0; i < METROLOGY_TOTAL_ACTIVE_CH; i++) {
@@ -244,36 +349,53 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
       channelFreshness[i] = MEAS_FRESHNESS_STALE;
       channelRmsValues[i] = NAN;
     }
+    for (uint8_t f = 0; f < METROLOGY_NUM_FEEDERS; f++) {
+      feederActivePower[f] = NAN;
+      feederPowerFactor[f] = NAN;
+    }
+    measuredFrequency = NAN;
     return false;
   }
 
-  lastFrameTimestampMs = timestampMs;
+  for (uint8_t c = 0; c < METROLOGY_NUM_ADC_CHIPS; c++) {
+    chipStatusWords[c] = (statusWords && chipDetected[c]) ? statusWords[c] : 0x0000;
+  }
 
   // Full-scale voltage calculation for ADS131M08 (FSR = +/- 1.2V diff at Gain 1)
   // 24-bit bipolar 2's complement: Range is -8,388,608 to +8,388,607
   const float V_PER_COUNT = 1.20f / 8388607.0f;
 
   float pinVoltages[METROLOGY_TOTAL_RAW_CH];
+  bool anyValidChipFrame = false;
 
   // Decode raw 24-bit signed samples into pin voltages
   for (uint8_t r = 0; r < METROLOGY_TOTAL_RAW_CH; r++) {
-    const RawAdcChannelMap &map = AUTHORITATIVE_ADC_MAP[r];
-    if (map.isSpare || map.logicalChId == 0) {
+    uint8_t chipIdx = r / METROLOGY_CHANNELS_PER_ADC;
+    uint8_t logicalCh = adcChannelMap[r];
+    if (logicalCh < 1 || logicalCh > METROLOGY_TOTAL_ACTIVE_CH) {
       pinVoltages[r] = 0.0f;
       continue;
     }
 
-    uint8_t lIdx = map.logicalChId - 1;
+    uint8_t lIdx = logicalCh - 1;
 
-    // Check if the underlying ADC chip was detected
-    if (!chipDetected[map.chipIndex]) {
+    // Check if the underlying ADC chip was detected and has valid SPI status word
+    if (!chipDetected[chipIdx]) {
       channelStates[lIdx] = CHANNEL_ADC_NOT_CONNECTED;
       channelFreshness[lIdx] = MEAS_FRESHNESS_UNKNOWN;
       channelRmsValues[lIdx] = NAN;
       pinVoltages[r] = 0.0f;
       continue;
     }
+    if (!validateAds131m08StatusWord(chipStatusWords[chipIdx])) {
+      channelStates[lIdx] = CHANNEL_DATA_UNAVAILABLE;
+      channelFreshness[lIdx] = MEAS_FRESHNESS_UNKNOWN;
+      channelRmsValues[lIdx] = NAN;
+      pinVoltages[r] = 0.0f;
+      continue;
+    }
 
+    anyValidChipFrame = true;
     int32_t sample = rawSamples[r];
     // Sign extension from 24-bit
     if (sample & 0x00800000) {
@@ -287,8 +409,10 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
     // Saturation / Clipping Check (+/- 1.199V)
     if (calibratedV >= 1.199f || calibratedV <= -1.199f) {
       channelStates[lIdx] = CHANNEL_OVER_RANGE_CLIPPING;
+      channelRmsValues[lIdx] = NAN;
     } else if (!cal.isValid) {
       channelStates[lIdx] = CHANNEL_UNCALIBRATED;
+      channelRmsValues[lIdx] = NAN;
     } else {
       channelStates[lIdx] = CHANNEL_STATE_OK; // VALID
     }
@@ -297,18 +421,29 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
     channelFreshness[lIdx] = MEAS_FRESHNESS_LIVE;
   }
 
+  if (!anyValidChipFrame) {
+    for (uint8_t f = 0; f < METROLOGY_NUM_FEEDERS; f++) {
+      feederActivePower[f] = NAN;
+      feederPowerFactor[f] = NAN;
+    }
+    measuredFrequency = NAN;
+    return false;
+  }
+
+  lastFrameTimestampMs = timestampMs;
+
   // 2. Window Accumulator for True-RMS and Instantaneous Power
   sampleCountInWindow++;
 
-  // Accumulate Bus Voltages (Channels 1, 2, 3 -> Raw indices in ADC 3: 19, 20, 21)
+  // Accumulate Bus Voltages (Channels 1, 2, 3)
   for (uint8_t p = 0; p < 3; p++) {
     int rIdx = findRawIndexForLogicalCh(p + 1);
-    if (rIdx >= 0) {
+    if (rIdx >= 0 && (channelStates[p] == CHANNEL_STATE_OK || channelStates[p] == CHANNEL_UNCALIBRATED)) {
       float v = pinVoltages[rIdx];
       sumSqVoltage[p] += (double)(v * v);
 
       // Frequency zero-crossing detector on Phase R
-      if (p == 0) {
+      if (p == 0 && channelStates[0] == CHANNEL_STATE_OK) {
         if (lastZeroCrossVal < 0 && rawSamples[rIdx] >= 0) {
           zeroCrossings++;
         }
@@ -324,12 +459,12 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
       int rIdx = findRawIndexForLogicalCh(logicalCh);
       int vIdx = findRawIndexForLogicalCh(p + 1);
 
-      if (rIdx >= 0) {
+      if (rIdx >= 0 && (channelStates[logicalCh - 1] == CHANNEL_STATE_OK || channelStates[logicalCh - 1] == CHANNEL_UNCALIBRATED)) {
         float iPin = pinVoltages[rIdx];
         uint8_t currentIdx = (f * 3) + p;
         sumSqCurrent[currentIdx] += (double)(iPin * iPin);
 
-        if (vIdx >= 0) {
+        if (vIdx >= 0 && (channelStates[p] == CHANNEL_STATE_OK || channelStates[p] == CHANNEL_UNCALIBRATED)) {
           float vPin = pinVoltages[vIdx];
           sumInstPower[f][p] += (double)(vPin * iPin);
         }
@@ -363,7 +498,7 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
       }
     }
 
-    // Instantaneous Active Power & Calculated Power Factor
+    // Instantaneous Active Power & Calculated Power Factor (blocked unless calibrated & valid)
     for (uint8_t f = 0; f < METROLOGY_NUM_FEEDERS; f++) {
       double totalActiveWatts = 0.0;
       double totalApparentVA = 0.0;
@@ -373,10 +508,10 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
         uint8_t vLogical = p + 1;
         uint8_t iLogical = 4 + (f * 3) + p;
 
-        if (channelStates[vLogical - 1] != CHANNEL_STATE_OK && channelStates[vLogical - 1] != CHANNEL_UNCALIBRATED) {
+        if (channelStates[vLogical - 1] != CHANNEL_STATE_OK || !calibrationTable[vLogical - 1].isValid) {
           hasValidPower = false;
         }
-        if (channelStates[iLogical - 1] != CHANNEL_STATE_OK && channelStates[iLogical - 1] != CHANNEL_UNCALIBRATED) {
+        if (channelStates[iLogical - 1] != CHANNEL_STATE_OK || !calibrationTable[iLogical - 1].isValid) {
           hasValidPower = false;
         }
 
@@ -413,8 +548,12 @@ bool PoleMetrology::processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_
 
     // Frequency calculation
     if (sampleCountInWindow >= METROLOGY_WINDOW_SIZE) {
-      // 80 samples at 4000 Hz = 20 ms -> 1 cycle -> 50 Hz
-      measuredFrequency = ((float)zeroCrossings * 50.0f);
+      if (channelStates[0] == CHANNEL_STATE_OK && calibrationTable[0].isValid) {
+        // 80 samples at 4000 Hz = 20 ms -> 1 cycle -> 50 Hz
+        measuredFrequency = ((float)zeroCrossings * 50.0f);
+      } else {
+        measuredFrequency = NAN;
+      }
       resetWindowAccumulators();
     }
   }
@@ -426,14 +565,15 @@ void PoleMetrology::acquireRawSamples() {
 #if defined(ARDUINO) && defined(ESP32)
   if (!allAdcsDetected) return;
 
-  // DRDY lines are active-low when conversion frame is ready
-  // Synchronized sample validation: require all 3 ADS131M08 DRDY pins to be LOW simultaneously
-  if (digitalRead(POLE_ADC1_DRDY_PIN) == LOW &&
-      digitalRead(POLE_ADC2_DRDY_PIN) == LOW &&
-      digitalRead(POLE_ADC3_DRDY_PIN) == LOW) {
+  // DRDY lines are active-low when conversion frame is ready (using configured DRDY pins!)
+  if (digitalRead(pinAdcDrdy[0]) == LOW &&
+      digitalRead(pinAdcDrdy[1]) == LOW &&
+      digitalRead(pinAdcDrdy[2]) == LOW) {
 
     int32_t rawSamples[METROLOGY_TOTAL_RAW_CH];
+    uint16_t statusWords[METROLOGY_NUM_ADC_CHIPS];
     memset(rawSamples, 0, sizeof(rawSamples));
+    memset(statusWords, 0, sizeof(statusWords));
 
     const uint8_t devSelectors[METROLOGY_NUM_ADC_CHIPS] = {
       POLE_SPI_DEV_ADC1, POLE_SPI_DEV_ADC2, POLE_SPI_DEV_ADC3
@@ -442,8 +582,8 @@ void PoleMetrology::acquireRawSamples() {
     for (uint8_t c = 0; c < METROLOGY_NUM_ADC_CHIPS; c++) {
       if (!chipDetected[c]) continue;
       poleSelectSpiDevice(devSelectors[c]);
-      // Discard 16-bit status word
-      SPI.transfer16(0x0000);
+      // Capture and validate 16-bit ADS131M08 status word (never silently discard)
+      statusWords[c] = SPI.transfer16(0x0000);
       for (uint8_t ch = 0; ch < METROLOGY_CHANNELS_PER_ADC; ch++) {
         uint8_t b0 = SPI.transfer(0x00);
         uint8_t b1 = SPI.transfer(0x00);
@@ -454,18 +594,7 @@ void PoleMetrology::acquireRawSamples() {
       poleSelectSpiDevice(POLE_SPI_DEV_DESELECT);
     }
 
-    // Invalid zero frame check: if all channels are zero, reject as disconnected/floating
-    bool allZero = true;
-    for (uint8_t r = 0; r < METROLOGY_TOTAL_RAW_CH; r++) {
-      if (rawSamples[r] != 0) {
-        allZero = false;
-        break;
-      }
-    }
-
-    if (!allZero) {
-      processRawAdcFrame(rawSamples, millis());
-    }
+    processRawAdcFrameWithStatus(statusWords, rawSamples, millis());
   }
 #endif
 }
@@ -473,19 +602,20 @@ void PoleMetrology::acquireRawSamples() {
 void PoleMetrology::service() {
   acquireRawSamples();
 
-#if defined(ARDUINO)
   uint32_t now = millis();
-#else
-  uint32_t now = lastFrameTimestampMs;
-#endif
-
-  if (now - lastFrameTimestampMs > 1500UL && lastFrameTimestampMs != 0) {
+  if (lastFrameTimestampMs != 0 && ((uint32_t)(now - lastFrameTimestampMs) > 1500UL)) {
     for (uint8_t i = 0; i < METROLOGY_TOTAL_ACTIVE_CH; i++) {
-      if (channelStates[i] == CHANNEL_STATE_OK) {
+      if (channelStates[i] == CHANNEL_STATE_OK || channelStates[i] == CHANNEL_UNCALIBRATED) {
         channelStates[i] = CHANNEL_DATA_STALE;
         channelFreshness[i] = MEAS_FRESHNESS_STALE;
+        channelRmsValues[i] = NAN;
       }
     }
+    for (uint8_t f = 0; f < METROLOGY_NUM_FEEDERS; f++) {
+      feederActivePower[f] = NAN;
+      feederPowerFactor[f] = NAN;
+    }
+    measuredFrequency = NAN;
   }
 }
 
@@ -508,11 +638,22 @@ MeasurementValidity PoleMetrology::getMeasurementValidity(uint8_t logicalChId1Ba
     return MEAS_UNKNOWN;
   }
   uint8_t idx = logicalChId1Based - 1;
-  if (channelStates[idx] == CHANNEL_ADC_NOT_CONNECTED) {
+  if (channelStates[idx] == CHANNEL_ADC_NOT_CONNECTED ||
+      channelStates[idx] == CHANNEL_DATA_UNAVAILABLE) {
     return MEAS_SENSOR_UNAVAILABLE;
   }
-  if (!calibrationTable[idx].isValid) {
-    return MEAS_SENSOR_UNAVAILABLE;
+  if (channelStates[idx] == CHANNEL_ZERO_FRAME_REJECTED) {
+    return MEAS_INVALID;
+  }
+  if (channelStates[idx] == CHANNEL_OVER_RANGE_CLIPPING) {
+    return MEAS_OUT_OF_RANGE;
+  }
+  if (channelStates[idx] == CHANNEL_DATA_STALE ||
+      channelFreshness[idx] == MEAS_FRESHNESS_STALE) {
+    return MEAS_STALE;
+  }
+  if (channelStates[idx] == CHANNEL_UNCALIBRATED || !calibrationTable[idx].isValid) {
+    return MEAS_NOT_CALIBRATED;
   }
   if (channelStates[idx] != CHANNEL_STATE_OK) {
     return MEAS_INVALID;
@@ -540,7 +681,7 @@ float PoleMetrology::getBusVoltageY() const { return getChannelValue(2); }
 float PoleMetrology::getBusVoltageB() const { return getChannelValue(3); }
 
 float PoleMetrology::getGridFrequency() const {
-  if (channelStates[0] != CHANNEL_STATE_OK && channelStates[0] != CHANNEL_UNCALIBRATED) {
+  if (channelStates[0] != CHANNEL_STATE_OK || !calibrationTable[0].isValid) {
     return NAN;
   }
   // NEVER return synthetic 50.0f! Return measured value or NAN
@@ -574,6 +715,10 @@ bool PoleMetrology::setChannelCalibration(uint8_t logicalChId1Based, float zeroO
   calibrationTable[idx].phaseCorrectionDeg = phaseCorrectionDeg;
   calibrationTable[idx].isValid = true;
   snprintf(calibrationTable[idx].calReference, sizeof(calibrationTable[idx].calReference), "MANUAL_CAL");
+  if (channelStates[idx] == CHANNEL_UNCALIBRATED) {
+    channelStates[idx] = CHANNEL_DATA_UNAVAILABLE;
+    channelRmsValues[idx] = NAN;
+  }
   return true;
 }
 
@@ -584,23 +729,61 @@ const ChannelCalibRecord& PoleMetrology::getChannelCalibration(uint8_t logicalCh
   return calibrationTable[logicalChId1Based - 1];
 }
 
+int PoleMetrology::formatMetrologyAuditReport(char* out, size_t outSize) const {
+  if (!out || outSize == 0) return 0;
+  int written = snprintf(out, outSize,
+    "ADS131M08 Chips: ADC1=%s(0x%04X) ADC2=%s(0x%04X) ADC3=%s(0x%04X) | Pins En=%u A0=%u A1=%u Sync=%u DRDY=[%u,%u,%u]\n",
+    chipDetected[0] ? "OK" : "ABSENT", chipStatusWords[0],
+    chipDetected[1] ? "OK" : "ABSENT", chipStatusWords[1],
+    chipDetected[2] ? "OK" : "ABSENT", chipStatusWords[2],
+    pinDecEn, pinDecA0, pinDecA1, pinAdcSync, pinAdcDrdy[0], pinAdcDrdy[1], pinAdcDrdy[2]);
+  if (written < 0) return 0;
+  for (uint8_t i = 0; i < METROLOGY_TOTAL_ACTIVE_CH && (size_t)written < outSize; i++) {
+    const ChannelCalibRecord &cal = calibrationTable[i];
+    char valStr[16];
+    if (isnan(channelRmsValues[i])) {
+      snprintf(valStr, sizeof(valStr), "NAN");
+    } else {
+      snprintf(valStr, sizeof(valStr), "%.2f", channelRmsValues[i]);
+    }
+    int n = snprintf(out + written, outSize - (size_t)written,
+                     "CH%02u %-12s state=%s valid=%s val=%s\n",
+                     (unsigned)(i + 1), cal.channelId,
+                     channelDataStateToString(channelStates[i]),
+                     measurementValidityToString(getMeasurementValidity(i + 1)),
+                     valStr);
+    if (n < 0) break;
+    written += n;
+  }
+  return written;
+}
+
 void PoleMetrology::printMetrologyAuditReport() const {
 #if defined(ARDUINO)
   Serial.println(F("\n========================================================"));
   Serial.println(F("    MSCB FIELD POLE 21-CHANNEL METROLOGY AUDIT REPORT   "));
   Serial.println(F("========================================================"));
-  Serial.printf("ADS131M08 Chips Detected : ADC1: %s | ADC2: %s | ADC3: %s\n",
-                chipDetected[0] ? "YES" : "NO",
-                chipDetected[1] ? "YES" : "NO",
-                chipDetected[2] ? "YES" : "NO");
+  Serial.printf("ADS131M08 Chips Detected : ADC1: %s (0x%04X) | ADC2: %s (0x%04X) | ADC3: %s (0x%04X)\n",
+                chipDetected[0] ? "YES" : "NO", chipStatusWords[0],
+                chipDetected[1] ? "YES" : "NO", chipStatusWords[1],
+                chipDetected[2] ? "YES" : "NO", chipStatusWords[2]);
+  Serial.printf("Metrology Pins (Runtime) : DecEn=%u A0=%u A1=%u Sync=%u DRDY=[%u,%u,%u]\n",
+                pinDecEn, pinDecA0, pinDecA1, pinAdcSync, pinAdcDrdy[0], pinAdcDrdy[1], pinAdcDrdy[2]);
   Serial.println(F("--------------------------------------------------------"));
-  Serial.println(F("CH | NAME          | STATE          | RMS VALUE | SENSITIVITY"));
+  Serial.println(F("CH | NAME          | STATE          | RMS VALUE | VALIDITY           | SENSITIVITY"));
   for (uint8_t i = 0; i < METROLOGY_TOTAL_ACTIVE_CH; i++) {
     const ChannelCalibRecord &cal = calibrationTable[i];
-    Serial.printf("%02d | %-13s | %-14s | %8.2f  | %0.2f\n",
+    char valStr[16];
+    if (isnan(channelRmsValues[i])) {
+      snprintf(valStr, sizeof(valStr), "-NAN-   ");
+    } else {
+      snprintf(valStr, sizeof(valStr), "%8.2f", channelRmsValues[i]);
+    }
+    Serial.printf("%02d | %-13s | %-14s | %-9s | %-18s | %0.2f\n",
                   i + 1, cal.channelId,
                   channelDataStateToString(channelStates[i]),
-                  isnan(channelRmsValues[i]) ? 0.0f : channelRmsValues[i],
+                  valStr,
+                  measurementValidityToString(getMeasurementValidity(i + 1)),
                   cal.sensorSensitivity);
   }
   Serial.println(F("========================================================\n"));

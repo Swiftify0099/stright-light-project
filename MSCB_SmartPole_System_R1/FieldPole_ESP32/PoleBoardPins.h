@@ -156,10 +156,31 @@ static const char *const POLE_FEEDER_RELAY_LABELS[6] = {
 #define POLE_ADC3_DRDY_PIN 36 // ADC 3 Data Ready Interrupt (Input Only / VP)
 
 // =====================================================================
-//  HARDWARE PHYSICAL COMMISSIONING AUTHORIZATION PIN
+//  HARDWARE PHYSICAL COMMISSIONING AUTHORIZATION PIN (GPIO 39 / Sensor_VN)
 // =====================================================================
+// ELECTRICAL CIRCUIT DESIGN SPECIFICATION:
+// 1. ESP32 Silicon Boundary: GPIO 34-39 are strictly INPUT-ONLY without internal
+//    pull-up or pull-down resistors! Calling pinMode(POLE_PHYSICAL_AUTH_PIN, INPUT_PULLUP)
+//    is electrically invalid and leaves the pin floating.
+// 2. External Pull-Up: A physical 10 kΩ 1% (0.125W) pull-up resistor MUST be installed
+//    between GPIO 39 and the +3.3V power rail.
+// 3. Noise Filter Capacitor: A 100 nF (0.1 µF) ceramic X7R capacitor connected from GPIO 39
+//    to Ground (RC time constant tau ~ 1 ms) to reject industrial RF noise and contact bounce.
+// 4. Series Protection: A 1 kΩ 1% series resistor between header pin and GPIO 39 to limit
+//    clamp diode surge current during ESD and electrostatic events.
+// 5. Physical Jumper / Interlock Header: 2-pin header connected between input terminal and GND.
+// 6. Active Logic Level: Active-LOW.
+//    - Jumper Shorted to GND = 0V / LOW -> Authorized (Commissioning Mode).
+//    - Jumper Open / Removed / Disconnected = 3.3V / HIGH -> Locked (Production Safe).
+// 7. Safe Failure Mode: Fail-Closed. If the jumper wire cuts, disconnects, open-circuits,
+//    or floats, the 10k external resistor pulls the pin to 3.3V (HIGH), immediately revoking
+//    authorization and tripping the failsafe emergency shutdown.
+// 8. Emergency Hardware Interlock Truth: The discrete relay driver board lacks an optocoupler
+//    VCC kill line directly controlled by ESP32. Firmware documents hardware emergency stop line
+//    as NOT IMPLEMENTED on the current discrete relay PCB revision; software fail-safe is enforced.
 #define POLE_PHYSICAL_AUTH_PIN 39 // Hardware Physical Authorization Jumper (GPI 39 / Sensor_VN)
 #define POLE_PHYSICAL_AUTH_TIMEOUT_MS 300000UL // 5-minute auto-expiry window
+#define POLE_PHYSICAL_AUTH_DEBOUNCE_MS 50UL    // 50ms continuous elapsed-time debounce requirement
 
 // =====================================================================
 //  ONBOARD DIAGNOSTIC LED
@@ -197,6 +218,14 @@ static const char *const POLE_FEEDER_RELAY_LABELS[6] = {
 #define POLE_MCB_AUX_ENABLED 1 // Restored via MCP23S17 daughterboard
 #define POLE_CONTACTOR_AUX_ENABLED 1
 
+// Dynamic decoder pin storage (defaults to compiled constants)
+#if !defined(POLE_DYNAMIC_DECODER_PINS)
+#define POLE_DYNAMIC_DECODER_PINS
+extern uint8_t g_poleDecoderEnablePin;
+extern uint8_t g_poleDecoderA0Pin;
+extern uint8_t g_poleDecoderA1Pin;
+#endif
+
 // Helper functions for SPI Decoder Selection (Glitch-Free Sequence)
 // Sequence per hardware audit:
 // 1. Disable decoder (/1E = HIGH)
@@ -206,21 +235,24 @@ static const char *const POLE_FEEDER_RELAY_LABELS[6] = {
 // 5. [SPI Transfer executed]
 // 6. Disable decoder (/1E = HIGH)
 static inline void poleSelectSpiDevice(uint8_t dev) {
+  uint8_t enPin = (g_poleDecoderEnablePin != 0) ? g_poleDecoderEnablePin : POLE_DECODER_ENABLE_PIN;
+  uint8_t a0Pin = (g_poleDecoderA0Pin != 0) ? g_poleDecoderA0Pin : POLE_DECODER_A0_PIN;
+  uint8_t a1Pin = (g_poleDecoderA1Pin != 0) ? g_poleDecoderA1Pin : POLE_DECODER_A1_PIN;
+
   if (dev == POLE_SPI_DEV_DESELECT) {
-    digitalWrite(POLE_DECODER_ENABLE_PIN, HIGH);
+    digitalWrite(enPin, HIGH);
   } else {
-    // Step 1: Ensure decoder is disabled first to prevent transient decode
-    // glitches
-    digitalWrite(POLE_DECODER_ENABLE_PIN, HIGH);
+    // Step 1: Ensure decoder is disabled first to prevent transient decode glitches
+    digitalWrite(enPin, HIGH);
     // Step 2: Set address lines
-    digitalWrite(POLE_DECODER_A0_PIN, (dev & 0x01) ? HIGH : LOW);
-    digitalWrite(POLE_DECODER_A1_PIN, (dev & 0x02) ? HIGH : LOW);
+    digitalWrite(a0Pin, (dev & 0x01) ? HIGH : LOW);
+    digitalWrite(a1Pin, (dev & 0x02) ? HIGH : LOW);
     // Step 3: Wait for stable logic settling
 #if defined(ARDUINO)
     delayMicroseconds(1);
 #endif
     // Step 4: Enable decoder to activate target peripheral CS
-    digitalWrite(POLE_DECODER_ENABLE_PIN, LOW);
+    digitalWrite(enPin, LOW);
   }
 }
 
@@ -383,11 +415,11 @@ static_assert(!CONFLICTS_WITH_DECODER(POLE_RELAY_F5_PIN),
 #define MSCB_HW_PROFILE_IDENTIFIER "ESP32_WROOM32_DOIT_POLE_R3_2"
 #define MSCB_HW_CONFIG_VERSION 0x0302
 #define MSCB_PIN_CONFIG_MAGIC 0x50494E43UL // "PINC"
-#define MSCB_PIN_SCHEMA_VERSION 1
+#define MSCB_PIN_SCHEMA_VERSION 2
 
 struct PoleHardwarePinConfig {
   uint32_t magic;           // MSCB_PIN_CONFIG_MAGIC
-  uint16_t schemaVersion;   // MSCB_PIN_SCHEMA_VERSION
+  uint16_t schemaVersion;   // MSCB_PIN_SCHEMA_VERSION (2)
   uint16_t configVersion;   // Monotonic configuration revision
   char profileId[32];       // Hardware profile tag
   uint8_t feederPins[6];    // 6 Feeder Relay GPIO outputs
@@ -399,6 +431,7 @@ struct PoleHardwarePinConfig {
   uint8_t decoderA1Pin;     // 74HC139 A1 Address
   uint8_t adcSyncPin;       // ADC Sync
   uint8_t adcDrdyPins[3];   // ADS131M08 DRDY1..3 (Input Only)
+  uint8_t adcChannelMap[24];// 24 raw ADC channels -> logical channel 1..21 (0 = spare)
   uint32_t crc32;           // CRC32 of fields above
 };
 
@@ -419,6 +452,11 @@ inline uint32_t calculatePinConfigCrc(const PoleHardwarePinConfig &cfg) {
 }
 
 inline PoleHardwarePinConfig getDefaultHardwarePinConfig() {
+  static const uint8_t DEFAULT_ADC_MAP[24] = {
+    4, 5, 6, 7, 8, 9, 10, 11,
+    12, 13, 14, 15, 16, 17, 18, 0,
+    19, 20, 21, 1, 2, 3, 0, 0
+  };
   PoleHardwarePinConfig cfg;
   memset(&cfg, 0, sizeof(cfg));
   cfg.magic = MSCB_PIN_CONFIG_MAGIC;
@@ -438,8 +476,37 @@ inline PoleHardwarePinConfig getDefaultHardwarePinConfig() {
   cfg.adcDrdyPins[0] = POLE_ADC1_DRDY_PIN;
   cfg.adcDrdyPins[1] = POLE_ADC2_DRDY_PIN;
   cfg.adcDrdyPins[2] = POLE_ADC3_DRDY_PIN;
+  memcpy(cfg.adcChannelMap, DEFAULT_ADC_MAP, sizeof(DEFAULT_ADC_MAP));
   cfg.crc32 = calculatePinConfigCrc(cfg);
   return cfg;
+}
+
+inline bool isValidEsp32WroomGpio(uint8_t p) {
+  if (p > 39) return false;
+  if (p >= 6 && p <= 11) return false;   // Internal SPI flash
+  if (p == 20 || p == 24) return false;  // Non-exposed / flash
+  if (p >= 28 && p <= 31) return false;  // Non-existent on ESP32-WROOM-32
+  if (p == 37 || p == 38) return false;  // Not pinned out on ESP32-WROOM-32
+  return true;
+}
+
+inline bool isReservedBoardSystemPin(uint8_t p) {
+  // Strapping / boot / UART0 / dedicated VSPI bus / dedicated physical auth GPIO39
+  if (p == 0 || p == 2 || p == 12 || p == 15) return true;
+  if (p == 1 || p == 3) return true;
+  if (p == POLE_SPI_SCK_PIN || p == POLE_SPI_MISO_PIN || p == POLE_SPI_MOSI_PIN) return true;
+  if (p == POLE_PHYSICAL_AUTH_PIN) return true;
+  return false;
+}
+
+inline bool isOutputCapableBoardPin(uint8_t p) {
+  if (!isValidEsp32WroomGpio(p) || isReservedBoardSystemPin(p)) return false;
+  if (p == 34 || p == 35 || p == 36 || p == 39) return false; // Input-only GPI
+  return true;
+}
+
+inline bool isInputCapableBoardPin(uint8_t p) {
+  return isValidEsp32WroomGpio(p) && !isReservedBoardSystemPin(p);
 }
 
 inline bool validateHardwarePinConfig(const PoleHardwarePinConfig &cfg) {
@@ -447,55 +514,63 @@ inline bool validateHardwarePinConfig(const PoleHardwarePinConfig &cfg) {
     return false;
   if (cfg.schemaVersion != MSCB_PIN_SCHEMA_VERSION)
     return false;
+  if (cfg.configVersion == 0)
+    return false;
+  if (memchr(cfg.profileId, '\0', sizeof(cfg.profileId)) == nullptr || cfg.profileId[0] == '\0')
+    return false;
   if (calculatePinConfigCrc(cfg) != cfg.crc32)
     return false;
 
-  // 1. Forbid flash pins (6..11) for all mapped lines
+  // 1. Validate all output-capable peripheral pins
   for (uint8_t i = 0; i < 6; i++) {
-    if (cfg.feederPins[i] >= 6 && cfg.feederPins[i] <= 11)
+    if (!isOutputCapableBoardPin(cfg.feederPins[i]))
       return false;
   }
-  if (cfg.loraNssPin >= 6 && cfg.loraNssPin <= 11)
+  if (!isOutputCapableBoardPin(cfg.loraNssPin) ||
+      !isOutputCapableBoardPin(cfg.loraRstPin) ||
+      !isOutputCapableBoardPin(cfg.decoderEnablePin) ||
+      !isOutputCapableBoardPin(cfg.decoderA0Pin) ||
+      !isOutputCapableBoardPin(cfg.decoderA1Pin) ||
+      !isOutputCapableBoardPin(cfg.adcSyncPin)) {
     return false;
-  if (cfg.loraRstPin >= 6 && cfg.loraRstPin <= 11)
-    return false;
-  if (cfg.loraDio0Pin >= 6 && cfg.loraDio0Pin <= 11)
-    return false;
-  if (cfg.decoderEnablePin >= 6 && cfg.decoderEnablePin <= 11)
-    return false;
-  if (cfg.decoderA0Pin >= 6 && cfg.decoderA0Pin <= 11)
-    return false;
-  if (cfg.decoderA1Pin >= 6 && cfg.decoderA1Pin <= 11)
-    return false;
+  }
 
-  // 2. Forbid strapping pins for relay outputs (0, 2, 12, 15)
-  for (uint8_t i = 0; i < 6; i++) {
-    uint8_t p = cfg.feederPins[i];
-    if (p == 0 || p == 2 || p == 12 || p == 15)
-      return false;
-    // Forbid input-only GPI pins (34, 35, 36, 39)
-    if (p == 34 || p == 35 || p == 36 || p == 39)
-      return false;
-    // Forbid nonexistent GPIO 24!
-    if (p == 24)
+  // 2. Validate input-capable peripheral pins
+  if (!isInputCapableBoardPin(cfg.loraDio0Pin))
+    return false;
+  for (uint8_t i = 0; i < 3; i++) {
+    if (!isInputCapableBoardPin(cfg.adcDrdyPins[i]))
       return false;
   }
 
-  // 3. Forbid duplicate relay pins
-  for (uint8_t i = 0; i < 6; i++) {
-    for (uint8_t j = i + 1; j < 6; j++) {
-      if (cfg.feederPins[i] == cfg.feederPins[j])
+  // 3. Enforce strict global GPIO uniqueness across all 16 dynamic pins
+  uint8_t allPins[16] = {
+    cfg.feederPins[0], cfg.feederPins[1], cfg.feederPins[2],
+    cfg.feederPins[3], cfg.feederPins[4], cfg.feederPins[5],
+    cfg.loraNssPin, cfg.loraRstPin, cfg.loraDio0Pin,
+    cfg.decoderEnablePin, cfg.decoderA0Pin, cfg.decoderA1Pin,
+    cfg.adcSyncPin, cfg.adcDrdyPins[0], cfg.adcDrdyPins[1], cfg.adcDrdyPins[2]
+  };
+  for (uint8_t i = 0; i < 16; i++) {
+    for (uint8_t j = i + 1; j < 16; j++) {
+      if (allPins[i] == allPins[j])
         return false;
     }
   }
 
-  // 4. Forbid collisions with LoRa radio pins
-  for (uint8_t i = 0; i < 6; i++) {
-    uint8_t p = cfg.feederPins[i];
-    if (p == cfg.loraNssPin || p == cfg.loraRstPin || p == cfg.loraDio0Pin)
+  // 4. Validate 21-channel ADC logical mapping + 3 spares across 24 raw slots
+  uint8_t seenCount[22];
+  memset(seenCount, 0, sizeof(seenCount));
+  for (uint8_t r = 0; r < 24; r++) {
+    uint8_t logicalCh = cfg.adcChannelMap[r];
+    if (logicalCh > 21)
       return false;
-    if (p == cfg.decoderEnablePin || p == cfg.decoderA0Pin ||
-        p == cfg.decoderA1Pin)
+    seenCount[logicalCh]++;
+  }
+  if (seenCount[0] != 3)
+    return false;
+  for (uint8_t ch = 1; ch <= 21; ch++) {
+    if (seenCount[ch] != 1)
       return false;
   }
 

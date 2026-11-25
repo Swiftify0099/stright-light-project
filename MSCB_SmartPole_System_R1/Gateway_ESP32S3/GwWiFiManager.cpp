@@ -5,6 +5,7 @@
  */
 
 #include "GwWiFiManager.h"
+#include "GwTelegramCert.h"
 #include <string.h>
 
 #if defined(ARDUINO)
@@ -95,17 +96,21 @@ bool GwWiFiManager::verifyInternetReachability() {
     return false;
   }
 
-  // Test TLS connection using domain name to ensure SNI header is sent
-  WiFiClientSecure testClient;
-  testClient.setTimeout(4000);
-  testClient.setInsecure(); // Test TCP handshake only
-  if (testClient.connect("api.telegram.org", 443)) {
-    testClient.stop();
-    return true;
+  // If NTP time is synchronized, strictly enforce CA-verified TLS handshake to api.telegram.org
+  // (never silently bypass TLS verification to DNS success once clock is valid!)
+  time_t nowEpoch = time(nullptr);
+  if (nowEpoch >= 1700000000L) {
+    WiFiClientSecure testClient;
+    testClient.setTimeout(4000);
+    testClient.setCACert(TELEGRAM_CA_ROOT_CERT);
+    if (testClient.connect("api.telegram.org", 443)) {
+      testClient.stop();
+      return true;
+    }
+    return false;
   }
 
-  // If DNS successfully resolved to a valid non-zero IP, internet is functional
-  // (Prevents aggressive mobile hotspot drops due to single TCP timeout)
+  // Prior to initial NTP sync, allow verified DNS resolution so SNTP can complete first
   if (telegramIp[0] != 0 && telegramIp[0] != 255) {
     return true;
   }

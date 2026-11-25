@@ -92,12 +92,18 @@ public:
   // Initialization & Hardware Verification
   bool begin();
   bool detectHardware();
+  static bool validateAds131m08DeviceId(uint16_t rawIdReg);
+  static bool validateAds131m08StatusWord(uint16_t statusWord);
   bool areAllAdcsDetected() const { return allAdcsDetected; }
   bool isAdcChipDetected(uint8_t chipIdx) const;
+  uint16_t getAdcStatusWord(uint8_t chipIdx) const;
   void setAdcChipDetected(uint8_t chipIdx, bool detected); // Test harness control
 
   // Raw Sample Processing & Frame Validation
   bool processRawAdcFrame(const int32_t rawSamples[METROLOGY_TOTAL_RAW_CH], uint32_t timestampMs);
+  bool processRawAdcFrameWithStatus(const uint16_t statusWords[METROLOGY_NUM_ADC_CHIPS],
+                                    const int32_t rawSamples[METROLOGY_TOTAL_RAW_CH],
+                                    uint32_t timestampMs);
   void acquireRawSamples();
   void service(); // Continuous acquisition, timeouts & freshness watchdog
 
@@ -126,7 +132,20 @@ public:
   // Accuracy Certification Status
   bool isClass1_0Certified() const { return false; } // Strictly FALSE without physical calibration certificate
 
+  // Dynamic Pin Configuration (Option A)
+  void configurePins(uint8_t decEn, uint8_t decA0, uint8_t decA1, uint8_t sync, const uint8_t drdyPins[3],
+                     const uint8_t adcChMap[METROLOGY_TOTAL_RAW_CH] = nullptr);
+  uint8_t getDecoderEnablePin() const { return pinDecEn; }
+  uint8_t getDecoderA0Pin() const { return pinDecA0; }
+  uint8_t getDecoderA1Pin() const { return pinDecA1; }
+  uint8_t getAdcSyncPin() const { return pinAdcSync; }
+  uint8_t getAdcDrdyPin(uint8_t chipIdx) const { return (chipIdx < 3) ? pinAdcDrdy[chipIdx] : 0; }
+  uint8_t getMappedLogicalCh(uint8_t rawIdx) const {
+    return (rawIdx < METROLOGY_TOTAL_RAW_CH) ? adcChannelMap[rawIdx] : 0;
+  }
+
   // Diagnostic Report
+  int formatMetrologyAuditReport(char* out, size_t outSize) const;
   void printMetrologyAuditReport() const;
 
 private:
@@ -136,8 +155,17 @@ private:
 
   bool               allAdcsDetected;
   bool               chipDetected[METROLOGY_NUM_ADC_CHIPS];
+  uint16_t           chipStatusWords[METROLOGY_NUM_ADC_CHIPS];
   uint32_t           lastFrameTimestampMs;
   float              measuredFrequency;
+
+  // Dynamic peripheral pins & ADC logical channel map
+  uint8_t            pinDecEn;
+  uint8_t            pinDecA0;
+  uint8_t            pinDecA1;
+  uint8_t            pinAdcSync;
+  uint8_t            pinAdcDrdy[3];
+  uint8_t            adcChannelMap[METROLOGY_TOTAL_RAW_CH];
 
   // 21 Active Logical Channel States
   ChannelDataState     channelStates[METROLOGY_TOTAL_ACTIVE_CH];

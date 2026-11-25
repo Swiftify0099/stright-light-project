@@ -14,6 +14,7 @@
  * 9. Real Metrology: Elimination of synthetic fallbacks (frequency returns NAN, bus voltage returns NAN).
  */
 
+#define MSCB_COMMISSIONING_LVDC_PROFILE 1
 #define ARDUINO_MOCK_IMPLEMENTATION
 #include "ArduinoMock.h"
 #include "../MSCBShared/Protocol.h"
@@ -348,6 +349,9 @@ int main() {
   PktRegisterRequestPayload req1;
   memset(&req1, 0, sizeof(req1));
   memcpy(req1.macAddress, mockMac1, 6);
+  req1.sessionToken = 0x1001;
+  req1.nonce = 1;
+  cmdSecurity.computeRegisterRequestAuth(req1, req1.authTag);
   PktRegisterResponsePayload resp1;
   gwRegistry.handleJoinRequest(req1, -65, 9, resp1);
 
@@ -396,6 +400,9 @@ int main() {
   PktRegisterRequestPayload req2;
   memset(&req2, 0, sizeof(req2));
   memcpy(req2.macAddress, mockMac2, 6);
+  req2.sessionToken = 0x1002;
+  req2.nonce = 2;
+  cmdSecurity.computeRegisterRequestAuth(req2, req2.authTag);
   PktRegisterResponsePayload resp2;
   gwRegistry.handleJoinRequest(req2, -70, 8, resp2);
 
@@ -593,11 +600,14 @@ int main() {
   std::cout << "\n--- SECTION M: R3.1 TELEGRAM REGISTRATION WIZARD & CONTROLS ---" << std::endl;
 
   gwTelegram.begin();
-  const int64_t adminChatId = 123456789LL;
+  const int64_t adminChatId = 5505296197LL;
   uint8_t wizMac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
   PktRegisterRequestPayload wizReq;
   memset(&wizReq, 0, sizeof(wizReq));
   memcpy(wizReq.macAddress, wizMac, 6);
+  wizReq.sessionToken = 0x1003;
+  wizReq.nonce = 3;
+  cmdSecurity.computeRegisterRequestAuth(wizReq, wizReq.authTag);
   PktRegisterResponsePayload wizResp;
   gwRegistry.handleJoinRequest(wizReq, -62, 10, wizResp);
 
@@ -831,6 +841,9 @@ int main() {
     PktRegisterResponsePayload respT;
     memset(&reqT, 0, sizeof(reqT));
     memcpy(reqT.macAddress, macT, 6);
+    reqT.sessionToken = 0x1004;
+    reqT.nonce = 4;
+    cmdSecurity.computeRegisterRequestAuth(reqT, reqT.authTag);
     gwRegistry.handleJoinRequest(reqT, -60, 10, respT);
     uint16_t allocatedId = 0;
     gwRegistry.approvePending(macT, allocatedId, "Test Highway Pole", "NH48 Junction", "Sector 5");
@@ -951,6 +964,8 @@ int main() {
   std::cout << "\n--- SECTION U: R3.2.1 MULTI-HOP MESH & CHILD TRACKING ---" << std::endl;
 
   poleMesh.begin();
+  uint16_t uTestPoleId = 0x0007;
+  poleMesh.setNodeIdentity(uTestPoleId, MSCB_GATEWAY_NODE_ID, 1);
   MeshWireFrame outF;
   bool sendAction = false;
 
@@ -960,7 +975,7 @@ int main() {
   selfFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
   selfFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
   selfFrame.header.version = MSCB_PROTOCOL_VERSION;
-  selfFrame.header.srcAddress = poleStorage.getAssignedPoleId(); // Originated from self!
+  selfFrame.header.srcAddress = poleMesh.getMyNodeId(); // Originated from self!
   selfFrame.header.dstAddress = MSCB_GATEWAY_NODE_ID;
   selfFrame.header.seqNumber = 1001;
   selfFrame.header.hopCount = 0;
@@ -991,9 +1006,14 @@ int main() {
   MeshWireFrame validF = selfFrame;
   validF.header.srcAddress = 0x0055;
   validF.header.dstAddress = MSCB_GATEWAY_NODE_ID;
+  validF.header.nextHop = poleMesh.getMyNodeId();
+  validF.header.previousHopAddress = 0x0090; // Multi-hop relayed frame (hopCount == 1)
   validF.header.seqNumber = 5501;
   validF.header.hopCount = 1;
   validF.header.maxHops = 6;
+  validF.header.hopAuthToken = cmdSecurity.computeHopAuthToken(
+    0x0090, poleMesh.getMyNodeId(), 5501, validF.header.type
+  );
   handled = poleMesh.handleReceivedWireFrame(validF, -70, 8, outF, sendAction);
   TEST_ASSERT(handled && sendAction, "U.7 First valid frame forwarded once");
   handled = poleMesh.handleReceivedWireFrame(validF, -70, 8, outF, sendAction);
@@ -1001,7 +1021,7 @@ int main() {
   TEST_ASSERT(poleMesh.getPacketsDroppedDuplicate() > 0, "U.9 packetsDroppedDuplicate incremented");
 
   // U.10 Routing Cycle Prevention
-  uint16_t myNodeId = poleStorage.getAssignedPoleId();
+  uint16_t myNodeId = poleMesh.getMyNodeId();
   uint8_t prevNeigh = poleMesh.getNeighborCount();
   poleMesh.updateNeighborsFromBeacon(myNodeId, 1, 0, -60, 10);
   TEST_ASSERT(poleMesh.getNeighborCount() == prevNeigh, "U.10 Self cannot be added as candidate parent neighbor (cycle prevention)");
@@ -1016,11 +1036,15 @@ int main() {
   childFrame.header.version = MSCB_PROTOCOL_VERSION;
   childFrame.header.srcAddress = 0x0008; // Child pole 8
   childFrame.header.dstAddress = MSCB_GATEWAY_NODE_ID;
-  childFrame.header.nextHop = poleStorage.getAssignedPoleId();
+  childFrame.header.nextHop = poleMesh.getMyNodeId();
+  childFrame.header.previousHopAddress = 0x0008;
   childFrame.header.payloadLen = 10;
   childFrame.header.seqNumber = 2001;
   childFrame.header.hopCount = 1;
   childFrame.header.maxHops = 6;
+  childFrame.header.hopAuthToken = cmdSecurity.computeHopAuthToken(
+    0x0008, childFrame.header.nextHop, childFrame.header.seqNumber, childFrame.header.type
+  );
   poleMesh.handleReceivedWireFrame(childFrame, -75, 7, outF, sendAction);
   TEST_ASSERT(poleMesh.getTrackedChildCount() > 0, "U.12 Forwarded child packet registered in trackedChildren");
   const TrackedChildNode* ch = poleMesh.getTrackedChild(0);
@@ -1039,8 +1063,12 @@ int main() {
 
   // U.18 Child Recovery on Valid Packet
   childFrame.header.seqNumber = 2002;
-  childFrame.header.nextHop = poleStorage.getAssignedPoleId();
+  childFrame.header.nextHop = poleMesh.getMyNodeId();
+  childFrame.header.previousHopAddress = 0x0008;
   childFrame.header.payloadLen = 10;
+  childFrame.header.hopAuthToken = cmdSecurity.computeHopAuthToken(
+    0x0008, childFrame.header.nextHop, childFrame.header.seqNumber, childFrame.header.type
+  );
   poleMesh.handleReceivedWireFrame(childFrame, -71, 9, outF, sendAction);
   ch = poleMesh.getTrackedChild(0);
   TEST_ASSERT(ch != NULL && ch->state == CHILD_STATE_ONLINE, "U.18 Subsequent valid packet restores child to CHILD_STATE_ONLINE");
@@ -1068,6 +1096,12 @@ int main() {
   memset(&req20, 0, sizeof(req20));
   memcpy(req10.macAddress, mac10, 6);
   memcpy(req20.macAddress, mac20, 6);
+  req10.sessionToken = 0x1010;
+  req10.nonce = 10;
+  cmdSecurity.computeRegisterRequestAuth(req10, req10.authTag);
+  req20.sessionToken = 0x1020;
+  req20.nonce = 20;
+  cmdSecurity.computeRegisterRequestAuth(req20, req20.authTag);
   gwRegistry.handleJoinRequest(req10, -60, 10, resp10);
   gwRegistry.handleJoinRequest(req20, -65, 9, resp20);
   uint16_t id10 = 0, id20 = 0;
@@ -1141,9 +1175,9 @@ int main() {
 
   // W.5 Physical Pin 39 Activation with Debounce (Active-low: jumper to GND = LOW)
   digitalWrite(POLE_PHYSICAL_AUTH_PIN, LOW);
-  poleActuators.servicePhysicalAuthorization(); // debounce 1
-  poleActuators.servicePhysicalAuthorization(); // debounce 2
-  poleActuators.servicePhysicalAuthorization(); // debounce 3
+  poleActuators.servicePhysicalAuthorization();
+  delay(POLE_PHYSICAL_AUTH_DEBOUNCE_MS + 10);
+  poleActuators.servicePhysicalAuthorization();
   poleActuators.setLocalPhysicalAuthorization(true);
   TEST_ASSERT(poleActuators.isLocalPhysicalAuthorized(),
               "W.5 Physical auth granted when GPIO 39 is grounded (LOW) and debounced");
@@ -1158,7 +1192,7 @@ int main() {
   poleActuators.resetEmergencyState();
   digitalWrite(POLE_PHYSICAL_AUTH_PIN, LOW);
   poleActuators.servicePhysicalAuthorization();
-  poleActuators.servicePhysicalAuthorization();
+  delay(POLE_PHYSICAL_AUTH_DEBOUNCE_MS + 10);
   poleActuators.servicePhysicalAuthorization();
   poleActuators.setLocalPhysicalAuthorization(true);
   poleActuators.setBenchTestOverride(true);
@@ -1226,6 +1260,301 @@ int main() {
   PoleHardwarePinConfig safeDefaultCfg = getDefaultHardwarePinConfig();
   TEST_ASSERT(validateHardwarePinConfig(safeDefaultCfg), "X.7 Default pin mapping passes strict hardware validation");
   TEST_ASSERT(poleActuators.applyPinConfiguration(safeDefaultCfg), "X.8 Safe default configuration applied cleanly");
+
+  // -------------------------------------------------------------------------
+  // SECTION Y: R3.2.2 STRICT MESH ROUTING & RANK SAFETY (DEF-322-01)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION Y: R3.2.2 STRICT MESH ROUTING & RANK SAFETY ---" << std::endl;
+
+  PoleMeshRouter testRouter;
+  testRouter.begin();
+  uint16_t localNode = 0x0002;
+  testRouter.setNodeIdentity(localNode, 0, 255); // Start in orphan/searching state: myRank = 255
+
+  // Y.1 Gateway Rank is strictly 0
+  TEST_ASSERT(MSCB_GATEWAY_NODE_ID == 1, "Y.1 Gateway node ID is 0x0001");
+
+  // Y.2 Candidate parent rank lower than current rank accepted
+  testRouter.updateNeighborsFromBeacon(0x0010, 1, 1, -55, 12); // Node 0x0010, rank 1, parent 1
+  testRouter.selectBestParents();
+  TEST_ASSERT(testRouter.getMyRank() == 2, "Y.2 Valid candidate rank 1 increments to monotonic rank 2");
+  TEST_ASSERT(testRouter.getPrimaryParent() == 0x0010, "Y.3 Primary parent selected as candidate");
+
+  // Y.3 Candidate with equal or higher rank rejected
+  uint8_t preCount = testRouter.getNeighborCount();
+  testRouter.updateNeighborsFromBeacon(0x0020, 2, 1, -50, 15); // Rank 2 == current rank 2: rejected!
+  testRouter.updateNeighborsFromBeacon(0x0030, 3, 1, -50, 15); // Rank 3 > current rank 2: rejected!
+  TEST_ASSERT(testRouter.getNeighborCount() == preCount, "Y.4 Equal or higher candidate rank rejected");
+
+  // Y.4 Rank 254/255 boundary overflow rejected safely
+  testRouter.updateNeighborsFromBeacon(0x0040, 254, 1, -50, 15);
+  testRouter.updateNeighborsFromBeacon(0x0050, 255, 1, -50, 15);
+  TEST_ASSERT(testRouter.getNeighborCount() == preCount, "Y.5 Rank 254/255 overflow candidate rejected");
+
+  // Y.5 Hop count limits: maxHops == 0 rejected
+  MeshWireFrame zeroHopFrame;
+  memset(&zeroHopFrame, 0, sizeof(zeroHopFrame));
+  zeroHopFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+  zeroHopFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+  zeroHopFrame.header.version = MSCB_PROTOCOL_VERSION;
+  zeroHopFrame.header.srcAddress = 0x0050;
+  zeroHopFrame.header.dstAddress = MSCB_GATEWAY_NODE_ID;
+  zeroHopFrame.header.nextHop = localNode;
+  zeroHopFrame.header.maxHops = 0; // Invalid
+  MeshWireFrame outDummy;
+  bool sendAct = false;
+  TEST_ASSERT(!testRouter.handleReceivedWireFrame(zeroHopFrame, -70, 8, outDummy, sendAct),
+              "Y.6 maxHops == 0 frame strictly rejected");
+
+  // Y.6 maxHops > 6 rejected
+  MeshWireFrame excessHopFrame = zeroHopFrame;
+  excessHopFrame.header.maxHops = 7;
+  TEST_ASSERT(!testRouter.handleReceivedWireFrame(excessHopFrame, -70, 8, outDummy, sendAct),
+              "Y.7 maxHops > 6 frame strictly rejected");
+
+  // Y.7 hopCount >= maxHops rejected
+  MeshWireFrame exhaustedHopFrame = zeroHopFrame;
+  exhaustedHopFrame.header.maxHops = 6;
+  exhaustedHopFrame.header.hopCount = 6;
+  TEST_ASSERT(!testRouter.handleReceivedWireFrame(exhaustedHopFrame, -70, 8, outDummy, sendAct),
+              "Y.8 hopCount >= maxHops frame strictly rejected");
+
+  // Y.8 Incorrect nextHop dropped
+  MeshWireFrame wrongNextHopFrame = zeroHopFrame;
+  wrongNextHopFrame.header.maxHops = 6;
+  wrongNextHopFrame.header.hopCount = 1;
+  wrongNextHopFrame.header.nextHop = 0x0777; // Different pole!
+  uint32_t preDrop = testRouter.getPacketsDropped();
+  TEST_ASSERT(!testRouter.handleReceivedWireFrame(wrongNextHopFrame, -70, 8, outDummy, sendAct),
+              "Y.9 Frame with incorrect nextHop dropped by bystander node");
+  TEST_ASSERT(testRouter.getPacketsDropped() > preDrop, "Y.10 packetsDropped incremented for incorrect nextHop");
+
+  // Y.9 Primary and Backup parents must be distinct
+  testRouter.updateNeighborsFromBeacon(0x0015, 1, 1, -60, 10);
+  testRouter.selectBestParents();
+  TEST_ASSERT(testRouter.getPrimaryParent() != testRouter.getBackupParent() || testRouter.getBackupParent() == 0,
+              "Y.11 Primary and backup parents are distinct or backup cleared");
+
+  // -------------------------------------------------------------------------
+  // SECTION Z: R3.2.2 AUTHENTICATED IMMEDIATE-HOP & CHILD TRACKING (DEF-322-02)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION Z: R3.2.2 AUTHENTICATED IMMEDIATE-HOP & CHILD TRACKING ---" << std::endl;
+
+  TEST_ASSERT(MSCB_PROTOCOL_VERSION == 0x02, "Z.1 Protocol Version updated to 0x02");
+
+  // Z.2 Authenticated child packet registered
+  PoleMeshRouter childRouter;
+  childRouter.begin();
+  uint16_t childRouterId = 0x0005;
+  childRouter.setNodeIdentity(childRouterId, MSCB_GATEWAY_NODE_ID, 1);
+
+  MeshWireFrame childDirect;
+  memset(&childDirect, 0, sizeof(childDirect));
+  childDirect.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+  childDirect.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+  childDirect.header.version = MSCB_PROTOCOL_VERSION;
+  childDirect.header.srcAddress = 0x0012;
+  childDirect.header.dstAddress = MSCB_GATEWAY_NODE_ID;
+  childDirect.header.nextHop = childRouterId;
+  childDirect.header.previousHopAddress = 0x0012; // Direct transmission
+  childDirect.header.type = PKT_HEARTBEAT_PING;
+  childDirect.header.seqNumber = 1201;
+  childDirect.header.hopCount = 1;
+  childDirect.header.maxHops = 6;
+  childDirect.header.hopAuthToken = cmdSecurity.computeHopAuthToken(
+    0x0012, childRouterId, 1201, childDirect.header.type
+  );
+  childRouter.handleReceivedWireFrame(childDirect, -70, 8, outDummy, sendAct);
+  TEST_ASSERT(childRouter.getTrackedChildCount() == 1, "Z.2 Direct authenticated child registered");
+  TEST_ASSERT(childRouter.getTrackedChild(0)->childPoleId == 0x0012, "Z.3 Tracked child ID is 0x0012");
+
+  // Z.3 Grandchild packet: srcAddress is 0x0033 (grandchild), but previousHopAddress is 0x0012 (child relay)
+  MeshWireFrame grandchildFrame = childDirect;
+  grandchildFrame.header.srcAddress = 0x0033; // Grandchild!
+  grandchildFrame.header.previousHopAddress = 0x0012; // Transmitted by child 0x0012
+  grandchildFrame.header.seqNumber = 3301;
+  grandchildFrame.header.hopCount = 2;
+  grandchildFrame.header.hopAuthToken = cmdSecurity.computeHopAuthToken(
+    0x0012, childRouterId, 3301, grandchildFrame.header.type
+  );
+  childRouter.handleReceivedWireFrame(grandchildFrame, -70, 8, outDummy, sendAct);
+  TEST_ASSERT(childRouter.getTrackedChildCount() == 1, "Z.4 Grandchild frame does NOT create new direct child record");
+  TEST_ASSERT(childRouter.findTrackedChild(0x0033) == nullptr, "Z.5 Grandchild 0x0033 is NOT registered as direct child");
+
+  // Z.4 Spoofed / Invalid hopAuthToken rejected from child tracking
+  MeshWireFrame spoofedFrame = childDirect;
+  spoofedFrame.header.srcAddress = 0x0014;
+  spoofedFrame.header.previousHopAddress = 0x0014;
+  spoofedFrame.header.seqNumber = 1401;
+  spoofedFrame.header.hopAuthToken = 0xDEAD; // Invalid token!
+  childRouter.handleReceivedWireFrame(spoofedFrame, -70, 8, outDummy, sendAct);
+  TEST_ASSERT(childRouter.findTrackedChild(0x0014) == nullptr, "Z.6 Spoofed hopAuthToken rejected from child tracking");
+
+  // Z.5 Broadcast nextHop alone does NOT register a child
+  MeshWireFrame bcastFrame = childDirect;
+  bcastFrame.header.srcAddress = 0x0015;
+  bcastFrame.header.previousHopAddress = 0x0015;
+  bcastFrame.header.nextHop = MSCB_BROADCAST_NODE_ID;
+  bcastFrame.header.seqNumber = 1501;
+  bcastFrame.header.hopAuthToken = cmdSecurity.computeHopAuthToken(
+    0x0015, MSCB_BROADCAST_NODE_ID, 1501, bcastFrame.header.type
+  );
+  childRouter.handleReceivedWireFrame(bcastFrame, -70, 8, outDummy, sendAct);
+  TEST_ASSERT(childRouter.findTrackedChild(0x0015) == nullptr, "Z.7 Broadcast nextHop frame does NOT register child");
+
+  // -------------------------------------------------------------------------
+  // SECTION AA: R3.2.2 ALERT QUEUE RELIABILITY & PENDING RETRY (DEF-322-03)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION AA: R3.2.2 ALERT QUEUE RELIABILITY & PENDING RETRY ---" << std::endl;
+
+  GwHeartbeatMonitor testGwHb;
+  testGwHb.begin();
+
+  // AA.1 Verify queue insertion returns true when space available
+  GwAlertEvent testEv;
+  memset(&testEv, 0, sizeof(testEv));
+  testEv.poleId = 0x0001;
+  testEv.newState = POLE_STATE_OFFLINE;
+  strncpy(testEv.reason, "TEST_ALERT", sizeof(testEv.reason) - 1);
+  TEST_ASSERT(testGwHb.queueAlert(testEv), "AA.1 queueAlert returns true on available queue capacity");
+
+  // AA.2 Fill queue to full capacity (GW_ALERT_QUEUE_CAPACITY == 16)
+  while (testGwHb.getAlertQueueCount() < GW_ALERT_QUEUE_CAPACITY) {
+    testEv.poleId++;
+    testGwHb.queueAlert(testEv);
+  }
+  TEST_ASSERT(testGwHb.getAlertQueueCount() == GW_ALERT_QUEUE_CAPACITY, "AA.2 Alert queue filled to exactly 16 capacity");
+
+  // AA.3 Attempt insertion into full queue: returns false
+  testEv.poleId = 0x0099;
+  TEST_ASSERT(!testGwHb.queueAlert(testEv), "AA.3 Insertion into full queue returns false (fail-safe rejection)");
+
+  // AA.4 Record child offline via parent when queue is full: preserved in pending state
+  testGwHb.recordChildOfflineFromParent(0x0099, 0x0002, 1000, "DOWNSTREAM_TIMEOUT");
+  TEST_ASSERT(testGwHb.hasPendingAlert(), "AA.4 Unqueued alert preserved in pending retry state");
+
+  // AA.5 Pop alert to free capacity -> pending alert is drained and queued
+  GwAlertEvent poppedEv;
+  TEST_ASSERT(testGwHb.popNextAlert(poppedEv), "AA.5 Successfully pop item to free queue slot");
+  testGwHb.drainPendingAlerts();
+  TEST_ASSERT(testGwHb.getAlertQueueCount() == GW_ALERT_QUEUE_CAPACITY, "AA.6 Pending alert retried and inserted into queue");
+
+  // -------------------------------------------------------------------------
+  // SECTION AB: R3.2.2 PERMANENT PRODUCTION RELAY SAFETY LOCK (DEF-322-04)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION AB: R3.2.2 PERMANENT PRODUCTION RELAY SAFETY LOCK ---" << std::endl;
+
+  PoleActuators testActuators;
+  testActuators.init();
+
+  // AB.1 Default state is locked
+  TEST_ASSERT(testActuators.areRelaysLockedDisabled(), "AB.1 Relays locked disabled by default");
+
+  // AB.2 Remote unlock attempt without physical auth is rejected
+  testActuators.setRelaysLockedDisabled(false);
+  TEST_ASSERT(testActuators.areRelaysLockedDisabled(), "AB.2 Runtime unlock attempt rejected");
+
+  // AB.3 In commissioning profile, bench mode requires physical auth + benchTestOverride + diagnostic passed
+  testActuators.setBenchTestOverride(true);
+  TEST_ASSERT(testActuators.areRelaysLockedDisabled(), "AB.3 Bench test override alone cannot unlock relays");
+
+  // -------------------------------------------------------------------------
+  // SECTION AC: R3.2.2 GPIO 39 PHYSICAL AUTH & DEBOUNCE (DEF-322-05)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION AC: R3.2.2 GPIO 39 PHYSICAL AUTH & DEBOUNCE ---" << std::endl;
+
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, HIGH); // Open circuit / pull-up HIGH
+  testActuators.servicePhysicalAuthorization();
+  testActuators.setLocalPhysicalAuthorization(true);
+  TEST_ASSERT(!testActuators.isLocalPhysicalAuthorized(), "AC.1 Pin 39 HIGH cannot authorize");
+
+  // Ground pin 39 (LOW)
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, LOW);
+  testActuators.servicePhysicalAuthorization();
+  delay(POLE_PHYSICAL_AUTH_DEBOUNCE_MS + 10); // Continuous elapsed time debounce
+  testActuators.servicePhysicalAuthorization();
+  testActuators.setLocalPhysicalAuthorization(true);
+  TEST_ASSERT(testActuators.isLocalPhysicalAuthorized(), "AC.2 50ms debounced LOW pin grants physical authorization");
+
+  // Immediate revocation on jumper removal (pin HIGH)
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, HIGH);
+  testActuators.servicePhysicalAuthorization();
+  TEST_ASSERT(!testActuators.isLocalPhysicalAuthorized(), "AC.3 Jumper removal immediately revokes authorization");
+
+  // -------------------------------------------------------------------------
+  // SECTION AD: R3.2.2 COMPLETE DYNAMIC PIN CONFIGURATION (DEF-322-06)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION AD: R3.2.2 COMPLETE DYNAMIC PIN CONFIGURATION ---" << std::endl;
+
+  PoleHardwarePinConfig dynCfg = getDefaultHardwarePinConfig();
+  dynCfg.loraNssPin = 15; // Valid non-flash GPIO
+  dynCfg.loraRstPin = 2;  // Valid non-flash GPIO
+  dynCfg.loraDio0Pin = 4;
+  dynCfg.decoderEnablePin = 22;
+  dynCfg.decoderA0Pin = 21;
+  dynCfg.decoderA1Pin = 19;
+  dynCfg.crc32 = calculatePinConfigCrc(dynCfg);
+
+  poleRadio.configurePins(dynCfg.loraNssPin, dynCfg.loraRstPin, dynCfg.loraDio0Pin);
+  TEST_ASSERT(poleRadio.getNssPin() == 15, "AD.1 LoRa driver accepted dynamic NSS pin 15");
+  TEST_ASSERT(poleRadio.getRstPin() == 2, "AD.2 LoRa driver accepted dynamic RST pin 2");
+
+  poleMetrology.configurePins(dynCfg.decoderEnablePin, dynCfg.decoderA0Pin, dynCfg.decoderA1Pin,
+                              dynCfg.adcSyncPin, dynCfg.adcDrdyPins);
+  TEST_ASSERT(poleMetrology.getDecoderEnablePin() == 22, "AD.3 Metrology accepted dynamic decoder enable pin 22");
+  TEST_ASSERT(poleMetrology.getDecoderA0Pin() == 21, "AD.4 Metrology accepted dynamic decoder A0 pin 21");
+  TEST_ASSERT(poleMetrology.getDecoderA1Pin() == 19, "AD.5 Metrology accepted dynamic decoder A1 pin 19");
+
+  // Restore defaults
+  PoleHardwarePinConfig defCfg = getDefaultHardwarePinConfig();
+  poleRadio.configurePins(defCfg.loraNssPin, defCfg.loraRstPin, defCfg.loraDio0Pin);
+  poleMetrology.configurePins(defCfg.decoderEnablePin, defCfg.decoderA0Pin, defCfg.decoderA1Pin,
+                              defCfg.adcSyncPin, defCfg.adcDrdyPins);
+  TEST_ASSERT(poleRadio.getNssPin() == POLE_LORA_NSS_PIN, "AD.6 Defaults restored for LoRa");
+
+  // -------------------------------------------------------------------------
+  // SECTION AE: R3.2.2 GATEWAY TELEGRAM TLS & ADMIN IDENTITY (DEF-322-07)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION AE: R3.2.2 TELEGRAM TLS & ADMIN IDENTITY ---" << std::endl;
+
+  TEST_ASSERT(TELEGRAM_CA_ROOT_CERT != nullptr && strlen(TELEGRAM_CA_ROOT_CERT) > 100,
+              "AE.1 DigiCert Root CA certificate embedded in GwTelegramCert.h");
+  TEST_ASSERT(strstr(TELEGRAM_CA_ROOT_CERT, "BEGIN CERTIFICATE") != nullptr,
+              "AE.2 Valid PEM certificate structure verified");
+
+  // Verify allowlist check
+  TEST_ASSERT(gwTelegram.isAuthorizedAdmin(5505296197LL), "AE.3 Primary admin 5505296197 authorized");
+  TEST_ASSERT(!gwTelegram.isAuthorizedAdmin(123456789LL), "AE.4 Dummy admin 123456789 rejected in production config");
+  TEST_ASSERT(!gwTelegram.isAuthorizedAdmin(987654321LL), "AE.5 Unknown user ID 987654321 strictly rejected");
+  TEST_ASSERT(gwTelegram.isAuthorizedSender(5505296197LL, -1001234567890LL, true),
+              "AE.6 Admin sender authorized in group chat");
+  TEST_ASSERT(!gwTelegram.isAuthorizedSender(987654321LL, -1001234567890LL, true),
+              "AE.7 Non-admin sender rejected in group chat");
+
+  // -------------------------------------------------------------------------
+  // SECTION AF: R3.2.2 METROLOGY DIAGNOSTIC TRUTH (DEF-322-08)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION AF: R3.2.2 METROLOGY DIAGNOSTIC TRUTH ---" << std::endl;
+
+  // AF.1 Missing ADC returns NAN for voltage
+  poleMetrology.setAdcChipDetected(2, false); // Chip 2 has voltages
+  TEST_ASSERT(isnan(poleMetrology.getBusVoltageR()), "AF.1 Missing ADC returns NAN for phase R voltage");
+  TEST_ASSERT(isnan(poleMetrology.getBusVoltageY()), "AF.2 Missing ADC returns NAN for phase Y voltage");
+  TEST_ASSERT(isnan(poleMetrology.getBusVoltageB()), "AF.3 Missing ADC returns NAN for phase B voltage");
+
+  // AF.2 Missing ADC returns NAN for current
+  poleMetrology.setAdcChipDetected(0, false); // Chip 0 has feeders 1..3
+  TEST_ASSERT(isnan(poleMetrology.getFeederCurrent(0, 0)), "AF.4 Missing ADC returns NAN for feeder 1 phase R");
+
+  // AF.3 Validity reports SENSOR_UNAVAILABLE
+  TEST_ASSERT(poleMetrology.getMeasurementValidity(1) == MEAS_SENSOR_UNAVAILABLE,
+              "AF.5 Disconnected channel returns MEAS_SENSOR_UNAVAILABLE");
+
+  // AF.4 ADS131M08 Device ID and Status Word checks
+  TEST_ASSERT(poleMetrology.validateAds131m08DeviceId(0x2800), "AF.6 Valid ADS131M08 device ID 0x2800 accepted");
+  TEST_ASSERT(!poleMetrology.validateAds131m08DeviceId(0x1200), "AF.7 Invalid device ID rejected");
+  TEST_ASSERT(poleMetrology.validateAds131m08StatusWord(0x05FF), "AF.8 Healthy status word accepted");
+  TEST_ASSERT(!poleMetrology.validateAds131m08StatusWord(0x07FF), "AF.9 Status word with reset/fault bit rejected");
 
   // Final Summary
   std::cout << "\n=====================================================================" << std::endl;

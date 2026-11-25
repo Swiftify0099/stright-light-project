@@ -46,8 +46,13 @@ public:
   void setRegistrationState(NodeRegClientState st);
   void setRevokedLocked(const char* reason = "GATEWAY_REVOKED");
   uint16_t getAssignedPoleId() const { return assignedPoleId; }
+  uint32_t getSessionToken() const { return sessionToken; }
+  void setSessionToken(uint32_t tok);
+  uint32_t nextBootHeartbeatSeqBase();
   const char* getStringId() const { return stringId; }
-  void saveRegistration(uint16_t poleId, const char* name, uint16_t primaryParent);
+  void saveRegistration(uint16_t poleId, const char* name, uint16_t primaryParent,
+                        uint32_t sessTok = 0, bool handshakePending = false);
+  bool confirmHandshakeRegistered();
   void clearRegistration();
 
   // Routing State
@@ -78,6 +83,7 @@ private:
   bool               isRevoked;
   NodeRegClientState regState;
   uint16_t           assignedPoleId;
+  uint32_t           sessionToken;
   char               stringId[16];
   uint16_t           primaryParent;
   uint16_t           backupParent;

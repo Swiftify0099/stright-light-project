@@ -39,6 +39,20 @@ static bool parseMac12Hex(const char* hex, uint8_t mac[6]) {
   return true;
 }
 
+#if defined(ARDUINO)
+static void sanitizeMarkdownToPlain(const char* src, char* dst, size_t maxLen) {
+  if (!src || !dst || maxLen == 0) return;
+  size_t j = 0;
+  for (size_t i = 0; src[i] != '\0' && j + 1 < maxLen; i++) {
+    char c = src[i];
+    if (c != '*' && c != '_' && c != '`') {
+      dst[j++] = c;
+    }
+  }
+  dst[j] = '\0';
+}
+#endif
+
 GwTelegramBot::GwTelegramBot() :
 #if defined(ARDUINO)
   client(),
@@ -49,12 +63,68 @@ GwTelegramBot::GwTelegramBot() :
   primaryAdminChatId(0),
   telegramOnline(false),
   startupNotified(false),
-  lastVerifyAttemptMs(0)
+  lastVerifyAttemptMs(0),
+  lastAlertBroadcastMs(0),
+  alertThrottleMs(GW_TG_DEFAULT_THROTTLE_MS),
+  rateLimitUntilMs(0),
+  nextEventId(1),
+  notifyQueueCount(0),
+  notifyInsertedCount(0),
+  notifyDeliveredCount(0),
+  notifyAmbiguousCount(0),
+  notifyFailedPermanentCount(0),
+  notifyDedupSuppressedCount(0),
+  notifyOverflowDroppedCount(0),
+  notifyRetryCount(0),
+  tlsStatus(TG_TLS_OK)
+#if !defined(ARDUINO)
+  , mockTimeSynced(true),
+  mockCertValid(true),
+  mockSendFail(false),
+  mockSendHook(nullptr),
+  hasTestAllowlistOverride(false),
+  testAllowlistCount(0)
+#endif
 {
   memset(botToken, 0, sizeof(botToken));
   memset(&activeWizard, 0, sizeof(activeWizard));
   memset(lastSentKeyboardJson, 0, sizeof(lastSentKeyboardJson));
   memset(lastSentMessageText, 0, sizeof(lastSentMessageText));
+  memset(notifyQueue, 0, sizeof(notifyQueue));
+#if !defined(ARDUINO)
+  memset(testAllowlist, 0, sizeof(testAllowlist));
+#endif
+}
+
+void GwTelegramBot::applyTlsSecurity() {
+#if defined(ARDUINO)
+  time_t nowSec = time(nullptr);
+  if (nowSec >= 1700000000) {
+    client.setCACert(TELEGRAM_CA_ROOT_CERT);
+    tlsStatus = TG_TLS_OK;
+  } else {
+    // Clock unsynchronized: fail closed for security
+    Serial.println(F("[TG] ⚠️ RTC unsynchronized; applying CA cert and failing closed"));
+    client.setCACert(TELEGRAM_CA_ROOT_CERT);
+    tlsStatus = TG_TLS_ERR_TIME_UNSYNCED;
+  }
+#else
+  if (!mockTimeSynced) {
+    tlsStatus = TG_TLS_ERR_TIME_UNSYNCED;
+  } else if (!mockCertValid) {
+    tlsStatus = TG_TLS_ERR_CERT_INVALID;
+  } else {
+    tlsStatus = TG_TLS_OK;
+  }
+#endif
+}
+
+bool GwTelegramBot::isAuthorizedSender(int64_t fromUserId, int64_t chatId, bool isGroupChat) const {
+  if (fromUserId == 0LL) return false;
+  if (isGroupChat) {
+    return isAuthorizedAdmin(fromUserId);
+  }
+  return isAuthorizedAdmin(fromUserId);
 }
 
 bool GwTelegramBot::begin() {
@@ -68,7 +138,7 @@ bool GwTelegramBot::begin() {
   }
 
 #if defined(ARDUINO)
-  client.setInsecure();
+  applyTlsSecurity();
   client.setTimeout(3000);
   bot.updateToken(botToken);
   bot.waitForResponse = 1500;
@@ -76,6 +146,7 @@ bool GwTelegramBot::begin() {
 #endif
 
   loadFeederNames();
+  resetNotificationQueue();
 
   lastPollMs = millis();
   telegramOnline = false;
@@ -86,6 +157,17 @@ bool GwTelegramBot::begin() {
 
 bool GwTelegramBot::isAuthorizedAdmin(int64_t chatId) const {
   if (chatId == 0LL) return false;
+
+#if !defined(ARDUINO)
+  if (hasTestAllowlistOverride) {
+    for (size_t i = 0; i < testAllowlistCount; i++) {
+      if (testAllowlist[i] != 0LL && testAllowlist[i] == chatId) {
+        return true;
+      }
+    }
+    return false;
+  }
+#endif
 
   // Match configured primary admin chat ID
   if (primaryAdminChatId != 0LL && chatId == primaryAdminChatId) {
@@ -105,7 +187,81 @@ bool GwTelegramBot::isAuthorizedAdmin(int64_t chatId) const {
   return false;
 }
 
-void GwTelegramBot::sendMessage(int64_t chatId, const char* text) {
+#if !defined(ARDUINO)
+void GwTelegramBot::setTestAllowlistOverride(const int64_t* ids, size_t count) {
+  hasTestAllowlistOverride = true;
+  testAllowlistCount = (count > 8) ? 8 : count;
+  memset(testAllowlist, 0, sizeof(testAllowlist));
+  for (size_t i = 0; i < testAllowlistCount; i++) {
+    testAllowlist[i] = ids[i];
+  }
+}
+
+void GwTelegramBot::clearTestAllowlistOverride() {
+  hasTestAllowlistOverride = false;
+  testAllowlistCount = 0;
+  memset(testAllowlist, 0, sizeof(testAllowlist));
+}
+#endif
+
+TgTransportOutcome GwTelegramBot::parseTelegramApiResponse(const char* jsonResp, uint32_t &outRetryAfterSec) {
+  outRetryAfterSec = 0;
+  if (!jsonResp || strlen(jsonResp) == 0) {
+    // Empty HTTP response after write -> ambiguous outcome (never blindly resend!)
+    return TG_TX_AMBIGUOUS_TIMEOUT;
+  }
+
+  if (strstr(jsonResp, "\"ok\":true") != nullptr || strstr(jsonResp, "\"ok\": true") != nullptr) {
+    return TG_TX_OK;
+  }
+
+  // Extract retry_after if present
+  const char* raPtr = strstr(jsonResp, "\"retry_after\"");
+  if (raPtr) {
+    const char* colon = strchr(raPtr, ':');
+    if (colon) {
+      long val = strtol(colon + 1, nullptr, 10);
+      if (val > 0) outRetryAfterSec = (uint32_t)val;
+    }
+  }
+
+  // Check error_code
+  int errorCode = 0;
+  const char* ecPtr = strstr(jsonResp, "\"error_code\"");
+  if (ecPtr) {
+    const char* colon = strchr(ecPtr, ':');
+    if (colon) {
+      errorCode = (int)strtol(colon + 1, nullptr, 10);
+    }
+  }
+
+  if (errorCode == 429) {
+    if (outRetryAfterSec == 0) outRetryAfterSec = 5;
+    return TG_TX_RATE_LIMITED;
+  }
+
+  if (errorCode == 400) {
+    if (strstr(jsonResp, "parse entities") != nullptr ||
+        strstr(jsonResp, "can't parse") != nullptr ||
+        strstr(jsonResp, "can't find end") != nullptr) {
+      return TG_TX_PARSE_ERROR;
+    }
+    return TG_TX_PERMANENT_ERROR;
+  }
+
+  if (errorCode == 401 || errorCode == 403 || errorCode == 404) {
+    return TG_TX_PERMANENT_ERROR;
+  }
+
+  if (errorCode >= 500) {
+    return TG_TX_TRANSIENT_FAILURE;
+  }
+
+  return TG_TX_AMBIGUOUS_TIMEOUT;
+}
+
+TgTransportOutcome GwTelegramBot::sendMessageWithOutcome(int64_t chatId, const char* text, uint32_t &outRetryAfterSec) {
+  outRetryAfterSec = 0;
   if (text) {
     strncpy(lastSentMessageText, text, sizeof(lastSentMessageText) - 1);
     lastSentMessageText[sizeof(lastSentMessageText) - 1] = '\0';
@@ -113,28 +269,75 @@ void GwTelegramBot::sendMessage(int64_t chatId, const char* text) {
     lastSentMessageText[0] = '\0';
   }
 
-  if (!text || strlen(text) == 0) return;
-  if (!gwWifi.isConnected()) return;
+  if (!text || strlen(text) == 0 || chatId == 0LL) return TG_TX_PERMANENT_ERROR;
+  if (!gwWifi.isConnected()) return TG_TX_TRANSIENT_FAILURE;
 
 #if defined(ARDUINO)
-  if (strcmp(botToken, "CONFIGURE_YOUR_TELEGRAM_TOKEN") == 0) return;
+  if (strcmp(botToken, "CONFIGURE_YOUR_TELEGRAM_TOKEN") == 0) return TG_TX_PERMANENT_ERROR;
 
   char idBuf[32];
   snprintf(idBuf, sizeof(idBuf), "%lld", (long long)chatId);
-  String chatIdStr(idBuf);
 
-  client.setInsecure();
-  bool ok = bot.sendMessage(chatIdStr, text, "Markdown");
-  if (!ok) {
-    // Retry without Markdown if formatting characters triggered a parse error
-    ok = bot.sendMessage(chatIdStr, text, "");
-    if (!ok) {
-      Serial.printf("[TG] ⚠️ sendMessage to %s failed (TLS or network error)\n", idBuf);
+  applyTlsSecurity();
+  // Verify TLS socket connection BEFORE transmitting payload so connect failures remain cleanly retryable
+  if (!client.connected()) {
+    if (!client.connect("api.telegram.org", 443)) {
+      Serial.printf("[TG] ⚠️ TLS connect failed before write for %s (transient)\n", idBuf);
+      return TG_TX_TRANSIENT_FAILURE;
     }
   }
+
+  JsonDocument payload;
+  payload["chat_id"] = idBuf;
+  payload["text"] = text;
+  payload["parse_mode"] = "Markdown";
+
+  String respBody = bot.sendPostToTelegram(bot.buildCommand("sendMessage"), payload.as<JsonObject>());
+  TgTransportOutcome outcome = parseTelegramApiResponse(respBody.c_str(), outRetryAfterSec);
+
+  if (outcome == TG_TX_AMBIGUOUS_TIMEOUT) {
+    client.stop();
+    Serial.printf("[TG] ⚠️ Ambiguous empty response after POST for %s (NO blind resend!)\n", idBuf);
+    return outcome;
+  }
+
+  if (outcome == TG_TX_PARSE_ERROR) {
+    // Explicit Markdown parse error ONLY: single safe plain-text fallback
+    char plainBuf[1024];
+    sanitizeMarkdownToPlain(text, plainBuf, sizeof(plainBuf));
+    JsonDocument plainPayload;
+    plainPayload["chat_id"] = idBuf;
+    plainPayload["text"] = plainBuf;
+    String retryBody = bot.sendPostToTelegram(bot.buildCommand("sendMessage"), plainPayload.as<JsonObject>());
+    outcome = parseTelegramApiResponse(retryBody.c_str(), outRetryAfterSec);
+  }
+
+  if (outcome != TG_TX_OK) {
+    Serial.printf("[TG] ⚠️ sendMessage outcome=%u (retryAfter=%lu) for %s\n",
+                  (unsigned)outcome, (unsigned long)outRetryAfterSec, idBuf);
+  }
+  return outcome;
 #else
+  if (mockSendHook) {
+    TgTransportOutcome outcome = mockSendHook(chatId, text, "Markdown", outRetryAfterSec);
+    if (outcome == TG_TX_PARSE_ERROR) {
+      // Single plain-text fallback strictly for Markdown parse error
+      outcome = mockSendHook(chatId, text, "", outRetryAfterSec);
+    }
+    return outcome;
+  }
   printf("[TELEGRAM_SEND to %lld]: %s\n", (long long)chatId, text);
+  return TG_TX_OK;
 #endif
+}
+
+bool GwTelegramBot::sendMessage(int64_t chatId, const char* text) {
+  uint32_t retryAfterSec = 0;
+  TgTransportOutcome outcome = sendMessageWithOutcome(chatId, text, retryAfterSec);
+  if (outcome == TG_TX_RATE_LIMITED && retryAfterSec > 0) {
+    rateLimitUntilMs = millis() + (retryAfterSec * 1000UL);
+  }
+  return (outcome == TG_TX_OK);
 }
 
 void GwTelegramBot::sendMessageWithKeyboard(int64_t chatId, const char* text, const char* keyboardJson) {
@@ -159,7 +362,6 @@ void GwTelegramBot::sendMessageWithKeyboard(int64_t chatId, const char* text, co
 
   char idBuf[32];
   snprintf(idBuf, sizeof(idBuf), "%lld", (long long)chatId);
-  String chatIdStr(idBuf);
 
   String kbClean = keyboardJson ? keyboardJson : "[]";
   kbClean.trim();
@@ -168,14 +370,29 @@ void GwTelegramBot::sendMessageWithKeyboard(int64_t chatId, const char* text, co
     kbClean.trim();
   }
 
-  client.setInsecure();
-  bool ok = bot.sendMessageWithInlineKeyboard(chatIdStr, text, "Markdown", kbClean, 0);
-  if (!ok) {
-    // Retry without Markdown if formatting characters triggered a parse error
-    ok = bot.sendMessageWithInlineKeyboard(chatIdStr, text, "", kbClean, 0);
-    if (!ok) {
-      Serial.printf("[TG] ⚠️ sendMessageWithInlineKeyboard to %s failed\n", idBuf);
-    }
+  applyTlsSecurity();
+  if (!client.connected() && !client.connect("api.telegram.org", 443)) {
+    return;
+  }
+
+  JsonDocument payload;
+  payload["chat_id"] = idBuf;
+  payload["text"] = text;
+  payload["parse_mode"] = "Markdown";
+  JsonObject replyMarkup = payload["reply_markup"].to<JsonObject>();
+  replyMarkup["inline_keyboard"] = serialized(kbClean);
+
+  String respBody = bot.sendPostToTelegram(bot.buildCommand("sendMessage"), payload.as<JsonObject>());
+  uint32_t retryAfter = 0;
+  TgTransportOutcome outcome = parseTelegramApiResponse(respBody.c_str(), retryAfter);
+  if (outcome == TG_TX_PARSE_ERROR) {
+    char plainBuf[1024];
+    sanitizeMarkdownToPlain(text, plainBuf, sizeof(plainBuf));
+    payload["text"] = plainBuf;
+    payload.remove("parse_mode");
+    bot.sendPostToTelegram(bot.buildCommand("sendMessage"), payload.as<JsonObject>());
+  } else if (outcome == TG_TX_AMBIGUOUS_TIMEOUT) {
+    client.stop();
   }
 #else
   printf("[TELEGRAM_KEYBOARD to %lld]: %s\nKB: %s\n", (long long)chatId, text, keyboardJson ? keyboardJson : "");
@@ -191,7 +408,6 @@ void GwTelegramBot::sendReplyKeyboard(int64_t chatId, const char* text) {
 
   char idBuf[32];
   snprintf(idBuf, sizeof(idBuf), "%lld", (long long)chatId);
-  String chatIdStr(idBuf);
 
   // 14-Action Persistent Bottom Keyboard compliant with Telegram Bot API
   const char* kb =
@@ -205,13 +421,30 @@ void GwTelegramBot::sendReplyKeyboard(int64_t chatId, const char* text) {
     "[{\"text\":\"🚨 Alarm Log\"},{\"text\":\"⚙️ System Settings\"}]"
     "]";
 
-  client.setInsecure();
-  bool ok = bot.sendMessageWithReplyKeyboard(chatIdStr, text, "Markdown", kb, true, false, false);
-  if (!ok) {
-    ok = bot.sendMessageWithReplyKeyboard(chatIdStr, text, "", kb, true, false, false);
-    if (!ok) {
-      Serial.printf("[TG] ⚠️ sendReplyKeyboard to %s failed\n", idBuf);
-    }
+  applyTlsSecurity();
+  if (!client.connected() && !client.connect("api.telegram.org", 443)) {
+    return;
+  }
+
+  JsonDocument payload;
+  payload["chat_id"] = idBuf;
+  payload["text"] = text;
+  payload["parse_mode"] = "Markdown";
+  JsonObject replyMarkup = payload["reply_markup"].to<JsonObject>();
+  replyMarkup["keyboard"] = serialized(kb);
+  replyMarkup["resize_keyboard"] = true;
+
+  String respBody = bot.sendPostToTelegram(bot.buildCommand("sendMessage"), payload.as<JsonObject>());
+  uint32_t retryAfter = 0;
+  TgTransportOutcome outcome = parseTelegramApiResponse(respBody.c_str(), retryAfter);
+  if (outcome == TG_TX_PARSE_ERROR) {
+    char plainBuf[1024];
+    sanitizeMarkdownToPlain(text, plainBuf, sizeof(plainBuf));
+    payload["text"] = plainBuf;
+    payload.remove("parse_mode");
+    bot.sendPostToTelegram(bot.buildCommand("sendMessage"), payload.as<JsonObject>());
+  } else if (outcome == TG_TX_AMBIGUOUS_TIMEOUT) {
+    client.stop();
   }
 #else
   printf("[TELEGRAM_REPLY_KB to %lld]: %s\n", (long long)chatId, text);
@@ -234,18 +467,92 @@ bool GwTelegramBot::loadFeederNames() {
   return true; // Loaded via gwRegistry.loadRegistry()
 }
 
-void GwTelegramBot::broadcastAdminAlert(const char* alertText) {
-  if (!alertText) return;
-  bool sentToAny = false;
+bool GwTelegramBot::broadcastAdminAlertDetailed(const char* alertText, TgBroadcastSummary &outSummary) {
+  memset(&outSummary, 0, sizeof(outSummary));
+  outSummary.overallOutcome = TG_TX_TRANSIENT_FAILURE;
+  if (!alertText || strlen(alertText) == 0) {
+    outSummary.overallOutcome = TG_TX_PERMANENT_ERROR;
+    return false;
+  }
+
+  int64_t uniqueAdmins[12];
+  size_t uniqueCount = 0;
+
+  auto appendUnique = [&uniqueAdmins, &uniqueCount](int64_t cid) {
+    if (cid == 0LL) return;
+    for (size_t j = 0; j < uniqueCount; j++) {
+      if (uniqueAdmins[j] == cid) return;
+    }
+    if (uniqueCount < 12) {
+      uniqueAdmins[uniqueCount++] = cid;
+    }
+  };
+
+#if !defined(ARDUINO)
+  if (hasTestAllowlistOverride) {
+    for (size_t i = 0; i < testAllowlistCount; i++) {
+      appendUnique(testAllowlist[i]);
+    }
+  } else {
+    for (size_t i = 0; i < S_ADMIN_COUNT; i++) {
+      appendUnique(S_ADMIN_ALLOWLIST[i]);
+    }
+    appendUnique(primaryAdminChatId);
+  }
+#else
   for (size_t i = 0; i < S_ADMIN_COUNT; i++) {
-    if (S_ADMIN_ALLOWLIST[i] != 0LL) {
-      sendMessage(S_ADMIN_ALLOWLIST[i], alertText);
-      sentToAny = true;
+    appendUnique(S_ADMIN_ALLOWLIST[i]);
+  }
+  appendUnique(primaryAdminChatId);
+#endif
+
+  outSummary.totalRecipients = (uint8_t)uniqueCount;
+  if (uniqueCount == 0) {
+    // No admin configured: keep alert queued/retained, NEVER report delivered!
+    outSummary.overallOutcome = TG_TX_TRANSIENT_FAILURE;
+    return false;
+  }
+
+  for (size_t i = 0; i < uniqueCount; i++) {
+    uint32_t retryAfter = 0;
+    TgTransportOutcome res = sendMessageWithOutcome(uniqueAdmins[i], alertText, retryAfter);
+    if (res == TG_TX_OK) {
+      outSummary.confirmedCount++;
+    } else if (res == TG_TX_RATE_LIMITED) {
+      outSummary.transientFailCount++;
+      if (retryAfter > outSummary.maxRetryAfterSec) outSummary.maxRetryAfterSec = retryAfter;
+    } else if (res == TG_TX_AMBIGUOUS_TIMEOUT) {
+      outSummary.ambiguousCount++;
+    } else if (res == TG_TX_PERMANENT_ERROR) {
+      outSummary.permanentFailCount++;
+    } else {
+      outSummary.transientFailCount++;
     }
   }
-  if (!sentToAny && primaryAdminChatId != 0LL) {
-    sendMessage(primaryAdminChatId, alertText);
+
+  if (outSummary.maxRetryAfterSec > 0) {
+    rateLimitUntilMs = millis() + (outSummary.maxRetryAfterSec * 1000UL);
   }
+
+  if (outSummary.confirmedCount > 0) {
+    outSummary.overallOutcome = TG_TX_OK;
+    return true;
+  }
+  if (outSummary.maxRetryAfterSec > 0) {
+    outSummary.overallOutcome = TG_TX_RATE_LIMITED;
+  } else if (outSummary.ambiguousCount > 0) {
+    outSummary.overallOutcome = TG_TX_AMBIGUOUS_TIMEOUT;
+  } else if (outSummary.permanentFailCount == outSummary.totalRecipients) {
+    outSummary.overallOutcome = TG_TX_PERMANENT_ERROR;
+  } else {
+    outSummary.overallOutcome = TG_TX_TRANSIENT_FAILURE;
+  }
+  return false;
+}
+
+bool GwTelegramBot::broadcastAdminAlert(const char* alertText) {
+  TgBroadcastSummary summary;
+  return broadcastAdminAlertDetailed(alertText, summary);
 }
 
 void GwTelegramBot::cmdStatus(int64_t chatId) {
@@ -599,7 +906,7 @@ void GwTelegramBot::showDashboard(int64_t chatId) {
 
   char buf[580];
   snprintf(buf, sizeof(buf),
-           "📊 *MSCB GATEWAY SYSTEM DASHBOARD*\n"
+           "📊 *MSCB GATEWAY STATUS & SYSTEM DASHBOARD*\n"
            "━━━━━━━━━━━━━━━━━━━━━━\n"
            "• Firmware Version: %d.%d.%d (%s)\n"
            "• System Clock: `%s`\n"
@@ -1759,8 +2066,9 @@ void GwTelegramBot::cmdConfig(int64_t chatId, const char* args) {
   }
 }
 
-void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
-  if (!isAuthorizedAdmin(chatId)) {
+void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText, int64_t fromUserId, bool isGroupChat) {
+  if (fromUserId == 0LL) fromUserId = chatId;
+  if (!isAuthorizedSender(fromUserId, chatId, isGroupChat)) {
     sendMessage(chatId, "⛔ Access Denied. Your Telegram account is not on the admin allowlist.");
     return;
   }
@@ -2030,19 +2338,32 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
       uint16_t assignedId = 0;
       char adminStr[24];
       snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
-      if (gwRegistry.approvePending(mac, assignedId, p ? p->draftDisplayName : nullptr, p ? p->draftLocation : nullptr, adminStr)) {
-        gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
+      char draftName[32] = {0};
+      char draftLoc[48] = {0};
+      if (p) {
+        strncpy(draftName, p->draftDisplayName, sizeof(draftName) - 1);
+        strncpy(draftLoc, p->draftLocation, sizeof(draftLoc) - 1);
+      }
+      if (gwRegistry.approvePending(mac, assignedId, draftName, draftLoc, adminStr)) {
+        bool txOk = gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
         char buf[256];
-        snprintf(buf, sizeof(buf),
-                 "✅ *POLE APPROVED & REGISTERED*\n"
-                 "Assigned Logical ID: `POLE-%04d (0x%04X)`\n"
-                 "Display Name: *%s*\n"
-                 "Location: *%s*\n"
-                 "Status: `PENDING_HANDSHAKE_ACK`\n"
-                 "LoRa response dispatched. Active confirmation occurs on first heartbeat.",
-                 assignedId, assignedId,
-                 p ? p->draftDisplayName : "Pole",
-                 p ? p->draftLocation : "Field");
+        if (txOk) {
+          snprintf(buf, sizeof(buf),
+                   "✅ *POLE APPROVED & REGISTERED*\n"
+                   "Assigned Logical ID: `POLE-%04d (0x%04X)`\n"
+                   "Display Name: *%s*\n"
+                   "Location: *%s*\n"
+                   "Status: `PENDING_HANDSHAKE_ACK`\n"
+                   "LoRa approval dispatched. Active confirmation occurs on first heartbeat.",
+                   assignedId, assignedId, draftName, draftLoc);
+        } else {
+          snprintf(buf, sizeof(buf),
+                   "⚠️ *POLE APPROVED (RADIO BUSY)*\n"
+                   "Assigned Logical ID: `POLE-%04d (0x%04X)`\n"
+                   "Display Name: *%s*\n"
+                   "Registry saved. Approval response will retry over mesh.",
+                   assignedId, assignedId, draftName);
+        }
         sendMessage(chatId, buf);
         resetActiveWizard();
       } else {
@@ -2128,8 +2449,9 @@ void GwTelegramBot::handleCommand(int64_t chatId, const char* cmdText) {
   }
 }
 
-void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
-  if (!isAuthorizedAdmin(chatId)) {
+void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData, int64_t fromUserId, bool isGroupChat) {
+  if (fromUserId == 0LL) fromUserId = chatId;
+  if (!isAuthorizedSender(fromUserId, chatId, isGroupChat)) {
     sendMessage(chatId, "⛔ Access Denied.");
     return;
   }
@@ -2313,17 +2635,31 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
       uint16_t assignedId = 0;
       char adminStr[24];
       snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
-      if (gwRegistry.approvePending(mac, assignedId, p->draftDisplayName, p->draftLocation, adminStr)) {
-        gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
+      char draftName[32] = {0};
+      char draftLoc[48] = {0};
+      strncpy(draftName, p->draftDisplayName, sizeof(draftName) - 1);
+      strncpy(draftLoc, p->draftLocation, sizeof(draftLoc) - 1);
+
+      if (gwRegistry.approvePending(mac, assignedId, draftName, draftLoc, adminStr)) {
+        bool txOk = gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
         char buf[256];
-        snprintf(buf, sizeof(buf),
-                 "✅ *POLE APPROVED & REGISTERED*\n"
-                 "Assigned Logical ID: `POLE-%04d (0x%04X)`\n"
-                 "Display Name: *%s*\n"
-                 "Location: *%s*\n"
-                 "State: `PENDING_HANDSHAKE_ACK`\n"
-                 "LoRa approval dispatched. Node will be confirmed fully active on first heartbeat.",
-                 assignedId, assignedId, p->draftDisplayName, p->draftLocation);
+        if (txOk) {
+          snprintf(buf, sizeof(buf),
+                   "✅ *POLE APPROVED & REGISTERED*\n"
+                   "Assigned Logical ID: `POLE-%04d (0x%04X)`\n"
+                   "Display Name: *%s*\n"
+                   "Location: *%s*\n"
+                   "State: `PENDING_HANDSHAKE_ACK`\n"
+                   "LoRa approval dispatched. Node will be confirmed fully active on first heartbeat.",
+                   assignedId, assignedId, draftName, draftLoc);
+        } else {
+          snprintf(buf, sizeof(buf),
+                   "⚠️ *POLE APPROVED (RADIO BUSY)*\n"
+                   "Assigned Logical ID: `POLE-%04d (0x%04X)`\n"
+                   "Display Name: *%s*\n"
+                   "Registry saved. Approval response will retry over mesh.",
+                   assignedId, assignedId, draftName);
+        }
         sendMessage(chatId, buf);
         resetActiveWizard();
       } else {
@@ -2366,10 +2702,20 @@ void GwTelegramBot::handleCallback(int64_t chatId, const char* callbackData) {
       uint16_t assignedId = 0;
       char adminStr[24];
       snprintf(adminStr, sizeof(adminStr), "ADMIN_%lld", (long long)chatId);
-      if (gwRegistry.approvePending(mac, assignedId, p ? p->draftDisplayName : nullptr, p ? p->draftLocation : nullptr, adminStr)) {
-        gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
-        char buf[128];
-        snprintf(buf, sizeof(buf), "✅ Approved! Assigned Logical ID: POLE-%04d (0x%04X)\nResponse packet dispatched over LoRa mesh.", assignedId, assignedId);
+      char draftName[32] = {0};
+      char draftLoc[48] = {0};
+      if (p) {
+        strncpy(draftName, p->draftDisplayName, sizeof(draftName) - 1);
+        strncpy(draftLoc, p->draftLocation, sizeof(draftLoc) - 1);
+      }
+      if (gwRegistry.approvePending(mac, assignedId, draftName, draftLoc, adminStr)) {
+        bool txOk = gwMesh.sendRegisterResponse(mac, assignedId, MSCB_GATEWAY_NODE_ID, REG_RESP_APPROVED);
+        char buf[256];
+        if (txOk) {
+          snprintf(buf, sizeof(buf), "✅ Approved! Assigned Logical ID: POLE-%04d (0x%04X)\nLoRa approval dispatched over mesh.", assignedId, assignedId);
+        } else {
+          snprintf(buf, sizeof(buf), "⚠️ Approved! Assigned Logical ID: POLE-%04d (0x%04X)\nRadio transmission failed; will retry over mesh.", assignedId, assignedId);
+        }
         sendMessage(chatId, buf);
       } else {
         sendMessage(chatId, "❌ Failed to approve. Mandatory Name and Location required!");
@@ -2624,17 +2970,200 @@ void GwTelegramBot::serviceTrackedCommands() {
   }
 }
 
+void GwTelegramBot::resetNotificationQueue() {
+  memset(notifyQueue, 0, sizeof(notifyQueue));
+  notifyQueueCount = 0;
+  notifyInsertedCount = 0;
+  notifyDeliveredCount = 0;
+  notifyAmbiguousCount = 0;
+  notifyFailedPermanentCount = 0;
+  notifyDedupSuppressedCount = 0;
+  notifyOverflowDroppedCount = 0;
+  notifyRetryCount = 0;
+  rateLimitUntilMs = 0;
+  lastAlertBroadcastMs = 0;
+  nextEventId = 1;
+}
+
+bool GwTelegramBot::enqueueNotification(TgNotifyEventType type, const char* dedupKey, const char* text,
+                                        const uint8_t* mac, uint16_t poleId,
+                                        uint32_t tsSec, const char* reason) {
+  if (!text || strlen(text) == 0) return false;
+
+  // Deduplicate active queued/ambiguous items sharing the same dedupKey
+  if (dedupKey && strlen(dedupKey) > 0) {
+    for (uint8_t i = 0; i < GW_TG_NOTIFY_QUEUE_CAPACITY; i++) {
+      if (!notifyQueue[i].active) continue;
+      if (notifyQueue[i].deliveryState == TG_DELIVERY_SENT_CONFIRMED ||
+          notifyQueue[i].deliveryState == TG_DELIVERY_FAILED_PERMANENT) {
+        continue;
+      }
+      if (strncmp(notifyQueue[i].dedupKey, dedupKey, sizeof(notifyQueue[i].dedupKey)) == 0) {
+        notifyDedupSuppressedCount++;
+        return true;
+      }
+    }
+  }
+
+  // Reclaim any completed slots first if needed, never evicting pending/retryable items
+  int freeSlot = -1;
+  for (uint8_t i = 0; i < GW_TG_NOTIFY_QUEUE_CAPACITY; i++) {
+    if (!notifyQueue[i].active) {
+      freeSlot = (int)i;
+      break;
+    }
+  }
+  if (freeSlot < 0) {
+    notifyOverflowDroppedCount++;
+    return false;
+  }
+
+  TgNotifyQueueItem &item = notifyQueue[freeSlot];
+  memset(&item, 0, sizeof(item));
+  item.active = true;
+  item.eventId = nextEventId++;
+  item.eventType = type;
+  if (mac) memcpy(item.mac, mac, 6);
+  item.poleId = poleId;
+  item.eventTimestampSec = (tsSec != 0) ? tsSec : (uint32_t)(millis() / 1000UL);
+  if (reason) {
+    strncpy(item.reason, reason, sizeof(item.reason) - 1);
+    item.reason[sizeof(item.reason) - 1] = '\0';
+  }
+  if (dedupKey) {
+    strncpy(item.dedupKey, dedupKey, sizeof(item.dedupKey) - 1);
+    item.dedupKey[sizeof(item.dedupKey) - 1] = '\0';
+  }
+  strncpy(item.text, text, sizeof(item.text) - 1);
+  item.text[sizeof(item.text) - 1] = '\0';
+  item.deliveryState = TG_DELIVERY_PENDING;
+  item.retryCount = 0;
+  item.nextAttemptMs = 0;
+  item.lastAttemptMs = 0;
+
+  notifyQueueCount++;
+  notifyInsertedCount++;
+  return true;
+}
+
+void GwTelegramBot::processNotificationQueue(uint32_t nowMs) {
+  if (!gwWifi.isConnected()) return;
+  if (notifyQueueCount == 0) return;
+  if (rateLimitUntilMs != 0 && nowMs < rateLimitUntilMs) return;
+  if (lastAlertBroadcastMs != 0 && (nowMs - lastAlertBroadcastMs < alertThrottleMs)) return;
+
+  // Collect eligible heartbeat events for batch digesting (up to GW_TG_GROUP_BATCH_MAX per batch)
+  uint8_t hbIndices[GW_TG_GROUP_BATCH_MAX];
+  uint8_t hbCount = 0;
+  int firstEligibleIdx = -1;
+
+  for (uint8_t i = 0; i < GW_TG_NOTIFY_QUEUE_CAPACITY; i++) {
+    TgNotifyQueueItem &it = notifyQueue[i];
+    if (!it.active) continue;
+    if (it.deliveryState != TG_DELIVERY_PENDING && it.deliveryState != TG_DELIVERY_RETRY_SCHEDULED) continue;
+    if (it.nextAttemptMs != 0 && nowMs < it.nextAttemptMs) continue;
+
+    if (firstEligibleIdx < 0) firstEligibleIdx = (int)i;
+    if ((it.eventType == TG_EVT_POLE_OFFLINE ||
+         it.eventType == TG_EVT_POLE_UNREACHABLE ||
+         it.eventType == TG_EVT_POLE_RECOVERED) && hbCount < GW_TG_GROUP_BATCH_MAX) {
+      hbIndices[hbCount++] = i;
+    }
+  }
+
+  if (firstEligibleIdx < 0) return;
+
+  auto applyOutcomeToSlot = [this, nowMs](uint8_t slot, const TgBroadcastSummary &summary) {
+    TgNotifyQueueItem &it = notifyQueue[slot];
+    it.lastAttemptMs = nowMs;
+    if (summary.overallOutcome == TG_TX_OK) {
+      it.deliveryState = TG_DELIVERY_SENT_CONFIRMED;
+      it.active = false;
+      if (notifyQueueCount > 0) notifyQueueCount--;
+      notifyDeliveredCount++;
+    } else if (summary.overallOutcome == TG_TX_AMBIGUOUS_TIMEOUT) {
+      // Do NOT blindly resend immediately on ambiguous timeout after HTTP write
+      it.deliveryState = TG_DELIVERY_UNKNOWN_AMBIGUOUS;
+      notifyAmbiguousCount++;
+    } else if (summary.overallOutcome == TG_TX_PERMANENT_ERROR) {
+      it.deliveryState = TG_DELIVERY_FAILED_PERMANENT;
+      it.active = false;
+      if (notifyQueueCount > 0) notifyQueueCount--;
+      notifyFailedPermanentCount++;
+    } else {
+      it.retryCount++;
+      notifyRetryCount++;
+      if (it.retryCount >= GW_TG_MAX_RETRIES) {
+        it.deliveryState = TG_DELIVERY_FAILED_PERMANENT;
+        it.active = false;
+        if (notifyQueueCount > 0) notifyQueueCount--;
+        notifyFailedPermanentCount++;
+      } else {
+        it.deliveryState = TG_DELIVERY_RETRY_SCHEDULED;
+        uint32_t backoffMs = (summary.maxRetryAfterSec > 0)
+                                 ? (summary.maxRetryAfterSec * 1000UL)
+                                 : (alertThrottleMs * (uint32_t)(1U << it.retryCount));
+        it.nextAttemptMs = nowMs + backoffMs;
+      }
+    }
+  };
+
+  if (hbCount > 1) {
+    uint8_t offCnt = 0, unreachCnt = 0, recCnt = 0;
+    for (uint8_t k = 0; k < hbCount; k++) {
+      TgNotifyEventType et = notifyQueue[hbIndices[k]].eventType;
+      if (et == TG_EVT_POLE_OFFLINE) offCnt++;
+      else if (et == TG_EVT_POLE_UNREACHABLE) unreachCnt++;
+      else if (et == TG_EVT_POLE_RECOVERED) recCnt++;
+    }
+
+    char digestBuf[1900];
+    int offset = snprintf(digestBuf, sizeof(digestBuf),
+                          "🚨 *MSCB SMART POLE STATUS DIGEST (%u EVENTS: %u OFF, %u CASCADE, %u REC)*\n\n",
+                          (unsigned)hbCount, (unsigned)offCnt, (unsigned)unreachCnt, (unsigned)recCnt);
+
+    for (uint8_t k = 0; k < hbCount && offset < (int)sizeof(digestBuf) - 160; k++) {
+      const TgNotifyQueueItem &ev = notifyQueue[hbIndices[k]];
+      RegisteredPole* pole = gwRegistry.findPoleById(ev.poleId);
+      const char* pName = (pole && strlen(pole->displayName) > 0) ? pole->displayName : "POLE";
+      const char* icon = (ev.eventType == TG_EVT_POLE_RECOVERED) ? "🟢"
+                       : (ev.eventType == TG_EVT_POLE_UNREACHABLE ? "⚠️" : "🔴");
+      const char* stateStr = (ev.eventType == TG_EVT_POLE_RECOVERED) ? "RECOVERING"
+                           : (ev.eventType == TG_EVT_POLE_UNREACHABLE ? "UNREACHABLE_VIA_PARENT" : "OFFLINE");
+      offset += snprintf(digestBuf + offset, sizeof(digestBuf) - offset,
+                         "• %s *%s* (`0x%04X`) - %s (%s)\n",
+                         icon, pName, ev.poleId, stateStr,
+                         strlen(ev.reason) > 0 ? ev.reason : "STATE_CHANGE");
+    }
+
+    TgBroadcastSummary summary;
+    broadcastAdminAlertDetailed(digestBuf, summary);
+    lastAlertBroadcastMs = nowMs;
+    for (uint8_t k = 0; k < hbCount; k++) {
+      applyOutcomeToSlot(hbIndices[k], summary);
+    }
+    return;
+  }
+
+  // Dispatch single priority/status notification
+  uint8_t slot = (uint8_t)firstEligibleIdx;
+  TgBroadcastSummary summary;
+  broadcastAdminAlertDetailed(notifyQueue[slot].text, summary);
+  lastAlertBroadcastMs = nowMs;
+  applyOutcomeToSlot(slot, summary);
+}
+
 void GwTelegramBot::checkOnlineAndNotify() {
-#if defined(ARDUINO)
   if (telegramOnline) return;
   if (!gwWifi.isConnected()) return;
 
+#if defined(ARDUINO)
   uint32_t now = millis();
   if (now - lastVerifyAttemptMs < 5000) return;
   lastVerifyAttemptMs = now;
 
   Serial.println(F("[TG] Connecting to Telegram API..."));
-  client.setInsecure();
+  applyTlsSecurity();
 
   // Clear any conflicting webhook that could block getUpdates
   static bool s_webhookCleared = false;
@@ -2663,6 +3192,11 @@ void GwTelegramBot::checkOnlineAndNotify() {
   } else {
     Serial.println(F("[TG] ⚠️ Telegram getMe failed. Will retry. Check Bot Token or Internet connection."));
   }
+#else
+  telegramOnline = true;
+  if (!startupNotified && primaryAdminChatId != 0LL) {
+    startupNotified = true;
+  }
 #endif
 }
 
@@ -2670,7 +3204,7 @@ void GwTelegramBot::pollUpdates() {
 #if defined(ARDUINO)
   if (!telegramOnline || !gwWifi.isConnected()) return;
 
-  client.setInsecure();
+  applyTlsSecurity();
   int numNew = bot.getUpdates(bot.last_message_received + 1);
   while (numNew > 0) {
     for (int i = 0; i < numNew; i++) {
@@ -2723,15 +3257,75 @@ void GwTelegramBot::service() {
 
   checkOnlineAndNotify();
 
-  if (gwHeartbeat.hasPendingAlert()) {
-    broadcastAdminAlert(gwHeartbeat.getNextAlertText());
-    gwHeartbeat.clearPendingAlert();
+  // 1. One-time notification for newly queued pending registrations (R3.2.2 P0)
+  while (gwRegistry.hasPendingRegistrationAlert()) {
+    int pIdx = -1;
+    const char* regAlert = gwRegistry.getNextPendingRegistrationAlertText(pIdx);
+    const PendingRegistration* pRec = (pIdx >= 0) ? gwRegistry.getPendingByIndex((uint8_t)pIdx) : nullptr;
+    if (!regAlert || strlen(regAlert) == 0 || !pRec) break;
+    char dedupKey[48];
+    snprintf(dedupKey, sizeof(dedupKey), "REG_PEND_%02X%02X%02X%02X%02X%02X",
+             pRec->mac[0], pRec->mac[1], pRec->mac[2], pRec->mac[3], pRec->mac[4], pRec->mac[5]);
+    if (enqueueNotification(TG_EVT_PENDING_REG, dedupKey, regAlert, pRec->mac, 0,
+                            pRec->requestTimestamp, "PENDING_REGISTRATION")) {
+      gwRegistry.markPendingRegistrationNotified(pIdx);
+    } else {
+      break;
+    }
   }
 
-  if (gwRegistry.hasReappearedRevokedAlert()) {
-    broadcastAdminAlert(gwRegistry.getReappearedRevokedAlertText());
-    gwRegistry.clearReappearedRevokedAlert();
+  // 2. One-time final confirmation notification when first authenticated heartbeat completes
+  while (gwRegistry.hasHandshakeConfirmAlert()) {
+    int poleIdx = -1;
+    const char* confText = gwRegistry.getNextHandshakeConfirmAlertText(poleIdx);
+    const RegisteredPole* rp = (poleIdx >= 0) ? gwRegistry.getPoleByIndex((uint8_t)poleIdx) : nullptr;
+    if (!confText || strlen(confText) == 0 || !rp) break;
+    char dedupKey[48];
+    snprintf(dedupKey, sizeof(dedupKey), "REG_CONF_%04X_%lu", rp->poleId, (unsigned long)rp->sessionToken);
+    if (enqueueNotification(TG_EVT_REG_CONFIRMED, dedupKey, confText, rp->mac, rp->poleId,
+                            rp->lastSeenTimestamp, "HANDSHAKE_CONFIRMED")) {
+      gwRegistry.markHandshakeConfirmNotified(poleIdx);
+    } else {
+      break;
+    }
   }
+
+  // 3. Revoked device reappearance alert (incident deduplication + multi-MAC queue, R3.2.2 P0)
+  while (gwRegistry.hasReappearedRevokedAlert()) {
+    const char* revText = gwRegistry.getReappearedRevokedAlertText();
+    if (!revText || strlen(revText) == 0) break;
+    uint32_t textHash = mscbStorageCrc32((const uint8_t*)revText, strlen(revText));
+    char dedupKey[48];
+    snprintf(dedupKey, sizeof(dedupKey), "REV_%08lX", (unsigned long)textHash);
+    if (enqueueNotification(TG_EVT_REVOKED_REAPPEAR, dedupKey, revText, nullptr, 0,
+                            (uint32_t)(now / 1000UL), "REVOKED_REAPPEAR")) {
+      gwRegistry.clearReappearedRevokedAlert();
+    } else {
+      break;
+    }
+  }
+
+  // 4. Drain Heartbeat Offline / Recovery alerts into persistent delivery queue (non-lossy)
+  while (gwHeartbeat.hasPendingAlert() && notifyQueueCount < GW_TG_NOTIFY_QUEUE_CAPACITY) {
+    GwAlertEvent ev;
+    if (!gwHeartbeat.peekNextAlert(ev)) break;
+    char alertBuf[384];
+    gwHeartbeat.formatAlertEvent(ev, alertBuf, sizeof(alertBuf));
+    TgNotifyEventType evType = (ev.newState == POLE_STATE_RECOVERING) ? TG_EVT_POLE_RECOVERED
+                             : (ev.newState == POLE_STATE_UNREACHABLE_VIA_PARENT ? TG_EVT_POLE_UNREACHABLE : TG_EVT_POLE_OFFLINE);
+    char dedupKey[48];
+    snprintf(dedupKey, sizeof(dedupKey), "HB_%04X_%u_%lu",
+             ev.poleId, (unsigned)ev.newState, (unsigned long)ev.eventTimestampEpoch);
+    if (enqueueNotification(evType, dedupKey, alertBuf, nullptr, ev.poleId,
+                            ev.eventTimestampEpoch, ev.reason)) {
+      gwHeartbeat.confirmAlertsDelivered(1);
+    } else {
+      break;
+    }
+  }
+
+  // 5. Rate-limited grouped notification dispatch & retry engine
+  processNotificationQueue(now);
 
   // Non-blocking tracked command ACK reporter
   serviceTrackedCommands();

@@ -14,14 +14,17 @@ PoleStorageManager::PoleStorageManager() :
   registered(false),
   isRevoked(false),
   regState(REG_CLIENT_UNREGISTERED),
-  assignedPoleId(POLE_DEFAULT_NODE_ADDRESS),
+  assignedPoleId(POLE_UNASSIGNED_NODE_ADDRESS),
+  sessionToken(0),
   primaryParent(MSCB_GATEWAY_NODE_ID),
   backupParent(MSCB_GATEWAY_NODE_ID),
   networkRank(1),
   heartbeatIntervalSec(30)
 {
   strncpy(stringId, POLE_DEFAULT_STRING_ID, sizeof(stringId) - 1);
+  stringId[sizeof(stringId) - 1] = '\0';
   strncpy(revocationReason, "NONE", sizeof(revocationReason) - 1);
+  revocationReason[sizeof(revocationReason) - 1] = '\0';
   memset(switchCounts, 0, sizeof(switchCounts));
 }
 
@@ -31,11 +34,14 @@ bool PoleStorageManager::begin() {
   registered = prefs.getBool("reg", false);
   isRevoked = prefs.getBool("revoked", false);
   uint8_t st = prefs.getUChar("reg_st", 0);
-  assignedPoleId = prefs.getUShort("pole_id", POLE_DEFAULT_NODE_ADDRESS);
+  assignedPoleId = prefs.getUShort("pole_id", POLE_UNASSIGNED_NODE_ADDRESS);
+  sessionToken = prefs.getULong("sess_tok", 0);
   String sid = prefs.getString("str_id", POLE_DEFAULT_STRING_ID);
   strncpy(stringId, sid.c_str(), sizeof(stringId) - 1);
+  stringId[sizeof(stringId) - 1] = '\0';
   String rReason = prefs.getString("rev_rsn", "NONE");
   strncpy(revocationReason, rReason.c_str(), sizeof(revocationReason) - 1);
+  revocationReason[sizeof(revocationReason) - 1] = '\0';
   primaryParent = prefs.getUShort("pri_p", MSCB_GATEWAY_NODE_ID);
   backupParent = prefs.getUShort("bkp_p", MSCB_GATEWAY_NODE_ID);
   networkRank = prefs.getUChar("rank", 1);
@@ -50,10 +56,20 @@ bool PoleStorageManager::begin() {
   } else if (st == REG_CLIENT_REJECTED) {
     regState = REG_CLIENT_REJECTED;
     registered = false;
-  } else if (registered && st == REG_CLIENT_REGISTERED) {
+    assignedPoleId = POLE_UNASSIGNED_NODE_ADDRESS;
+  } else if (registered && st == REG_CLIENT_REGISTERED &&
+             assignedPoleId >= 0x0002 && assignedPoleId < MSCB_EPHEMERAL_JOIN_MIN) {
     regState = REG_CLIENT_REGISTERED;
+  } else if (st == REG_CLIENT_WAITING_FOR_HANDSHAKE &&
+             assignedPoleId >= 0x0002 && assignedPoleId < MSCB_EPHEMERAL_JOIN_MIN) {
+    regState = REG_CLIENT_WAITING_FOR_HANDSHAKE;
+    registered = false;
   } else {
     regState = (NodeRegClientState)st;
+    registered = false;
+    if (st == REG_CLIENT_UNREGISTERED || st == REG_CLIENT_PENDING_APPROVAL) {
+      assignedPoleId = POLE_UNASSIGNED_NODE_ADDRESS;
+    }
   }
 #else
   if (isRevoked || regState == REG_CLIENT_REVOKED_LOCKED) {
@@ -104,13 +120,44 @@ void PoleStorageManager::setRegistrationState(NodeRegClientState st) {
 #endif
 }
 
-void PoleStorageManager::saveRegistration(uint16_t poleId, const char* name, uint16_t priParent) {
+void PoleStorageManager::setSessionToken(uint32_t tok) {
+  sessionToken = tok;
+#if defined(ARDUINO)
+  prefs.begin("mscb_pole", false);
+  prefs.putULong("sess_tok", sessionToken);
+  prefs.end();
+#endif
+}
+
+uint32_t PoleStorageManager::nextBootHeartbeatSeqBase() {
+#if defined(ARDUINO)
+  prefs.begin("mscb_pole", false);
+  uint32_t seqBase = prefs.getULong("hb_seq", 0);
+  uint32_t nextBase = seqBase + 1024UL;
+  if (nextBase == 0) nextBase = 1024UL;
+  prefs.putULong("hb_seq", nextBase);
+  prefs.end();
+  return seqBase;
+#else
+  static uint32_t s_mockBootBase = 0;
+  uint32_t ret = s_mockBootBase;
+  s_mockBootBase += 1024UL;
+  return ret;
+#endif
+}
+
+void PoleStorageManager::saveRegistration(uint16_t poleId, const char* name, uint16_t priParent,
+                                          uint32_t sessTok, bool handshakePending) {
   assignedPoleId = poleId;
-  registered = true;
+  registered = !handshakePending;
   isRevoked = false;
-  regState = REG_CLIENT_REGISTERED;
+  regState = handshakePending ? REG_CLIENT_WAITING_FOR_HANDSHAKE : REG_CLIENT_REGISTERED;
+  if (sessTok != 0) {
+    sessionToken = sessTok;
+  }
   if (name && strlen(name) > 0) {
     strncpy(stringId, name, sizeof(stringId) - 1);
+    stringId[sizeof(stringId) - 1] = '\0';
   } else {
     snprintf(stringId, sizeof(stringId), "POLE_%02d", poleId);
   }
@@ -118,21 +165,39 @@ void PoleStorageManager::saveRegistration(uint16_t poleId, const char* name, uin
 
 #if defined(ARDUINO)
   prefs.begin("mscb_pole", false);
-  prefs.putBool("reg", true);
+  prefs.putBool("reg", registered);
   prefs.putBool("revoked", false);
-  prefs.putUChar("reg_st", REG_CLIENT_REGISTERED);
+  prefs.putUChar("reg_st", (uint8_t)regState);
   prefs.putUShort("pole_id", assignedPoleId);
+  prefs.putULong("sess_tok", sessionToken);
   prefs.putString("str_id", stringId);
   prefs.putUShort("pri_p", primaryParent);
   prefs.end();
 #endif
 }
 
+bool PoleStorageManager::confirmHandshakeRegistered() {
+  if (isRevoked || !mscbIsValidAssignedPoleId(assignedPoleId)) {
+    return false;
+  }
+  registered = true;
+  regState = REG_CLIENT_REGISTERED;
+#if defined(ARDUINO)
+  prefs.begin("mscb_pole", false);
+  prefs.putBool("reg", true);
+  prefs.putUChar("reg_st", REG_CLIENT_REGISTERED);
+  prefs.end();
+#endif
+  return true;
+}
+
 void PoleStorageManager::clearRegistration() {
   registered = false;
   regState = REG_CLIENT_UNREGISTERED;
-  assignedPoleId = POLE_DEFAULT_NODE_ADDRESS;
+  assignedPoleId = POLE_UNASSIGNED_NODE_ADDRESS;
+  sessionToken = 0;
   strncpy(stringId, POLE_DEFAULT_STRING_ID, sizeof(stringId) - 1);
+  stringId[sizeof(stringId) - 1] = '\0';
   primaryParent = MSCB_GATEWAY_NODE_ID;
   backupParent = MSCB_GATEWAY_NODE_ID;
   networkRank = 1;
@@ -142,6 +207,7 @@ void PoleStorageManager::clearRegistration() {
   prefs.putBool("reg", false);
   prefs.putUChar("reg_st", REG_CLIENT_UNREGISTERED);
   prefs.putUShort("pole_id", assignedPoleId);
+  prefs.putULong("sess_tok", 0);
   prefs.putString("str_id", stringId);
   prefs.end();
 #endif

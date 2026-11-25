@@ -5,6 +5,7 @@
  */
 
 #include "GwMeshCoordinator.h"
+#include "GwHeartbeatMonitor.h"
 #include "GwScheduleManager.h"
 #include "GwNetworkQueue.h"
 #include <string.h>
@@ -20,6 +21,7 @@ GwMeshCoordinator::GwMeshCoordinator() :
 {
   memset(dupCache, 0, sizeof(dupCache));
   memset(trackedCommands, 0, sizeof(trackedCommands));
+  memset(pendingRejections, 0, sizeof(pendingRejections));
 }
 
 bool GwMeshCoordinator::begin() {
@@ -65,6 +67,7 @@ void GwMeshCoordinator::broadcastBeacon() {
   frame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
   frame.header.dstAddress = MSCB_BROADCAST_NODE_ID;
   frame.header.nextHop = MSCB_BROADCAST_NODE_ID;
+  frame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
 
   PktBeaconAnnouncePayload beacon;
   beacon.senderId = MSCB_GATEWAY_NODE_ID;
@@ -75,6 +78,7 @@ void GwMeshCoordinator::broadcastBeacon() {
 
   frame.header.payloadLen = sizeof(PktBeaconAnnouncePayload);
   memcpy(frame.payload, &beacon, sizeof(PktBeaconAnnouncePayload));
+  frame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(frame);
 
   gwRadio.sendPacket(frame);
 }
@@ -116,14 +120,130 @@ void GwMeshCoordinator::service() {
     feederAckPending = false;
   }
 
-  // 4. Service Network-Wide Command Queue
+  // 4. Bounded retry loop for registration approval responses awaiting handshake & queued rejections
+  serviceRegistrationRetries();
+
+  // 5. Service Network-Wide Command Queue
   gwNetworkQueue.service();
 }
 
+void GwMeshCoordinator::serviceRegistrationRetries() {
+  uint32_t now = millis();
+  uint8_t actCount = gwRegistry.getActiveCount();
+  for (uint8_t i = 0; i < actCount; i++) {
+    const RegisteredPole* cp = gwRegistry.getPoleByIndex(i);
+    if (!cp || cp->status != POLE_STATUS_PENDING_ACK) continue;
+    if (cp->regResponseAttempts >= GW_REG_RESP_MAX_RETRIES) continue;
+    if (cp->lastRegResponseMs == 0 || (now - cp->lastRegResponseMs >= GW_REG_RESP_RETRY_INTERVAL_MS)) {
+      sendRegisterResponse(cp->mac, cp->poleId, cp->primaryParent, REG_RESP_APPROVED);
+    }
+  }
+
+  for (uint8_t i = 0; i < GW_MAX_PENDING_REJECTIONS; i++) {
+    if (!pendingRejections[i].inUse) continue;
+    if (pendingRejections[i].attempts >= GW_REG_RESP_MAX_RETRIES) {
+      pendingRejections[i].inUse = false;
+      continue;
+    }
+    if (pendingRejections[i].lastAttemptMs == 0 ||
+        (now - pendingRejections[i].lastAttemptMs >= GW_REG_RESP_RETRY_INTERVAL_MS)) {
+      MeshWireFrame respFrame;
+      memset(&respFrame, 0, sizeof(MeshWireFrame));
+      PktRegisterResponsePayload resp;
+      memset(&resp, 0, sizeof(resp));
+      memcpy(resp.macAddress, pendingRejections[i].mac, 6);
+      resp.status = pendingRejections[i].status;
+      resp.networkKeyEpoch = cmdSecurity.getActiveKeyEpoch() ? cmdSecurity.getActiveKeyEpoch() : 1;
+      resp.sessionToken = pendingRejections[i].sessionToken ? pendingRejections[i].sessionToken : 1;
+      resp.nonce = pendingRejections[i].nonce ? pendingRejections[i].nonce : 1;
+      if (!cmdSecurity.isKeyProvisioned() || !cmdSecurity.computeRegisterResponseAuth(resp, resp.authTag)) {
+        pendingRejections[i].inUse = false;
+        continue;
+      }
+
+      respFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+      respFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+      respFrame.header.version = MSCB_PROTOCOL_VERSION;
+      respFrame.header.type = PKT_REGISTER_RESPONSE;
+      respFrame.header.priority = PRIO_COMMAND;
+      respFrame.header.hopCount = 0;
+      respFrame.header.maxHops = GW_MESH_MAX_HOPS;
+      respFrame.header.seqNumber = seqCounter++;
+      respFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
+      respFrame.header.dstAddress = MSCB_BROADCAST_NODE_ID;
+      respFrame.header.nextHop = (pendingRejections[i].firstHop != 0) ? pendingRejections[i].firstHop : MSCB_BROADCAST_NODE_ID;
+      respFrame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
+      respFrame.header.payloadLen = sizeof(PktRegisterResponsePayload);
+      memcpy(respFrame.payload, &resp, sizeof(PktRegisterResponsePayload));
+      respFrame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(respFrame);
+
+      pendingRejections[i].attempts++;
+      pendingRejections[i].lastAttemptMs = now;
+      if (gwRadio.sendPacket(respFrame)) {
+        pendingRejections[i].inUse = false;
+      }
+    }
+  }
+}
+
+bool GwMeshCoordinator::queueRejectionResponse(const uint8_t mac[6], uint8_t status, uint32_t sessionToken, uint32_t nonce, uint16_t firstHop) {
+  if (!mac) return false;
+  PendingRegistration* p = gwRegistry.getPendingByMac(mac);
+  uint32_t effSess = (sessionToken != 0) ? sessionToken : (p ? p->sessionToken : 0);
+  uint32_t effNonce = (nonce != 0) ? nonce : (p ? p->lastReqNonce : 0);
+  uint16_t effHop = (firstHop != 0) ? firstHop : (p ? p->firstHopAddress : MSCB_BROADCAST_NODE_ID);
+  if (effSess == 0) effSess = 1;
+  if (effNonce == 0) effNonce = 1;
+
+  for (uint8_t i = 0; i < GW_MAX_PENDING_REJECTIONS; i++) {
+    if (!pendingRejections[i].inUse) {
+      pendingRejections[i].inUse = true;
+      memcpy(pendingRejections[i].mac, mac, 6);
+      pendingRejections[i].status = status;
+      pendingRejections[i].sessionToken = effSess;
+      pendingRejections[i].nonce = effNonce;
+      pendingRejections[i].firstHop = effHop;
+      pendingRejections[i].attempts = 0;
+      pendingRejections[i].lastAttemptMs = 0;
+      break;
+    }
+  }
+  return sendRegisterResponse(mac, 0, MSCB_GATEWAY_NODE_ID, status);
+}
+
 bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int16_t rssi, int8_t snr) {
-  // Check Hop Count limit
-  if (frame.header.hopCount > frame.header.maxHops) {
+  // Validate protocol magic, version & payload bounds
+  if (frame.header.magic[0] != MSCB_PROTOCOL_MAGIC_0 ||
+      frame.header.magic[1] != MSCB_PROTOCOL_MAGIC_1 ||
+      frame.header.version != MSCB_PROTOCOL_VERSION ||
+      frame.header.payloadLen > MSCB_MAX_PAYLOAD_SIZE) {
+    return false;
+  }
+
+  // Validate addresses and immediate previous hop identity
+  if (frame.header.srcAddress == 0 ||
+      frame.header.srcAddress == MSCB_BROADCAST_NODE_ID ||
+      frame.header.srcAddress == MSCB_GATEWAY_NODE_ID ||
+      frame.header.dstAddress == 0 ||
+      frame.header.nextHop == 0) {
+    return false;
+  }
+  if (frame.header.previousHopAddress == 0 ||
+      frame.header.previousHopAddress == MSCB_BROADCAST_NODE_ID ||
+      frame.header.previousHopAddress == MSCB_GATEWAY_NODE_ID) {
+    return false;
+  }
+
+  // Strict Maximum Hop Validation (1 <= maxHops <= GW_MESH_MAX_HOPS, hopCount <= maxHops)
+  if (frame.header.maxHops == 0 || frame.header.maxHops > GW_MESH_MAX_HOPS ||
+      frame.header.hopCount > frame.header.maxHops ||
+      frame.header.hopCount > GW_MESH_MAX_HOPS) {
     hopExceededCount++;
+    return false;
+  }
+
+  // Fail-closed immediate-hop and full-frame HMAC token verification
+  if (!cmdSecurity.verifyFrameHopAuthToken(frame)) {
     return false;
   }
 
@@ -139,51 +259,108 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
     switch (frame.header.type) {
       case PKT_REGISTER_REQUEST: {
         if (frame.header.payloadLen >= sizeof(PktRegisterRequestPayload)) {
+          if (!cmdSecurity.isKeyProvisioned()) {
+            Serial.println(F("[SECURITY] ❌ Registration request dropped: Gateway key unprovisioned (fail-closed)"));
+            break;
+          }
+
           PktRegisterRequestPayload req;
           memcpy(&req, frame.payload, sizeof(PktRegisterRequestPayload));
 
+          if (!mscbIsValidMac(req.macAddress, false)) {
+            Serial.println(F("[SECURITY] ❌ Registration request dropped: Invalid MAC address"));
+            break;
+          }
+
+          uint16_t returnHop = (frame.header.previousHopAddress != 0 &&
+                                frame.header.previousHopAddress != MSCB_GATEWAY_NODE_ID)
+                                   ? frame.header.previousHopAddress
+                                   : frame.header.srcAddress;
+          if (returnHop == 0) returnHop = MSCB_BROADCAST_NODE_ID;
+
           PktRegisterResponsePayload resp;
           uint8_t status = gwRegistry.handleJoinRequest(req, rssi, snr, resp);
-
-          // If approved or rejected, send response immediately
-          if (status != REG_RESP_PENDING_APPROVAL) {
-            MeshWireFrame respFrame;
-            memset(&respFrame, 0, sizeof(MeshWireFrame));
-            respFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
-            respFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
-            respFrame.header.version = MSCB_PROTOCOL_VERSION;
-            respFrame.header.type = PKT_REGISTER_RESPONSE;
-            respFrame.header.priority = PRIO_COMMAND;
-            respFrame.header.hopCount = 0;
-            respFrame.header.maxHops = GW_MESH_MAX_HOPS;
-            respFrame.header.seqNumber = seqCounter++;
-            respFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
-            respFrame.header.dstAddress = resp.assignedPoleId ? resp.assignedPoleId : MSCB_BROADCAST_NODE_ID;
-            respFrame.header.nextHop = frame.header.srcAddress; // send back via same path
-            respFrame.header.payloadLen = sizeof(PktRegisterResponsePayload);
-            memcpy(respFrame.payload, &resp, sizeof(PktRegisterResponsePayload));
-
-            gwRadio.sendPacket(respFrame);
+          if (status == REG_RESP_PENDING_APPROVAL || status == REG_RESP_APPROVED) {
+            gwRegistry.setPendingSourceRoute(req.macAddress, req.nonce, returnHop, frame.header.srcAddress);
           }
+
+          if (status == REG_RESP_REJECTED_UNAUTHORIZED && (req.sessionToken == 0 || req.nonce == 0)) {
+            // Do not waste airtime or reflect unauthenticated malformed probes without valid session/nonce
+            break;
+          }
+
+          // R3.2.2 P0 Fix: Send response for ALL outcomes including REG_RESP_PENDING_APPROVAL!
+          MeshWireFrame respFrame;
+          memset(&respFrame, 0, sizeof(MeshWireFrame));
+          respFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+          respFrame.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+          respFrame.header.version = MSCB_PROTOCOL_VERSION;
+          respFrame.header.type = PKT_REGISTER_RESPONSE;
+          respFrame.header.priority = PRIO_COMMAND;
+          respFrame.header.hopCount = 0;
+          respFrame.header.maxHops = GW_MESH_MAX_HOPS;
+          respFrame.header.seqNumber = seqCounter++;
+          respFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
+          respFrame.header.dstAddress = resp.assignedPoleId
+                                            ? resp.assignedPoleId
+                                            : (frame.header.srcAddress ? frame.header.srcAddress : MSCB_BROADCAST_NODE_ID);
+          respFrame.header.nextHop = returnHop;
+          respFrame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
+          respFrame.header.payloadLen = sizeof(PktRegisterResponsePayload);
+          memcpy(respFrame.payload, &resp, sizeof(PktRegisterResponsePayload));
+          respFrame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(respFrame);
+
+          gwRadio.sendPacket(respFrame);
         }
         break;
       }
 
       case PKT_HEARTBEAT_PING: {
         if (frame.header.payloadLen >= sizeof(PktHeartbeatPingPayload)) {
+          if (!cmdSecurity.isKeyProvisioned()) {
+            Serial.println(F("[SECURITY] ❌ Heartbeat rejected: Gateway key unprovisioned"));
+            break;
+          }
+
           PktHeartbeatPingPayload hb;
           memcpy(&hb, frame.payload, sizeof(PktHeartbeatPingPayload));
 
+          // Verify frame source identity agrees with heartbeat payload pole ID & valid ID range
+          if (!mscbIsValidAssignedPoleId(hb.poleId) || frame.header.srcAddress != hb.poleId) {
+            Serial.printf("[SECURITY] ❌ Spoofed heartbeat dropped (hdr src=0x%04X vs hb.poleId=0x%04X)\n",
+                          frame.header.srcAddress, hb.poleId);
+            break;
+          }
+
+          // Verify cryptographic HMAC authentication on heartbeat payload
+          if (!cmdSecurity.verifyHeartbeatAuth(hb)) {
+            Serial.printf("[SECURITY] ❌ Unauthenticated heartbeat from 0x%04X rejected!\n", hb.poleId);
+            break;
+          }
+
+          uint16_t returnHop = (frame.header.previousHopAddress != 0 &&
+                                frame.header.previousHopAddress != MSCB_GATEWAY_NODE_ID)
+                                   ? frame.header.previousHopAddress
+                                   : frame.header.srcAddress;
+          if (returnHop == 0) returnHop = hb.poleId;
+
           // Check if pole is actively registered and not revoked
           RegisteredPole* p = gwRegistry.findPoleById(hb.poleId);
-          bool isRevoked = (p != nullptr && gwRegistry.isMacRevoked(p->mac));
+          const PermanentRevocationRecord* revByMac = mscbIsValidMac(hb.macAddress, false)
+                                                          ? gwRegistry.findRevokedByMac(hb.macAddress)
+                                                          : nullptr;
+          const PermanentRevocationRecord* revById = gwRegistry.findRevokedByPoleId(hb.poleId);
+          const PermanentRevocationRecord* rev = revByMac ? revByMac : revById;
+          bool isRevoked = (rev != nullptr) ||
+                           (p != nullptr && gwRegistry.isMacRevoked(p->mac)) ||
+                           (mscbIsValidMac(hb.macAddress, false) && gwRegistry.isMacRevoked(hb.macAddress));
+
           if (p == nullptr || isRevoked) {
-            // Check if pole was revoked
-            const PermanentRevocationRecord* rev = gwRegistry.findRevokedByPoleId(hb.poleId);
-            if (rev != nullptr || isRevoked) {
-              // Trigger security alert for revoked pole trying to send heartbeat
+            if (isRevoked) {
               uint8_t revMac[6] = {0};
-              if (p != nullptr) {
+              if (mscbIsValidMac(hb.macAddress, false)) {
+                memcpy(revMac, hb.macAddress, 6);
+              } else if (p != nullptr) {
                 memcpy(revMac, p->mac, 6);
               } else if (rev != nullptr && strlen(rev->hwId) >= 12) {
                 for (int i = 0; i < 6; i++) {
@@ -210,24 +387,54 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
             ackFrame.header.seqNumber = seqCounter++;
             ackFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
             ackFrame.header.dstAddress = hb.poleId;
-            ackFrame.header.nextHop = frame.header.srcAddress;
+            ackFrame.header.nextHop = returnHop;
+            ackFrame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
 
             PktHeartbeatAckPayload ack;
             ack.poleId = hb.poleId;
             ack.gatewayTimeEpoch = gwSchedule.getEpoch();
             ack.configVersion = 0;
-            ack.ackStatus = (rev != nullptr || isRevoked) ? HB_ACK_REVOKED_LOCKED : HB_ACK_RE_REGISTER_REQUIRED;
+            ack.ackStatus = isRevoked ? HB_ACK_REVOKED_LOCKED : HB_ACK_RE_REGISTER_REQUIRED;
 
             ackFrame.header.payloadLen = sizeof(PktHeartbeatAckPayload);
             memcpy(ackFrame.payload, &ack, sizeof(PktHeartbeatAckPayload));
+            ackFrame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(ackFrame);
             gwRadio.sendPacket(ackFrame);
             break;
           }
 
-          // Active registered pole: Update node telemetry
+          // Verify bound hardware MAC & registration session token match registered pole record!
+          if (!mscbIsValidMac(hb.macAddress, false) || memcmp(p->mac, hb.macAddress, 6) != 0) {
+            Serial.printf("[SECURITY] ❌ Heartbeat MAC mismatch for pole 0x%04X rejected!\n", hb.poleId);
+            break;
+          }
+          if (p->sessionToken != 0 && hb.sessionToken != p->sessionToken) {
+            Serial.printf("[SECURITY] ❌ Heartbeat sessionToken mismatch for pole 0x%04X rejected!\n", hb.poleId);
+            break;
+          }
+
+          // Replay protection for heartbeat sequence nonce
+          if (p->lastHeartbeatSeq != 0 && hb.seqNonce == p->lastHeartbeatSeq) {
+            duplicatesSuppressed++;
+            break;
+          }
+          if (p->lastHeartbeatSeq != 0 && hb.seqNonce < p->lastHeartbeatSeq && hb.uptimeSec >= p->lastUptimeSec) {
+            duplicatesSuppressed++;
+            break;
+          }
+          p->lastHeartbeatSeq = hb.seqNonce;
+          p->lastUptimeSec = hb.uptimeSec;
+          if (returnHop != 0 && returnHop != MSCB_GATEWAY_NODE_ID) {
+            p->firstHopAddress = returnHop;
+          }
+
+          // Active registered pole: Confirm handshake & update node telemetry + monitor
           if (p->status == POLE_STATUS_PENDING_ACK) {
             gwRegistry.confirmPoleHandshake(hb.poleId);
           }
+          uint32_t gwEpoch = gwSchedule.getEpoch();
+          if (gwEpoch == 0) gwEpoch = (uint32_t)(millis() / 1000UL);
+          gwHeartbeat.onHeartbeatReceived(hb.poleId, gwEpoch);
           gwRegistry.updateNodeTelemetry(hb.poleId, hb.primaryParent, hb.backupParent,
                                          hb.rank, hb.feederStateMask, hb.auxFeedbackMask, hb.mcbStatusMask,
                                          hb.busVoltageV, hb.totalCurrentA, rssi, snr,
@@ -246,7 +453,8 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           ackFrame.header.seqNumber = seqCounter++;
           ackFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
           ackFrame.header.dstAddress = hb.poleId;
-          ackFrame.header.nextHop = frame.header.srcAddress;
+          ackFrame.header.nextHop = returnHop;
+          ackFrame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
 
           PktHeartbeatAckPayload ack;
           ack.poleId = hb.poleId;
@@ -256,6 +464,7 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
 
           ackFrame.header.payloadLen = sizeof(PktHeartbeatAckPayload);
           memcpy(ackFrame.payload, &ack, sizeof(PktHeartbeatAckPayload));
+          ackFrame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(ackFrame);
           gwRadio.sendPacket(ackFrame);
         }
         break;
@@ -265,6 +474,7 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
         if (frame.header.payloadLen >= sizeof(PktRevokedReappearPayload)) {
           PktRevokedReappearPayload alert;
           memcpy(&alert, frame.payload, sizeof(PktRevokedReappearPayload));
+          if (!mscbIsValidMac(alert.macAddress, false)) break;
 
           const PermanentRevocationRecord* rev = gwRegistry.findRevokedByMac(alert.macAddress);
           const char* prevId = rev ? rev->logicalId : "UNKNOWN";
@@ -274,7 +484,12 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
                         alert.macAddress[0], alert.macAddress[1], alert.macAddress[2],
                         alert.macAddress[3], alert.macAddress[4], alert.macAddress[5]);
 
-          // Reply with PKT_REGISTER_RESPONSE telling it is REJECTED_REVOKED
+          uint16_t returnHop = (frame.header.previousHopAddress != 0 &&
+                                frame.header.previousHopAddress != MSCB_GATEWAY_NODE_ID)
+                                   ? frame.header.previousHopAddress
+                                   : (frame.header.srcAddress ? frame.header.srcAddress : MSCB_BROADCAST_NODE_ID);
+
+          // Reply with PKT_REGISTER_RESPONSE telling it is REJECTED_REVOKED (authenticated if key provisioned)
           MeshWireFrame respFrame;
           memset(&respFrame, 0, sizeof(MeshWireFrame));
           respFrame.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
@@ -286,8 +501,9 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           respFrame.header.maxHops = GW_MESH_MAX_HOPS;
           respFrame.header.seqNumber = seqCounter++;
           respFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
-          respFrame.header.dstAddress = MSCB_BROADCAST_NODE_ID;
-          respFrame.header.nextHop = frame.header.srcAddress;
+          respFrame.header.dstAddress = frame.header.srcAddress ? frame.header.srcAddress : MSCB_BROADCAST_NODE_ID;
+          respFrame.header.nextHop = returnHop;
+          respFrame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
 
           PktRegisterResponsePayload resp;
           memset(&resp, 0, sizeof(resp));
@@ -296,11 +512,60 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
           resp.assignedPoleId = 0;
           resp.assignedParent = 0;
           resp.heartbeatIntervalSec = 0;
-          resp.networkKeyEpoch = 0;
+          resp.networkKeyEpoch = cmdSecurity.getActiveKeyEpoch() ? cmdSecurity.getActiveKeyEpoch() : 1;
+          resp.sessionToken = 1;
+          resp.nonce = 1;
+          if (cmdSecurity.isKeyProvisioned()) {
+            cmdSecurity.computeRegisterResponseAuth(resp, resp.authTag);
+          }
 
           respFrame.header.payloadLen = sizeof(PktRegisterResponsePayload);
           memcpy(respFrame.payload, &resp, sizeof(PktRegisterResponsePayload));
+          respFrame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(respFrame);
           gwRadio.sendPacket(respFrame);
+        }
+        break;
+      }
+
+      case PKT_ALERT_CHILD_OFFLINE: {
+        if (frame.header.payloadLen >= sizeof(PktChildStatusEventPayload)) {
+          PktChildStatusEventPayload ev;
+          memcpy(&ev, frame.payload, sizeof(PktChildStatusEventPayload));
+          if (!mscbIsValidAssignedPoleId(ev.parentPoleId) ||
+              !mscbIsValidAssignedPoleId(ev.childPoleId) ||
+              ev.parentPoleId == ev.childPoleId ||
+              ev.parentPoleId != frame.header.srcAddress ||
+              ev.eventType != 0) {
+            break;
+          }
+          uint32_t ts = (ev.eventTimestamp != 0) ? ev.eventTimestamp
+                        : (gwSchedule.getEpoch() ? gwSchedule.getEpoch() : (uint32_t)(millis() / 1000));
+          char reasonBuf[32];
+          snprintf(reasonBuf, sizeof(reasonBuf), "CHILD_OFFLINE(r=%u,seq=%u)",
+                   (unsigned)ev.reason, (unsigned)ev.eventSeqNumber);
+          Serial.printf("[MESH] 🚨 Child Offline Alert: Parent 0x%04X reports downstream Child 0x%04X OFFLINE\n",
+                        ev.parentPoleId, ev.childPoleId);
+          gwHeartbeat.recordChildOfflineFromParent(ev.childPoleId, ev.parentPoleId, ts, reasonBuf);
+        }
+        break;
+      }
+
+      case PKT_ALERT_CHILD_RECOVERED: {
+        if (frame.header.payloadLen >= sizeof(PktChildStatusEventPayload)) {
+          PktChildStatusEventPayload ev;
+          memcpy(&ev, frame.payload, sizeof(PktChildStatusEventPayload));
+          if (!mscbIsValidAssignedPoleId(ev.parentPoleId) ||
+              !mscbIsValidAssignedPoleId(ev.childPoleId) ||
+              ev.parentPoleId == ev.childPoleId ||
+              ev.parentPoleId != frame.header.srcAddress ||
+              ev.eventType != 1) {
+            break;
+          }
+          uint32_t ts = (ev.eventTimestamp != 0) ? ev.eventTimestamp
+                        : (gwSchedule.getEpoch() ? gwSchedule.getEpoch() : (uint32_t)(millis() / 1000));
+          Serial.printf("[MESH] ✅ Child Recovered Alert: Parent 0x%04X reports downstream Child 0x%04X RECOVERED\n",
+                        ev.parentPoleId, ev.childPoleId);
+          gwHeartbeat.recordChildRecoveredFromParent(ev.childPoleId, ev.parentPoleId, ts);
         }
         break;
       }
@@ -419,15 +684,22 @@ bool GwMeshCoordinator::processIncomingWireFrame(const MeshWireFrame &frame, int
   }
 
   // Downlink packet meant for another node (multi-hop mesh forwarding)
-  if (frame.header.hopCount + 1 <= frame.header.maxHops) {
+  if ((uint8_t)(frame.header.hopCount + 1U) <= frame.header.maxHops &&
+      (uint8_t)(frame.header.hopCount + 1U) <= GW_MESH_MAX_HOPS) {
     MeshWireFrame forwardFrame = frame;
     forwardFrame.header.hopCount++;
 
     // Look up route for destination
     RegisteredPole* destPole = gwRegistry.findPoleById(frame.header.dstAddress);
     if (destPole) {
-      forwardFrame.header.nextHop = destPole->primaryParent ? destPole->primaryParent : frame.header.dstAddress;
+      forwardFrame.header.nextHop = (destPole->primaryParent != 0 && destPole->primaryParent != MSCB_GATEWAY_NODE_ID)
+                                    ? destPole->primaryParent
+                                    : frame.header.dstAddress;
+    } else {
+      return false;
     }
+    forwardFrame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
+    forwardFrame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(forwardFrame);
 
     gwRadio.sendPacket(forwardFrame);
     packetsForwarded++;
@@ -462,10 +734,12 @@ bool GwMeshCoordinator::sendDownlinkPacket(uint16_t targetPoleId, uint8_t packet
     frame.header.nextHop = targetPoleId;
   }
 
+  frame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
   frame.header.payloadLen = payloadLen;
   if (payload && payloadLen > 0) {
     memcpy(frame.payload, payload, payloadLen);
   }
+  frame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(frame);
 
   return gwRadio.sendPacket(frame);
 }
@@ -553,14 +827,64 @@ bool GwMeshCoordinator::sendFeederCommand(uint16_t poleId, uint8_t feederId, uin
 }
 
 bool GwMeshCoordinator::sendRegisterResponse(const uint8_t mac[6], uint16_t assignedPoleId, uint16_t assignedParent, uint8_t status) {
-  if (!mac) return false;
+  if (!mac || !mscbIsValidMac(mac, false)) return false;
+  if (!cmdSecurity.isKeyProvisioned()) return false;
+
+  // Snapshot ALL registration/session metadata BEFORE building response frame
+  uint32_t sessTok = 0;
+  uint32_t reqNonce = 0;
+  uint16_t firstHop = 0;
+  uint16_t fallbackParent = MSCB_GATEWAY_NODE_ID;
+
+  PendingRegistration* p = gwRegistry.getPendingByMac(mac);
+  if (p) {
+    sessTok = p->sessionToken;
+    reqNonce = p->lastReqNonce;
+    firstHop = p->firstHopAddress;
+    if (p->requestedParent != 0 && p->requestedParent < MSCB_EPHEMERAL_JOIN_MIN) {
+      fallbackParent = p->requestedParent;
+    }
+  } else {
+    RegisteredPole* regP = gwRegistry.findPoleByMac(mac);
+    if (regP) {
+      sessTok = regP->sessionToken;
+      reqNonce = regP->lastReqNonce;
+      firstHop = regP->firstHopAddress;
+      if (regP->primaryParent != 0 && regP->primaryParent < MSCB_EPHEMERAL_JOIN_MIN) {
+        fallbackParent = regP->primaryParent;
+      }
+    }
+  }
+
+  if (sessTok == 0) sessTok = 1;
+  if (reqNonce == 0) reqNonce = 1;
+
   PktRegisterResponsePayload resp;
+  memset(&resp, 0, sizeof(resp));
   memcpy(resp.macAddress, mac, 6);
   resp.status = status;
   resp.assignedPoleId = assignedPoleId;
-  resp.assignedParent = assignedParent ? assignedParent : MSCB_GATEWAY_NODE_ID;
+  resp.assignedParent = (assignedParent != 0 && assignedParent < MSCB_EPHEMERAL_JOIN_MIN && assignedParent != assignedPoleId)
+                            ? assignedParent
+                            : fallbackParent;
   resp.heartbeatIntervalSec = 30;
-  resp.networkKeyEpoch = 1;
+  resp.networkKeyEpoch = cmdSecurity.getActiveKeyEpoch() ? cmdSecurity.getActiveKeyEpoch() : 1;
+  resp.sessionToken = sessTok;
+  resp.nonce = reqNonce;
+
+  if (!cmdSecurity.computeRegisterResponseAuth(resp, resp.authTag)) {
+    return false;
+  }
+
+  uint16_t resolvedNextHop = MSCB_BROADCAST_NODE_ID;
+  if (firstHop != 0 && firstHop != MSCB_GATEWAY_NODE_ID) {
+    resolvedNextHop = firstHop;
+  } else if (resp.assignedParent != 0 && resp.assignedParent != MSCB_GATEWAY_NODE_ID &&
+             resp.assignedParent != assignedPoleId) {
+    resolvedNextHop = resp.assignedParent;
+  } else if (assignedPoleId != 0) {
+    resolvedNextHop = assignedPoleId;
+  }
 
   MeshWireFrame respFrame;
   memset(&respFrame, 0, sizeof(MeshWireFrame));
@@ -574,11 +898,15 @@ bool GwMeshCoordinator::sendRegisterResponse(const uint8_t mac[6], uint16_t assi
   respFrame.header.seqNumber = seqCounter++;
   respFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
   respFrame.header.dstAddress = assignedPoleId ? assignedPoleId : MSCB_BROADCAST_NODE_ID;
-  respFrame.header.nextHop = MSCB_BROADCAST_NODE_ID;
+  respFrame.header.nextHop = resolvedNextHop;
+  respFrame.header.previousHopAddress = MSCB_GATEWAY_NODE_ID;
   respFrame.header.payloadLen = sizeof(PktRegisterResponsePayload);
   memcpy(respFrame.payload, &resp, sizeof(PktRegisterResponsePayload));
+  respFrame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(respFrame);
 
-  return gwRadio.sendPacket(respFrame);
+  bool txOk = gwRadio.sendPacket(respFrame);
+  gwRegistry.recordRegResponseAttempt(mac, txOk);
+  return txOk;
 }
 
 bool GwMeshCoordinator::pollCompletedCommand(GwTrackedCommand &outCmd) {

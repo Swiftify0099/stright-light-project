@@ -120,6 +120,14 @@ struct RegisteredPole {
   uint8_t  currentValid;        // MeasurementValidity
   float    lastBusVoltage;
   float    lastCurrent;
+  uint32_t lastReqNonce;
+  uint16_t firstHopAddress;
+  uint8_t  regResponseAttempts;
+  uint32_t lastRegResponseMs;
+  uint8_t  regDeliveryState;    // 0=PENDING, 1=TX_DISPATCHED, 2=TX_FAILED, 3=HANDSHAKE_CONFIRMED
+  bool     handshakeNotifiedAdmin;
+  uint32_t lastHeartbeatSeq;
+  uint32_t lastUptimeSec;
 };
 
 struct PendingRegistration {
@@ -127,6 +135,9 @@ struct PendingRegistration {
   uint16_t requestedParent;
   uint16_t firmwareVersion;
   uint32_t sessionToken;
+  uint32_t lastReqNonce;
+  uint16_t firstHopAddress;
+  uint16_t lastSrcAddress;
   int16_t  rssi;
   int8_t   snr;
   uint32_t requestTimestamp;
@@ -140,6 +151,18 @@ struct PendingRegistration {
   float    draftLongitude;
   bool     draftHasGps;
   char     draftFeederNames[6][24];
+};
+
+#define GW_MAX_REVOKED_INCIDENTS 16
+
+struct RevokedIncidentTracker {
+  uint8_t  mac[6];
+  uint16_t poleId;
+  uint32_t firstSeenEpoch;
+  uint32_t lastSeenEpoch;
+  uint32_t lastAlertEpoch;
+  uint32_t occurrences;
+  bool     activeIncident;
 };
 
 class GwNodeRegistry {
@@ -187,11 +210,26 @@ public:
   const PermanentRevocationRecord* findRevokedByMac(const uint8_t mac[6]) const;
   const PermanentRevocationRecord* findRevokedByPoleId(uint16_t poleId) const;
 
-  // Reappearance Alert Management
-  bool hasReappearedRevokedAlert() const { return reappearedAlertPending; }
-  const char* getReappearedRevokedAlertText() const { return reappearedAlertBuf; }
-  void clearReappearedRevokedAlert() { reappearedAlertPending = false; reappearedAlertBuf[0] = '\0'; }
-  void setReappearedRevokedAlert(const uint8_t mac[6], const char* prevLogicalId, uint16_t prevPoleId);
+  // Reappearance Alert Management (R3.2.2 P0 Deduplication + Multi-MAC FIFO Queue)
+  bool hasReappearedRevokedAlert() const { return revokedAlertCount > 0; }
+  uint8_t getReappearedRevokedAlertCount() const { return revokedAlertCount; }
+  const char* getReappearedRevokedAlertText() const {
+    return (revokedAlertCount > 0) ? revokedAlertQueue[revokedAlertHead].text : "";
+  }
+  void clearReappearedRevokedAlert();
+  bool setReappearedRevokedAlert(const uint8_t mac[6], const char* prevLogicalId, uint16_t prevPoleId);
+  void resetRevokedIncidentDeduplication(const uint8_t mac[6] = nullptr);
+  uint32_t getRevokedIncidentOccurrences(const uint8_t mac[6]) const;
+
+  // Pending Registration & Final Handshake Notifications (R3.2.2 P0 One-Time Alert)
+  bool hasPendingRegistrationAlert() const;
+  const char* getNextPendingRegistrationAlertText(int &outPendingIndex);
+  void markPendingRegistrationNotified(int pendingIndex);
+  void setPendingSourceRoute(const uint8_t mac[6], uint32_t reqNonce, uint16_t firstHop, uint16_t srcAddr);
+  void recordRegResponseAttempt(const uint8_t mac[6], bool txSuccess);
+  bool hasHandshakeConfirmAlert() const;
+  const char* getNextHandshakeConfirmAlertText(int &outPoleIndex);
+  void markHandshakeConfirmNotified(int poleIndex);
 
   // Heartbeat & Telemetry update
   void updateNodeTelemetry(uint16_t poleId, uint16_t priParent, uint16_t bkpParent,
@@ -232,8 +270,22 @@ private:
   PendingRegistration pending[GW_MAX_PENDING_REGISTRATIONS];
   PermanentRevocationRecord revoked[MSCB_MAX_REVOCATION_RECORDS];
 
-  bool                reappearedAlertPending;
-  char                reappearedAlertBuf[256];
+  static const uint8_t GW_REVOKED_ALERT_QUEUE_CAP = 8;
+  struct GwRevokedAlertItem {
+    char     text[280];
+    uint8_t  mac[6];
+    uint16_t poleId;
+    uint32_t occurrences;
+  };
+  GwRevokedAlertItem  revokedAlertQueue[GW_REVOKED_ALERT_QUEUE_CAP];
+  uint8_t             revokedAlertHead;
+  uint8_t             revokedAlertTail;
+  uint8_t             revokedAlertCount;
+  RevokedIncidentTracker revokedIncidents[GW_MAX_REVOKED_INCIDENTS];
+  uint8_t             revokedIncidentCount;
+
+  bool saveRevokedIncidents();
+  bool loadRevokedIncidents();
 
 #if defined(ARDUINO)
   Preferences         prefsA;

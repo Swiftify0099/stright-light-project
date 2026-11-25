@@ -49,17 +49,27 @@
 PoleRadioDriver poleRadio;
 
 PoleRadioDriver::PoleRadioDriver() :
+  pinNss(POLE_LORA_NSS_PIN), pinRst(POLE_LORA_RST_PIN), pinDio0(POLE_LORA_DIO0_PIN),
   radioDetected(false), packetsTx(0), packetsRx(0), crcErrors(0),
   lastRssi(-120), lastSnr(0)
+#if !defined(ARDUINO)
+  , forceTxFail(false)
+#endif
 {
+}
+
+void PoleRadioDriver::configurePins(uint8_t nss, uint8_t rst, uint8_t dio0) {
+  pinNss = nss;
+  pinRst = rst;
+  pinDio0 = dio0;
 }
 
 uint8_t PoleRadioDriver::readRegister(uint8_t address) {
 #if defined(ARDUINO)
-  digitalWrite(POLE_LORA_NSS_PIN, LOW);
+  digitalWrite(pinNss, LOW);
   SPI.transfer(address & 0x7F);
   uint8_t val = SPI.transfer(0x00);
-  digitalWrite(POLE_LORA_NSS_PIN, HIGH);
+  digitalWrite(pinNss, HIGH);
   return val;
 #else
   return 0x12; // Mock version on host
@@ -68,18 +78,18 @@ uint8_t PoleRadioDriver::readRegister(uint8_t address) {
 
 void PoleRadioDriver::writeRegister(uint8_t address, uint8_t value) {
 #if defined(ARDUINO)
-  digitalWrite(POLE_LORA_NSS_PIN, LOW);
+  digitalWrite(pinNss, LOW);
   SPI.transfer(address | 0x80);
   SPI.transfer(value);
-  digitalWrite(POLE_LORA_NSS_PIN, HIGH);
+  digitalWrite(pinNss, HIGH);
 #endif
 }
 
 void PoleRadioDriver::resetRadio() {
 #if defined(ARDUINO)
-  digitalWrite(POLE_LORA_RST_PIN, LOW);
+  digitalWrite(pinRst, LOW);
   delay(10);
-  digitalWrite(POLE_LORA_RST_PIN, HIGH);
+  digitalWrite(pinRst, HIGH);
   delay(10);
 #endif
 }
@@ -98,13 +108,13 @@ void PoleRadioDriver::setModeRxContinuous() {
 
 bool PoleRadioDriver::begin() {
 #if defined(ARDUINO)
-  pinMode(POLE_LORA_NSS_PIN, OUTPUT);
-  digitalWrite(POLE_LORA_NSS_PIN, HIGH);
+  pinMode(pinNss, OUTPUT);
+  digitalWrite(pinNss, HIGH);
 
-  pinMode(POLE_LORA_RST_PIN, OUTPUT);
-  digitalWrite(POLE_LORA_RST_PIN, HIGH);
+  pinMode(pinRst, OUTPUT);
+  digitalWrite(pinRst, HIGH);
 
-  pinMode(POLE_LORA_DIO0_PIN, INPUT);
+  pinMode(pinDio0, INPUT);
 #endif
 
   resetRadio();
@@ -152,7 +162,7 @@ bool PoleRadioDriver::begin() {
 bool PoleRadioDriver::hasPacket() {
 #if defined(ARDUINO)
   if (!radioDetected) return false;
-  if (digitalRead(POLE_LORA_DIO0_PIN) == HIGH) {
+  if (digitalRead(pinDio0) == HIGH) {
     uint8_t irq = readRegister(REG_IRQ_FLAGS);
     return (irq & IRQ_RX_DONE_MASK) != 0;
   }
@@ -267,6 +277,8 @@ bool PoleRadioDriver::sendPacket(const MeshWireFrame &frame) {
   setModeRxContinuous();
   return true;
 #else
+  if (!radioDetected) return false;
+  if (forceTxFail) return false;
   packetsTx++;
   return true;
 #endif

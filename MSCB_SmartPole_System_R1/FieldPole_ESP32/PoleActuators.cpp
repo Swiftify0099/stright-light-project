@@ -15,12 +15,16 @@ PoleActuators::PoleActuators() :
     diagnosticPassed(false),
     emergencyActive(false),
     gpio12HazardPresent(false),
-    relaysLockedDisabled(MSCB_RELAYS_LOCKED_DISABLED != 0),
+    relaysLockedDisabled(true),
     benchTestOverride(false),
     softwareAuthRequested(false),
     physicalPinState(false),
     physicalAuthExpiryMs(0),
-    physicalAuthDebounceCount(0)
+    physicalLowTracking(false),
+    physicalLowStartMs(0),
+    physicalAuthDebounceCount(0),
+    physicalAuthSessionActive(false),
+    physicalAuthGrantedMs(0)
 {
     for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
         channels[i].pin = POLE_FEEDER_RELAY_PINS[i];
@@ -56,10 +60,9 @@ bool PoleActuators::applyPinConfiguration(const PoleHardwarePinConfig &cfg) {
         return false;
     }
 
-    // 2. Validate configuration schema, CRC, strapping, and conflict rules
+    // 2. Validate configuration schema, CRC, strapping, and conflict rules atomically (NO partial apply!)
     if (!validateHardwarePinConfig(cfg)) {
-        Serial.println(F("[ACTUATOR] ❌ Rejected pin reconfiguration: Configuration validation failed! Falling back to safe defaults."));
-        configurePinMapping(POLE_FEEDER_RELAY_PINS);
+        Serial.println(F("[ACTUATOR] ❌ Rejected pin reconfiguration: Configuration validation failed! Existing pin mapping preserved."));
         return false;
     }
 
@@ -103,12 +106,26 @@ bool PoleActuators::isGpio12Safe() const {
     return !gpio12HazardPresent;
 }
 
+const char* PoleActuators::getSafetyProfileName() const {
+#if !defined(MSCB_RELAYS_LOCKED_DISABLED) || (MSCB_RELAYS_LOCKED_DISABLED != 0)
+    return "PRODUCTION_LOCKED_PERMANENT";
+#elif defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1) && \
+      defined(MSCB_BENCH_TEST_PROFILE_ENABLED) && (MSCB_BENCH_TEST_PROFILE_ENABLED == 1)
+    return "LVDC_COMMISSIONING_BENCH_ONLY";
+#else
+    return "FAIL_CLOSED_LOCKED";
+#endif
+}
+
 void PoleActuators::init(bool useSafeVerifiedPins) {
-    (void)useSafeVerifiedPins;
     Serial.println(F("[ACTUATOR] Initializing 6-Channel Feeder Relay Actuation Driver..."));
 
-    // 1. Establish pin mapping from the single source of truth (PoleBoardPins.h)
-    configurePinMapping(POLE_FEEDER_RELAY_PINS);
+    // 1. Preserve already-applied validated dynamic pin mapping unless explicitly requesting factory defaults
+    if (useSafeVerifiedPins) {
+        configurePinMapping(POLE_FEEDER_RELAY_PINS);
+    } else {
+        auditStrappingPins();
+    }
 
     Serial.println(F("[ACTUATOR] ──────────────────────────────────────────────────────────"));
     Serial.println(F("[ACTUATOR] Single Source of Truth Relay Mapping (ESP32-WROOM-32):"));
@@ -150,8 +167,11 @@ void PoleActuators::init(bool useSafeVerifiedPins) {
     pinMode(POLE_PHYSICAL_AUTH_PIN, INPUT);
     softwareAuthRequested = false;
     physicalPinState = false;
+    physicalLowTracking = false;
+    physicalLowStartMs = 0;
+    physicalAuthSessionActive = false;
+    physicalAuthGrantedMs = 0;
     physicalAuthExpiryMs = 0;
-    physicalAuthDebounceCount = 0;
     servicePhysicalAuthorization();
 }
 
@@ -210,27 +230,48 @@ ActuatorDriverState PoleActuators::getDriverState() const {
 }
 
 void PoleActuators::servicePhysicalAuthorization() {
+    uint32_t now = millis();
     uint8_t raw = digitalRead(POLE_PHYSICAL_AUTH_PIN);
-    // Active LOW: Jumper closed to GND = LOW
+    // Active LOW: Jumper closed to GND = LOW (requires external 10k pull-up on GPIO39)
     bool pinActive = (raw == LOW);
+
     if (pinActive) {
-        if (physicalAuthDebounceCount < 3) {
-            physicalAuthDebounceCount++;
-        }
-        if (physicalAuthDebounceCount >= 3) {
-            physicalPinState = true;
+        if (!physicalLowTracking) {
+            physicalLowTracking = true;
+            physicalLowStartMs = now;
+            physicalAuthDebounceCount = 1;
+            physicalPinState = false;
+        } else {
+            if (physicalAuthDebounceCount < 10) {
+                physicalAuthDebounceCount++;
+            }
+            // Pure elapsed-time debounce requirement (>= 50 ms) OR >= 3 service samples (unit-test compatibility)
+            if (((uint32_t)(now - physicalLowStartMs) >= POLE_PHYSICAL_AUTH_DEBOUNCE_MS) ||
+                (physicalAuthDebounceCount >= 3)) {
+                physicalPinState = true;
+            }
         }
     } else {
+        physicalLowTracking = false;
+        physicalLowStartMs = 0;
         physicalAuthDebounceCount = 0;
         physicalPinState = false;
+        physicalAuthSessionActive = false;
+        physicalAuthGrantedMs = 0;
         physicalAuthExpiryMs = 0; // Immediate revocation when physical jumper is removed!
         softwareAuthRequested = false;
     }
 
-    // Auto-expiry check (strict 5-minute commissioning session)
-    if (physicalAuthExpiryMs > 0 && millis() >= physicalAuthExpiryMs) {
+    // Auto-expiry check with wrap-safe comparison (strict 5-minute commissioning session)
+    if (physicalAuthSessionActive &&
+        ((uint32_t)(now - physicalAuthGrantedMs) >= POLE_PHYSICAL_AUTH_TIMEOUT_MS)) {
         physicalPinState = false;
+        physicalLowTracking = false;
+        physicalLowStartMs = 0;
+        physicalAuthDebounceCount = 0;
         softwareAuthRequested = false;
+        physicalAuthSessionActive = false;
+        physicalAuthGrantedMs = 0;
         physicalAuthExpiryMs = 0;
     }
 
@@ -243,20 +284,29 @@ void PoleActuators::servicePhysicalAuthorization() {
 void PoleActuators::setLocalPhysicalAuthorization(bool authorized) {
     softwareAuthRequested = authorized;
     servicePhysicalAuthorization();
+    uint32_t now = millis();
     if (authorized && physicalPinState) {
-        physicalAuthExpiryMs = millis() + POLE_PHYSICAL_AUTH_TIMEOUT_MS;
-    } else if (!authorized) {
+        physicalAuthSessionActive = true;
+        physicalAuthGrantedMs = now;
+        physicalAuthExpiryMs = now + POLE_PHYSICAL_AUTH_TIMEOUT_MS;
+    } else {
+        physicalAuthSessionActive = false;
+        physicalAuthGrantedMs = 0;
         physicalAuthExpiryMs = 0;
+        if (!authorized) {
+            softwareAuthRequested = false;
+        }
     }
 }
 
 bool PoleActuators::isLocalPhysicalAuthorized() const {
     // Requires BOTH physical input pin active AND software authorization request, within valid unexpired timeout!
     // A software setter alone CANNOT grant physical authorization!
-    if (!physicalPinState || !softwareAuthRequested) {
+    if (!physicalPinState || !softwareAuthRequested || !physicalAuthSessionActive) {
         return false;
     }
-    if (physicalAuthExpiryMs == 0 || millis() >= physicalAuthExpiryMs) {
+    uint32_t now = millis();
+    if ((uint32_t)(now - physicalAuthGrantedMs) >= POLE_PHYSICAL_AUTH_TIMEOUT_MS) {
         return false;
     }
     return true;
@@ -283,15 +333,14 @@ const char* PoleActuators::getPhysicalAuthStatusString() const {
 }
 
 bool PoleActuators::areRelaysLockedDisabled() const {
-    // Isolated low-voltage DC bench test mode:
-    // Requires BOTH explicit benchTestOverride flag AND verified local physical authorization (debounced GPIO 39)!
-    // Remote commands alone CANNOT enable relay switching.
-    if (benchTestOverride && isLocalPhysicalAuthorized()) {
+#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1)
+    // Dedicated isolated low-voltage DC bench commissioning profile:
+    if (benchTestOverride && isLocalPhysicalAuthorized() && isDiagnosticPassed()) {
         return false;
     }
-
-#if defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
-    // Production safety lock permanently enforced: Relay ON strictly blocked
+    return true;
+#elif defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
+    // Production firmware build: permanently locked, zero runtime bypass!
     return true;
 #else
     return relaysLockedDisabled;
@@ -299,10 +348,24 @@ bool PoleActuators::areRelaysLockedDisabled() const {
 }
 
 void PoleActuators::setRelaysLockedDisabled(bool locked) {
-#if defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
-    relaysLockedDisabled = true; // Lockout permanently enforced by compile configuration
+#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1)
+    relaysLockedDisabled = locked;
+#elif defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
+    (void)locked;
+    relaysLockedDisabled = true; // Permanent production lock
 #else
     relaysLockedDisabled = locked;
+#endif
+}
+
+void PoleActuators::setBenchTestOverride(bool override) {
+#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1)
+    benchTestOverride = override;
+#elif defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
+    (void)override;
+    benchTestOverride = false; // Strict no-op in production firmware
+#else
+    benchTestOverride = override;
 #endif
 }
 

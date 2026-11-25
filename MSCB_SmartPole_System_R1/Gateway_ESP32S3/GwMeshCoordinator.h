@@ -44,6 +44,8 @@
 #define GW_MESH_MAX_HOPS             MSCB_DEFAULT_MAX_HOPS // 6
 #define GW_DUP_CACHE_SIZE            32
 #define GW_MAX_TRACKED_COMMANDS      16
+#define GW_REG_RESP_RETRY_INTERVAL_MS 5000UL
+#define GW_REG_RESP_MAX_RETRIES      5
 
 struct SeqCacheEntry {
   uint16_t srcAddress;
@@ -89,6 +91,8 @@ public:
   bool sendDownlinkPacket(uint16_t targetPoleId, uint8_t packetType, const uint8_t *payload, uint16_t payloadLen, uint8_t priority = PRIO_NORMAL);
   bool sendFeederCommand(uint16_t poleId, uint8_t feederId, uint8_t action, uint8_t groupMask, uint32_t &outSeqNumber, int64_t adminChatId = 0);
   bool sendRegisterResponse(const uint8_t mac[6], uint16_t assignedPoleId, uint16_t assignedParent, uint8_t status);
+  bool queueRejectionResponse(const uint8_t mac[6], uint8_t status, uint32_t sessionToken = 0, uint32_t nonce = 0, uint16_t firstHop = 0);
+  void serviceRegistrationRetries();
   bool sendRevokeCommand(uint16_t poleId, const uint8_t mac[6], uint32_t transactionId, const char* reason);
 
   // Packet Processing
@@ -133,6 +137,19 @@ private:
   uint16_t          lastAckPole;
 
   GwTrackedCommand  trackedCommands[GW_MAX_TRACKED_COMMANDS];
+
+  static const uint8_t GW_MAX_PENDING_REJECTIONS = 8;
+  struct PendingRejectionRetry {
+    bool     inUse;
+    uint8_t  mac[6];
+    uint8_t  status;
+    uint32_t sessionToken;
+    uint32_t nonce;
+    uint16_t firstHop;
+    uint8_t  attempts;
+    uint32_t lastAttemptMs;
+  };
+  PendingRejectionRetry pendingRejections[GW_MAX_PENDING_REJECTIONS];
 };
 
 extern GwMeshCoordinator gwMesh;

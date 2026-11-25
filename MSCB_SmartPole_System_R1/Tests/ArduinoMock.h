@@ -24,6 +24,10 @@
 typedef uint8_t byte;
 typedef bool boolean;
 
+#ifndef PROGMEM
+#define PROGMEM
+#endif
+
 #define LOW  0
 #define HIGH 1
 #define INPUT 0

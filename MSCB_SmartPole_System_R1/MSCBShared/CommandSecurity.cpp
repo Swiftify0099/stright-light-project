@@ -361,3 +361,214 @@ void CommandSecurity::getKeyFingerprint(char* outBuf, size_t maxLen) const {
   }
   snprintf(outBuf, maxLen, "FP-%04X (Epoch %lu)", crc, (unsigned long)activeKeyEpoch);
 }
+
+uint32_t CommandSecurity::computeHopAuthToken(uint16_t prevHop, uint16_t nextHop, uint16_t seq, uint8_t type) const {
+  if (!keyProvisioned || prevHop == 0) return 0;
+  uint8_t hopData[7];
+  hopData[0] = (prevHop >> 8) & 0xFF;
+  hopData[1] = prevHop & 0xFF;
+  hopData[2] = (nextHop >> 8) & 0xFF;
+  hopData[3] = nextHop & 0xFF;
+  hopData[4] = (seq >> 8) & 0xFF;
+  hopData[5] = seq & 0xFF;
+  hopData[6] = type;
+
+  uint8_t hmac[32];
+  computeHmacSha256(provisionedKey, MSCB_KEY_LEN_BYTES, hopData, sizeof(hopData), hmac);
+  uint32_t tok = ((uint32_t)hmac[0] << 24) | ((uint32_t)hmac[1] << 16) |
+                 ((uint32_t)hmac[2] << 8)  | (uint32_t)hmac[3];
+  return (tok == 0) ? 1UL : tok;
+}
+
+bool CommandSecurity::verifyHopAuthToken(uint16_t prevHop, uint16_t nextHop, uint16_t seq, uint8_t type, uint32_t token) const {
+  if (!keyProvisioned || prevHop == 0 || token == 0) return false;
+  uint32_t expected = computeHopAuthToken(prevHop, nextHop, seq, type);
+  return ((expected ^ token) == 0);
+}
+
+uint32_t CommandSecurity::computeFrameHopAuthToken(const MeshWireFrame &frame) const {
+  if (!keyProvisioned || frame.header.previousHopAddress == 0 ||
+      frame.header.payloadLen > MSCB_MAX_PAYLOAD_SIZE) {
+    return 0;
+  }
+
+  // Bind all immutable and mutable routing header fields + payload bytes (excluding hopAuthToken itself)
+  uint8_t authBuf[19 + MSCB_MAX_PAYLOAD_SIZE];
+  authBuf[0]  = frame.header.magic[0];
+  authBuf[1]  = frame.header.magic[1];
+  authBuf[2]  = frame.header.version;
+  authBuf[3]  = frame.header.type;
+  authBuf[4]  = frame.header.priority;
+  authBuf[5]  = frame.header.hopCount;
+  authBuf[6]  = frame.header.maxHops;
+  authBuf[7]  = (frame.header.seqNumber >> 8) & 0xFF;
+  authBuf[8]  = frame.header.seqNumber & 0xFF;
+  authBuf[9]  = (frame.header.srcAddress >> 8) & 0xFF;
+  authBuf[10] = frame.header.srcAddress & 0xFF;
+  authBuf[11] = (frame.header.dstAddress >> 8) & 0xFF;
+  authBuf[12] = frame.header.dstAddress & 0xFF;
+  authBuf[13] = (frame.header.nextHop >> 8) & 0xFF;
+  authBuf[14] = frame.header.nextHop & 0xFF;
+  authBuf[15] = (frame.header.previousHopAddress >> 8) & 0xFF;
+  authBuf[16] = frame.header.previousHopAddress & 0xFF;
+  authBuf[17] = (frame.header.payloadLen >> 8) & 0xFF;
+  authBuf[18] = frame.header.payloadLen & 0xFF;
+
+  if (frame.header.payloadLen > 0) {
+    memcpy(&authBuf[19], frame.payload, frame.header.payloadLen);
+  }
+
+  uint8_t hmac[MSCB_HMAC_TAG_BYTES];
+  computeHmacSha256(provisionedKey, MSCB_KEY_LEN_BYTES, authBuf, 19U + frame.header.payloadLen, hmac);
+  uint32_t tok = ((uint32_t)hmac[0] << 24) | ((uint32_t)hmac[1] << 16) |
+                 ((uint32_t)hmac[2] << 8)  | (uint32_t)hmac[3];
+  return (tok == 0) ? 1UL : tok;
+}
+
+bool CommandSecurity::verifyFrameHopAuthToken(const MeshWireFrame &frame) const {
+  if (!keyProvisioned || frame.header.hopAuthToken == 0 ||
+      frame.header.previousHopAddress == 0 ||
+      frame.header.payloadLen > MSCB_MAX_PAYLOAD_SIZE) {
+    return false;
+  }
+  uint32_t expected = computeFrameHopAuthToken(frame);
+  return (expected != 0) && ((expected ^ frame.header.hopAuthToken) == 0);
+}
+
+bool CommandSecurity::computeRegisterRequestAuth(
+    const PktRegisterRequestPayload &req,
+    uint8_t outAuthTag[16]) const {
+  if (!keyProvisioned || !outAuthTag) return false;
+  // Authenticate MAC (6), nodeType (1), firmwareVersion (2), sessionToken (4),
+  // candidateParent1 (2), candidateParent2 (2), nonce (4) = 21 bytes
+  uint8_t authBuffer[21];
+  memcpy(authBuffer, req.macAddress, 6);
+  authBuffer[6] = req.nodeType;
+  authBuffer[7] = (req.firmwareVersion >> 8) & 0xFF;
+  authBuffer[8] = req.firmwareVersion & 0xFF;
+  authBuffer[9] = (req.sessionToken >> 24) & 0xFF;
+  authBuffer[10] = (req.sessionToken >> 16) & 0xFF;
+  authBuffer[11] = (req.sessionToken >> 8) & 0xFF;
+  authBuffer[12] = req.sessionToken & 0xFF;
+  authBuffer[13] = (req.candidateParent1 >> 8) & 0xFF;
+  authBuffer[14] = req.candidateParent1 & 0xFF;
+  authBuffer[15] = (req.candidateParent2 >> 8) & 0xFF;
+  authBuffer[16] = req.candidateParent2 & 0xFF;
+  authBuffer[17] = (req.nonce >> 24) & 0xFF;
+  authBuffer[18] = (req.nonce >> 16) & 0xFF;
+  authBuffer[19] = (req.nonce >> 8) & 0xFF;
+  authBuffer[20] = req.nonce & 0xFF;
+
+  uint8_t hmac[MSCB_HMAC_TAG_BYTES];
+  computeHmacSha256(provisionedKey, MSCB_KEY_LEN_BYTES, authBuffer, sizeof(authBuffer), hmac);
+  memcpy(outAuthTag, hmac, 16);
+  return true;
+}
+
+static bool mscbHasNonZeroBytes(const uint8_t* buf, size_t len) {
+  if (!buf) return false;
+  uint8_t acc = 0;
+  for (size_t i = 0; i < len; i++) acc |= buf[i];
+  return acc != 0;
+}
+
+bool CommandSecurity::verifyRegisterRequestAuth(
+    const PktRegisterRequestPayload &req) const {
+  if (!keyProvisioned) return false;
+  if (req.sessionToken == 0 || req.nonce == 0) return false;
+  if (!mscbHasNonZeroBytes(req.authTag, 16)) return false;
+  uint8_t expectedTag[16];
+  if (!computeRegisterRequestAuth(req, expectedTag)) return false;
+  return constantTimeCompare(expectedTag, req.authTag, 16);
+}
+
+bool CommandSecurity::computeRegisterResponseAuth(
+    const PktRegisterResponsePayload &resp,
+    uint8_t outAuthTag[16]) const {
+  if (!keyProvisioned || !outAuthTag) return false;
+  // Authenticate MAC (6), status (1), assignedPoleId (2), assignedParent (2),
+  // heartbeatIntervalSec (2), networkKeyEpoch (4), sessionToken (4), nonce (4) = 25 bytes
+  uint8_t authBuffer[25];
+  memcpy(authBuffer, resp.macAddress, 6);
+  authBuffer[6] = resp.status;
+  authBuffer[7] = (resp.assignedPoleId >> 8) & 0xFF;
+  authBuffer[8] = resp.assignedPoleId & 0xFF;
+  authBuffer[9] = (resp.assignedParent >> 8) & 0xFF;
+  authBuffer[10] = resp.assignedParent & 0xFF;
+  authBuffer[11] = (resp.heartbeatIntervalSec >> 8) & 0xFF;
+  authBuffer[12] = resp.heartbeatIntervalSec & 0xFF;
+  authBuffer[13] = (resp.networkKeyEpoch >> 24) & 0xFF;
+  authBuffer[14] = (resp.networkKeyEpoch >> 16) & 0xFF;
+  authBuffer[15] = (resp.networkKeyEpoch >> 8) & 0xFF;
+  authBuffer[16] = resp.networkKeyEpoch & 0xFF;
+  authBuffer[17] = (resp.sessionToken >> 24) & 0xFF;
+  authBuffer[18] = (resp.sessionToken >> 16) & 0xFF;
+  authBuffer[19] = (resp.sessionToken >> 8) & 0xFF;
+  authBuffer[20] = resp.sessionToken & 0xFF;
+  authBuffer[21] = (resp.nonce >> 24) & 0xFF;
+  authBuffer[22] = (resp.nonce >> 16) & 0xFF;
+  authBuffer[23] = (resp.nonce >> 8) & 0xFF;
+  authBuffer[24] = resp.nonce & 0xFF;
+
+  uint8_t hmac[MSCB_HMAC_TAG_BYTES];
+  computeHmacSha256(provisionedKey, MSCB_KEY_LEN_BYTES, authBuffer, sizeof(authBuffer), hmac);
+  memcpy(outAuthTag, hmac, 16);
+  return true;
+}
+
+bool CommandSecurity::verifyRegisterResponseAuth(
+    const PktRegisterResponsePayload &resp) const {
+  if (!keyProvisioned) return false;
+  if (resp.sessionToken == 0 || resp.nonce == 0) return false;
+  if (!mscbHasNonZeroBytes(resp.authTag, 16)) return false;
+  uint8_t expectedTag[16];
+  if (!computeRegisterResponseAuth(resp, expectedTag)) return false;
+  return constantTimeCompare(expectedTag, resp.authTag, 16);
+}
+
+bool CommandSecurity::computeHeartbeatAuth(
+    const PktHeartbeatPingPayload &hb,
+    uint8_t outAuthTag[16]) const {
+  if (!keyProvisioned || !outAuthTag) return false;
+  uint8_t authBuffer[31];
+  memcpy(authBuffer, hb.macAddress, 6);
+  authBuffer[6]  = (hb.poleId >> 8) & 0xFF;
+  authBuffer[7]  = hb.poleId & 0xFF;
+  authBuffer[8]  = (hb.primaryParent >> 8) & 0xFF;
+  authBuffer[9]  = hb.primaryParent & 0xFF;
+  authBuffer[10] = (hb.backupParent >> 8) & 0xFF;
+  authBuffer[11] = hb.backupParent & 0xFF;
+  authBuffer[12] = hb.rank;
+  authBuffer[13] = hb.healthState;
+  authBuffer[14] = hb.feederStateMask;
+  authBuffer[15] = hb.auxFeedbackMask;
+  authBuffer[16] = hb.mcbStatusMask;
+  authBuffer[17] = hb.auxFeedbackValid;
+  authBuffer[18] = hb.mcbStatusValid;
+  authBuffer[19] = (hb.sessionToken >> 24) & 0xFF;
+  authBuffer[20] = (hb.sessionToken >> 16) & 0xFF;
+  authBuffer[21] = (hb.sessionToken >> 8) & 0xFF;
+  authBuffer[22] = hb.sessionToken & 0xFF;
+  authBuffer[23] = (hb.seqNonce >> 24) & 0xFF;
+  authBuffer[24] = (hb.seqNonce >> 16) & 0xFF;
+  authBuffer[25] = (hb.seqNonce >> 8) & 0xFF;
+  authBuffer[26] = hb.seqNonce & 0xFF;
+  authBuffer[27] = (hb.uptimeSec >> 24) & 0xFF;
+  authBuffer[28] = (hb.uptimeSec >> 16) & 0xFF;
+  authBuffer[29] = (hb.uptimeSec >> 8) & 0xFF;
+  authBuffer[30] = hb.uptimeSec & 0xFF;
+
+  uint8_t hmac[MSCB_HMAC_TAG_BYTES];
+  computeHmacSha256(provisionedKey, MSCB_KEY_LEN_BYTES, authBuffer, sizeof(authBuffer), hmac);
+  memcpy(outAuthTag, hmac, 16);
+  return true;
+}
+
+bool CommandSecurity::verifyHeartbeatAuth(
+    const PktHeartbeatPingPayload &hb) const {
+  if (!keyProvisioned) return false;
+  if (hb.seqNonce == 0 || !mscbHasNonZeroBytes(hb.authTag, 16)) return false;
+  uint8_t expectedTag[16];
+  if (!computeHeartbeatAuth(hb, expectedTag)) return false;
+  return constantTimeCompare(expectedTag, hb.authTag, 16);
+}

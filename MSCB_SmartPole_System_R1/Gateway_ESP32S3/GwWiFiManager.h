@@ -69,6 +69,13 @@ public:
   int8_t getRssi() const;
   const char* getLocalIp() const;
 
+#if !defined(ARDUINO)
+  void setConnected(bool conn) {
+    state = conn ? WIFI_STATE_CONNECTED : WIFI_STATE_DISCONNECTED;
+    internetVerified = conn;
+  }
+#endif
+
   // Manual Trigger
   void reconnectStation();
 

@@ -142,6 +142,37 @@ public:
     uint32_t currentEpochSec
   );
 
+  // Hop-Level Immediate-Transmitter Authentication (R3.2.2 P0)
+  uint32_t computeHopAuthToken(uint16_t prevHop, uint16_t nextHop, uint16_t seq, uint8_t type) const;
+  bool verifyHopAuthToken(uint16_t prevHop, uint16_t nextHop, uint16_t seq, uint8_t type, uint32_t token) const;
+  uint32_t computeFrameHopAuthToken(const MeshWireFrame &frame) const;
+  bool verifyFrameHopAuthToken(const MeshWireFrame &frame) const;
+
+  // Registration Authentication (R3.2.2 P0)
+  bool computeRegisterRequestAuth(
+    const PktRegisterRequestPayload &req,
+    uint8_t outAuthTag[16]
+  ) const;
+  bool verifyRegisterRequestAuth(
+    const PktRegisterRequestPayload &req
+  ) const;
+  bool computeRegisterResponseAuth(
+    const PktRegisterResponsePayload &resp,
+    uint8_t outAuthTag[16]
+  ) const;
+  bool verifyRegisterResponseAuth(
+    const PktRegisterResponsePayload &resp
+  ) const;
+
+  // Heartbeat Authentication (R3.2.2 P0)
+  bool computeHeartbeatAuth(
+    const PktHeartbeatPingPayload &hb,
+    uint8_t outAuthTag[16]
+  ) const;
+  bool verifyHeartbeatAuth(
+    const PktHeartbeatPingPayload &hb
+  ) const;
+
   // Non-secret key fingerprint (e.g. CRC16 hex, NEVER prints raw key bytes!)
   void getKeyFingerprint(char* outBuf, size_t maxLen) const;
 
