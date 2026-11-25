@@ -1,0 +1,153 @@
+name: MSCB R3.2.2 Verification CI
+
+on:
+  push:
+    branches:
+      - r3.2.2-critical-residual-fixes
+  pull_request:
+    branches:
+      - r3.2.2-critical-residual-fixes
+
+jobs:
+  legacy-check:
+    name: Verify Protected Directories Untouched
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for Modifications to Protected Directories
+        run: |
+          echo "Verifying that main branch base, Sender/, and Resivers/ are strictly untouched..."
+          BASE_COMMIT="65cccfa715d9d4f85ee829b1ab7c343e5093007c"
+          DIFF_FILES=$(git diff --name-only "$BASE_COMMIT" HEAD)
+          echo "Modified files since base $BASE_COMMIT:"
+          echo "$DIFF_FILES"
+
+          if echo "$DIFF_FILES" | grep -E '^Sender/' ; then
+            echo "ERROR: Protected directory 'Sender/' has been modified!"
+            exit 1
+          fi
+
+          if echo "$DIFF_FILES" | grep -E '^Resivers/' ; then
+            echo "ERROR: Protected directory 'Resivers/' has been modified!"
+            exit 1
+          fi
+
+          echo "SUCCESS: Protected directories 'Sender/' and 'Resivers/' are completely clean."
+
+  native-tests:
+    name: Native C++ Test Suites (368 Tests)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential g++
+
+      - name: Compile and Run Native Test Suite (test_r3 - 277 Tests)
+        run: |
+          cd MSCB_SmartPole_System_R1/Tests
+          g++ -std=c++11 -w -I. -I../FieldPole_ESP32 -I../Gateway_ESP32S3 -I../MSCBShared -o test_r3 \
+            test_r3_real_hardware_functional_repair.cpp \
+            ../MSCBShared/CommandSecurity.cpp \
+            ../MSCBShared/ReplayProtection.cpp \
+            ../FieldPole_ESP32/PoleStorageManager.cpp \
+            ../FieldPole_ESP32/PoleActuators.cpp \
+            ../FieldPole_ESP32/PoleMeshRouter.cpp \
+            ../FieldPole_ESP32/PoleFeederManager.cpp \
+            ../FieldPole_ESP32/PoleMetrology.cpp \
+            ../FieldPole_ESP32/PoleTimeManager.cpp \
+            ../FieldPole_ESP32/PoleRegistrationClient.cpp \
+            ../FieldPole_ESP32/PoleRadioDriver.cpp \
+            ../FieldPole_ESP32/PoleHeartbeatSender.cpp \
+            ../Gateway_ESP32S3/GwNodeRegistry.cpp \
+            ../Gateway_ESP32S3/GwHeartbeatMonitor.cpp \
+            ../Gateway_ESP32S3/GwMeshCoordinator.cpp \
+            ../Gateway_ESP32S3/GwTelegramBot.cpp \
+            ../Gateway_ESP32S3/GwScheduleManager.cpp \
+            ../Gateway_ESP32S3/GwWiFiManager.cpp \
+            ../Gateway_ESP32S3/GwFirmwareManager.cpp \
+            ../Gateway_ESP32S3/GwRadioDriver.cpp \
+            ../Gateway_ESP32S3/GwNetworkQueue.cpp
+          ./test_r3
+
+      - name: Compile and Run Registration & Telegram Reliability Suite (test_reg - 69 Tests)
+        run: |
+          cd MSCB_SmartPole_System_R1/Tests
+          g++ -std=c++11 -w -I. -I../FieldPole_ESP32 -I../Gateway_ESP32S3 -I../MSCBShared -o test_reg \
+            test_r3_2_2_registration_telegram.cpp \
+            ../MSCBShared/CommandSecurity.cpp \
+            ../MSCBShared/ReplayProtection.cpp \
+            ../FieldPole_ESP32/PoleStorageManager.cpp \
+            ../FieldPole_ESP32/PoleActuators.cpp \
+            ../FieldPole_ESP32/PoleMeshRouter.cpp \
+            ../FieldPole_ESP32/PoleFeederManager.cpp \
+            ../FieldPole_ESP32/PoleMetrology.cpp \
+            ../FieldPole_ESP32/PoleTimeManager.cpp \
+            ../FieldPole_ESP32/PoleRegistrationClient.cpp \
+            ../FieldPole_ESP32/PoleRadioDriver.cpp \
+            ../FieldPole_ESP32/PoleHeartbeatSender.cpp \
+            ../Gateway_ESP32S3/GwNodeRegistry.cpp \
+            ../Gateway_ESP32S3/GwHeartbeatMonitor.cpp \
+            ../Gateway_ESP32S3/GwMeshCoordinator.cpp \
+            ../Gateway_ESP32S3/GwTelegramBot.cpp \
+            ../Gateway_ESP32S3/GwScheduleManager.cpp \
+            ../Gateway_ESP32S3/GwWiFiManager.cpp \
+            ../Gateway_ESP32S3/GwFirmwareManager.cpp \
+            ../Gateway_ESP32S3/GwRadioDriver.cpp \
+            ../Gateway_ESP32S3/GwNetworkQueue.cpp
+          ./test_reg
+
+      - name: Compile and Run Production Lock Audit Suite (test_prod - 22 Tests)
+        run: |
+          cd MSCB_SmartPole_System_R1/Tests
+          g++ -std=c++11 -w -I. -I../FieldPole_ESP32 -I../Gateway_ESP32S3 -I../MSCBShared -o test_prod \
+            test_r3_2_2_production_lock.cpp \
+            ../FieldPole_ESP32/PoleActuators.cpp \
+            ../FieldPole_ESP32/PoleStorageManager.cpp
+          ./test_prod
+
+  arduino-cli-builds:
+    name: Dual Arduino CLI Firmware Builds (ESP32 & ESP32-S3)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          sudo mv bin/arduino-cli /usr/local/bin/
+          arduino-cli version
+
+      - name: Configure Arduino CLI & Install ESP32 Platform
+        run: |
+          arduino-cli config init
+          arduino-cli config set board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.11
+
+      - name: Install Dependent Libraries
+        run: |
+          arduino-cli lib install "UniversalTelegramBot"@1.3.0
+          arduino-cli lib install "ArduinoJson"@7.4.3
+          mkdir -p ~/Arduino/libraries/MSCBShared
+          cp -r MSCB_SmartPole_System_R1/MSCBShared/* ~/Arduino/libraries/MSCBShared/
+
+      - name: Compile Field Pole ESP32 Firmware
+        run: |
+          arduino-cli compile --clean \
+            --fqbn esp32:esp32:esp32 \
+            MSCB_SmartPole_System_R1/FieldPole_ESP32
+
+      - name: Compile Gateway ESP32-S3 Firmware
+        run: |
+          arduino-cli compile --clean \
+            --fqbn esp32:esp32:esp32s3 \
+            MSCB_SmartPole_System_R1/Gateway_ESP32S3
