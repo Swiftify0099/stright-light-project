@@ -15,6 +15,7 @@
  */
 
 #define MSCB_COMMISSIONING_LVDC_PROFILE 1
+#define MSCB_BENCH_TEST_PROFILE_ENABLED 1
 #define ARDUINO_MOCK_IMPLEMENTATION
 #include "ArduinoMock.h"
 #include "../MSCBShared/Protocol.h"
@@ -1197,6 +1198,7 @@ int main() {
   poleActuators.setLocalPhysicalAuthorization(true);
   poleActuators.setBenchTestOverride(true);
   poleActuators.requestRelayOn(0, "BENCH_TEST");
+#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1)
   TEST_ASSERT(poleActuators.isRelayCommandedOn(0),
               "W.7 Test relay energized in authorized low-voltage bench mode");
   // Physical jumper removed while energized!
@@ -1206,6 +1208,17 @@ int main() {
               "W.8 Physical auth revoked immediately when jumper removed");
   TEST_ASSERT(!poleActuators.isRelayCommandedOn(0),
               "W.9 Emergency shutdown instantly de-energized relay upon auth loss");
+#else
+  TEST_ASSERT(!poleActuators.isRelayCommandedOn(0),
+              "W.7 Test relay strictly locked OFF in permanent production profile");
+  // Physical jumper removed while energized!
+  digitalWrite(POLE_PHYSICAL_AUTH_PIN, HIGH);
+  poleActuators.servicePhysicalAuthorization();
+  TEST_ASSERT(!poleActuators.isLocalPhysicalAuthorized(),
+              "W.8 Physical auth revoked immediately when jumper removed");
+  TEST_ASSERT(!poleActuators.isRelayCommandedOn(0),
+              "W.9 Relays remain locked OFF upon auth loss");
+#endif
 
   // W.10 Truthful Auxiliary Feedback States
   TEST_ASSERT(strcmp(contactorStateToString(CONTACTOR_CLOSED), "CLOSED") == 0, "W.10 ContactorState string CLOSED");
@@ -1555,6 +1568,47 @@ int main() {
   TEST_ASSERT(!poleMetrology.validateAds131m08DeviceId(0x1200), "AF.7 Invalid device ID rejected");
   TEST_ASSERT(poleMetrology.validateAds131m08StatusWord(0x05FF), "AF.8 Healthy status word accepted");
   TEST_ASSERT(!poleMetrology.validateAds131m08StatusWord(0x07FF), "AF.9 Status word with reset/fault bit rejected");
+
+  // -------------------------------------------------------------------------
+  // SECTION AG: R3.3 RELAY SAFE-OFF BOOT ORDER (NO ACTIVE-LOW GLITCH)
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION AG: R3.3 RELAY SAFE-OFF BOOT ORDER ---" << std::endl;
+
+  // Re-run initialization with GPIO tracing enabled. On an active-LOW board,
+  // enabling the output driver before loading the OFF latch produces a brief
+  // LOW (relay ON) pulse. The first operation on every relay pin must therefore
+  // be a digitalWrite(OFF), never a pinMode(OUTPUT).
+  g_pinTraceCount = 0;
+  g_pinTraceEnabled = true;
+  poleActuators.init(true);
+  g_pinTraceEnabled = false;
+
+  const uint8_t offLevel = RELAY_ACTIVE_LOW ? HIGH : LOW;
+  bool allPinsSafe = true;
+  bool allPinsTouched = true;
+  for (uint8_t p = 0; p < 6; p++) {
+    const uint8_t pin = POLE_FEEDER_RELAY_PINS[p];
+    bool sawOffWrite = false;
+    bool prematureOutput = false;
+    for (int t = 0; t < g_pinTraceCount; t++) {
+      if (g_pinTracePin[t] != pin) continue;
+      if (g_pinTraceOp[t] == 1) { // pinMode before any safe write
+        prematureOutput = true;
+        break;
+      }
+      if (g_pinTraceOp[t] == 2) {
+        sawOffWrite = true;
+        if (g_pinTraceVal[t] != offLevel) prematureOutput = true;
+        break;
+      }
+    }
+    if (!sawOffWrite || prematureOutput) allPinsSafe = false;
+    if (!sawOffWrite) allPinsTouched = false;
+  }
+  TEST_ASSERT(allPinsTouched,
+              "AG.1 Every feeder relay pin is explicitly driven during init");
+  TEST_ASSERT(allPinsSafe,
+              "AG.2 Safe OFF level is latched before output enable on all 6 pins");
 
   // Final Summary
   std::cout << "\n=====================================================================" << std::endl;

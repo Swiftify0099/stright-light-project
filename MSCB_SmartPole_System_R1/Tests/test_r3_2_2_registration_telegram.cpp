@@ -68,6 +68,22 @@ static int g_fail = 0;
     }                                                                          \
   } while (0)
 
+// --- Test-only Telegram transport fault injector (per-admin outcomes) -------
+static int64_t g_hookTargetChat = 0;
+static int g_hookFault = 0; // 1 = one transient failure, 2 = one ambiguous timeout
+static bool g_hookFaultPending = false;
+
+static TgTransportOutcome testTelegramHook(int64_t chatId, const char *,
+                                           const char *, uint32_t &retryAfterSec) {
+  retryAfterSec = 0;
+  if (g_hookFaultPending && chatId == g_hookTargetChat) {
+    g_hookFaultPending = false;
+    if (g_hookFault == 1) return TG_TX_TRANSIENT_FAILURE;
+    if (g_hookFault == 2) return TG_TX_AMBIGUOUS_TIMEOUT;
+  }
+  return TG_TX_OK;
+}
+
 int main() {
   std::cout
       << "====================================================================="
@@ -178,6 +194,7 @@ int main() {
       << std::endl;
 
   // AH.1 Gateway creates pending record and returns REG_RESP_PENDING_APPROVAL
+  // Correlate the synthetic gateway request with the pole's latest real TX.
   PktRegisterRequestPayload regReq;
   memset(&regReq, 0, sizeof(regReq));
   memcpy(regReq.macAddress, validPoleMac, 6);
@@ -185,7 +202,9 @@ int main() {
   regReq.firmwareVersion = 32;
   regReq.sessionToken = poleRegClient.getSessionToken();
   regReq.candidateParent1 = MSCB_GATEWAY_NODE_ID;
-  regReq.nonce = 1001;
+  regReq.nonce = poleRegClient.getLastRequestNonce();
+  if (regReq.nonce == 0)
+    regReq.nonce = 1;
   cmdSecurity.computeRegisterRequestAuth(regReq, regReq.authTag);
 
   PktRegisterResponsePayload regResp;
@@ -272,7 +291,7 @@ int main() {
   TEST_ASSERT(sendRespOk, "AI.3 Gateway transmits authenticated approval "
                           "response frame over LoRa mesh");
 
-  // Construct approval response for Field Pole
+  // Construct approval response for Field Pole using the latest request nonce.
   PktRegisterResponsePayload appResp;
   memset(&appResp, 0, sizeof(appResp));
   memcpy(appResp.macAddress, validPoleMac, 6);
@@ -282,7 +301,7 @@ int main() {
   appResp.heartbeatIntervalSec = 30;
   appResp.networkKeyEpoch = 1;
   appResp.sessionToken = poleRegClient.getSessionToken();
-  appResp.nonce = 2002;
+  appResp.nonce = poleRegClient.getLastRequestNonce();
   cmdSecurity.computeRegisterResponseAuth(appResp, appResp.authTag);
 
   // AI.4 Wrong MAC response rejected
@@ -305,6 +324,17 @@ int main() {
   TEST_ASSERT(!poleRegClient.handleRegisterResponse(badAuthResp),
               "AI.6 Field Pole rejects approval response with corrupted "
               "authentication tag");
+
+  // AI.6b Correctly authenticated but stale/unrelated nonce is rejected.
+  PktRegisterResponsePayload staleNonceResp = appResp;
+  staleNonceResp.nonce = appResp.nonce - 1U;
+  if (staleNonceResp.nonce == 0)
+    staleNonceResp.nonce = appResp.nonce + 1U;
+  cmdSecurity.computeRegisterResponseAuth(staleNonceResp,
+                                          staleNonceResp.authTag);
+  TEST_ASSERT(!poleRegClient.handleRegisterResponse(staleNonceResp),
+              "AI.6b Field Pole rejects authenticated response for an "
+              "older/unrelated request nonce");
 
   // AI.7 Valid approval response accepted
   uint16_t preApprovalRouterId = poleMesh.getMyNodeId();
@@ -352,7 +382,8 @@ int main() {
   cmdSecurity.computeHeartbeatAuth(hbPayload, hbPayload.authTag);
   hbWireFrame.header.payloadLen = sizeof(PktHeartbeatPingPayload);
   memcpy(hbWireFrame.payload, &hbPayload, sizeof(PktHeartbeatPingPayload));
-  hbWireFrame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(hbWireFrame);
+  hbWireFrame.header.hopAuthToken =
+      cmdSecurity.computeFrameHopAuthToken(hbWireFrame);
 
   RegisteredPole *regEntry = gwRegistry.findPoleById(assignedId);
   TEST_ASSERT(regEntry != nullptr,
@@ -368,11 +399,13 @@ int main() {
               "becomes POLE_STATUS_ACTIVE");
 
   // AI.17 Multi-hop Registration Response: Intermediate pole forwards,
-  // destination accepts
+  // destination accepts. Generate an actual outstanding request so the
+  // response nonce is tested against the latest-request-only policy.
   uint8_t childPoleMac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x99};
   poleRegClient.setMacAddress(childPoleMac);
   poleRegClient.clearRegistration();
   poleMesh.resetToUnassignedIdentity();
+  poleRegClient.triggerRegistrationRequest();
 
   MeshWireFrame multiHopRespFrame;
   memset(&multiHopRespFrame, 0, sizeof(multiHopRespFrame));
@@ -383,7 +416,8 @@ int main() {
   multiHopRespFrame.header.srcAddress = MSCB_GATEWAY_NODE_ID;
   multiHopRespFrame.header.dstAddress = 0x0008;  // Assigned ID for child
   multiHopRespFrame.header.nextHop = assignedId; // Forwarded through relay pole
-  multiHopRespFrame.header.previousHopAddress = assignedId; // Intermediate forwarder
+  multiHopRespFrame.header.previousHopAddress =
+      assignedId; // Intermediate forwarder
   multiHopRespFrame.header.seqNumber = 100;
   multiHopRespFrame.header.hopCount = 1;
   multiHopRespFrame.header.maxHops = 6;
@@ -395,13 +429,15 @@ int main() {
   childAppResp.assignedPoleId = 0x0008;
   childAppResp.assignedParent = assignedId;
   childAppResp.sessionToken = poleRegClient.getSessionToken();
-  childAppResp.nonce = 3003;
-  childAppResp.networkKeyEpoch = cmdSecurity.getActiveKeyEpoch() ? cmdSecurity.getActiveKeyEpoch() : 1;
+  childAppResp.nonce = poleRegClient.getLastRequestNonce();
+  childAppResp.networkKeyEpoch =
+      cmdSecurity.getActiveKeyEpoch() ? cmdSecurity.getActiveKeyEpoch() : 1;
   cmdSecurity.computeRegisterResponseAuth(childAppResp, childAppResp.authTag);
   multiHopRespFrame.header.payloadLen = sizeof(PktRegisterResponsePayload);
   memcpy(multiHopRespFrame.payload, &childAppResp,
          sizeof(PktRegisterResponsePayload));
-  multiHopRespFrame.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(multiHopRespFrame);
+  multiHopRespFrame.header.hopAuthToken =
+      cmdSecurity.computeFrameHopAuthToken(multiHopRespFrame);
 
   MeshWireFrame forwardAction;
   bool sendAction = false;
@@ -420,13 +456,17 @@ int main() {
       << std::endl;
 
   // AJ.1 Unauthorized Rejection
+  // Start a fresh request transaction so rejection correlation is realistic.
+  poleRegClient.clearRegistration();
+  poleRegClient.triggerRegistrationRequest();
   PktRegisterResponsePayload rejResp;
   memset(&rejResp, 0, sizeof(rejResp));
   memcpy(rejResp.macAddress, childPoleMac, 6);
   rejResp.status = REG_RESP_REJECTED_UNAUTHORIZED;
   rejResp.sessionToken = poleRegClient.getSessionToken();
-  rejResp.nonce = 4004;
-  rejResp.networkKeyEpoch = cmdSecurity.getActiveKeyEpoch() ? cmdSecurity.getActiveKeyEpoch() : 1;
+  rejResp.nonce = poleRegClient.getLastRequestNonce();
+  rejResp.networkKeyEpoch =
+      cmdSecurity.getActiveKeyEpoch() ? cmdSecurity.getActiveKeyEpoch() : 1;
   cmdSecurity.computeRegisterResponseAuth(rejResp, rejResp.authTag);
 
   bool rejAccepted = poleRegClient.handleRegisterResponse(rejResp);
@@ -447,11 +487,12 @@ int main() {
   // JOIN request from revoked MAC blocked
   poleRegClient.setMacAddress(validPoleMac);
   poleRegClient.clearRegistration();
+  poleRegClient.triggerRegistrationRequest();
   PktRegisterRequestPayload revJoinReq;
   memset(&revJoinReq, 0, sizeof(revJoinReq));
   memcpy(revJoinReq.macAddress, validPoleMac, 6);
   revJoinReq.sessionToken = poleRegClient.getSessionToken();
-  revJoinReq.nonce = 5005;
+  revJoinReq.nonce = poleRegClient.getLastRequestNonce();
   cmdSecurity.computeRegisterRequestAuth(revJoinReq, revJoinReq.authTag);
   PktRegisterResponsePayload revJoinResp;
   uint8_t revStatus =
@@ -606,6 +647,192 @@ int main() {
   TEST_ASSERT(poleActuators.areRelaysLockedDisabled(),
               "AL.6 Physical relay lockout enforced (zero inadvertent mains "
               "energization)");
+
+  // -------------------------------------------------------------------------
+  // SECTION AM: R3.3 GROUP IDENTITY & PER-ADMIN DELIVERY TRUTH
+  // -------------------------------------------------------------------------
+  std::cout << "\n--- SECTION AM: GROUP IDENTITY & NOTIFICATION DELIVERY TRUTH ---"
+            << std::endl;
+
+  int64_t twoAdmins[] = {adminChatId, 777777777LL};
+  gwTelegram.setTestAllowlistOverride(twoAdmins, 2);
+  const int64_t groupChatId = -1001234567890LL;
+
+  // AM.1 A legitimate admin pressing a button inside a group must be judged by
+  // the SENDER id, not by the (non-allowlisted) group chat id.
+  gwTelegram.clearLastSent();
+  gwTelegram.handleCallback(groupChatId, "MENU:MAIN", adminChatId, true);
+  TEST_ASSERT(strstr(gwTelegram.getLastSentMessageText(),
+                     "MSCB SMART POLE SYSTEM") != nullptr &&
+                  strstr(gwTelegram.getLastSentMessageText(), "Access Denied") ==
+                      nullptr,
+              "AM.1 Authorized admin callback works inside a group chat");
+
+  // AM.2 A non-admin group member must still be rejected.
+  gwTelegram.clearLastSent();
+  gwTelegram.handleCallback(groupChatId, "MENU:MAIN", 123456789LL, true);
+  TEST_ASSERT(strstr(gwTelegram.getLastSentMessageText(), "Access Denied") !=
+                  nullptr,
+              "AM.2 Non-admin group sender is rejected");
+
+  // AM.3 One transiently failing admin does not mark the event delivered.
+  gwTelegram.resetNotificationQueue();
+  gwTelegram.setMockSendHook(testTelegramHook);
+  g_hookTargetChat = twoAdmins[1];
+  g_hookFault = 1;
+  g_hookFaultPending = true;
+  g_simulatedMillis = 100000UL;
+  TEST_ASSERT(gwTelegram.enqueueNotification(TG_EVT_SYSTEM_ONLINE, "AM3",
+                                             "AM3 audited event"),
+              "AM.3a Event enqueued for two-admin delivery test");
+  gwTelegram.processNotificationQueue(100000UL);
+  const TgNotifyQueueItem *am3 = gwTelegram.getNotifyQueueItem(0);
+  TEST_ASSERT(gwTelegram.getNotifyQueueCount() == 1 && am3 != nullptr,
+              "AM.3b Event stays queued while one admin is unresolved");
+  TEST_ASSERT(am3 && am3->deliveryState == TG_DELIVERY_RETRY_SCHEDULED,
+              "AM.3c Unresolved admin schedules a bounded retry");
+
+  // Retry after throttle/backoff: the already-confirmed admin is skipped.
+  g_simulatedMillis = 107000UL;
+  gwTelegram.processNotificationQueue(107000UL);
+  TEST_ASSERT(gwTelegram.getNotifyQueueCount() == 0 &&
+                  gwTelegram.getNotifyDeliveredCount() == 1,
+              "AM.3d Retry delivers to the remaining admin only, then completes");
+
+  // AM.4 Ambiguous HTTP outcome is never stuck forever: reconcile after the
+  // quiet window and deliver only to the unresolved admin.
+  gwTelegram.resetNotificationQueue();
+  g_hookTargetChat = twoAdmins[1];
+  g_hookFault = 2;
+  g_hookFaultPending = true;
+  g_simulatedMillis = 200000UL;
+  TEST_ASSERT(gwTelegram.enqueueNotification(TG_EVT_SYSTEM_ONLINE, "AM4",
+                                             "AM4 ambiguous event"),
+              "AM.4a Event enqueued for ambiguous-outcome reconciliation");
+  gwTelegram.processNotificationQueue(200000UL);
+  const TgNotifyQueueItem *am4 = gwTelegram.getNotifyQueueItem(0);
+  TEST_ASSERT(am4 && am4->deliveryState == TG_DELIVERY_UNKNOWN_AMBIGUOUS &&
+                  gwTelegram.getNotifyQueueCount() == 1,
+              "AM.4b Ambiguous outcome is retained, not falsely delivered");
+  g_simulatedMillis = 230500UL;
+  gwTelegram.processNotificationQueue(230500UL);
+  TEST_ASSERT(gwTelegram.getNotifyQueueCount() == 0 &&
+                  gwTelegram.getNotifyDeliveredCount() == 1,
+              "AM.4c Quiet-period reconciliation completes the ambiguous event");
+
+  // AM.5 Durable outbox: a queued alert survives a Gateway reboot, and a
+  // delivered alert is removed from storage so it is not re-sent after reboot.
+  gwTelegram.resetNotificationQueue();
+  gwTelegram.setMockSendHook(testTelegramHook);
+  g_hookFaultPending = false;
+  g_simulatedMillis = 300000UL;
+  TEST_ASSERT(gwTelegram.enqueueNotification(TG_EVT_GENERAL_ALERT, "AM5",
+                                             "AM5 survives reboot"),
+              "AM.5a Alert queued before reboot");
+  gwTelegram.flushNotificationOutbox();
+  gwTelegram.loadNotificationOutbox(); // reboot: RAM cleared, outbox restored
+  const TgNotifyQueueItem *am5 = gwTelegram.getNotifyQueueItem(0);
+  TEST_ASSERT(gwTelegram.getNotifyQueueCount() == 1 && am5 != nullptr &&
+                  strcmp(am5->text, "AM5 survives reboot") == 0 &&
+                  strcmp(am5->dedupKey, "AM5") == 0,
+              "AM.5b Queued alert restored with text and dedup key after reboot");
+  const uint32_t am5Id = am5 ? am5->eventId : 0;
+  gwTelegram.processNotificationQueue(300000UL);
+  gwTelegram.flushNotificationOutbox();
+  gwTelegram.loadNotificationOutbox(); // second reboot after delivery
+  TEST_ASSERT(gwTelegram.getNotifyQueueCount() == 0,
+              "AM.5c Delivered alert is not restored after reboot");
+  gwTelegram.enqueueNotification(TG_EVT_GENERAL_ALERT, "AM5B", "AM5B next");
+  TEST_ASSERT(gwTelegram.getNotifyQueueItem(0) &&
+                  gwTelegram.getNotifyQueueItem(0)->eventId > am5Id,
+              "AM.5d Event IDs stay unique across reboot");
+
+  gwTelegram.setMockSendHook(nullptr);
+  gwTelegram.clearTestAllowlistOverride();
+  gwTelegram.resetNotificationQueue();
+
+  // -------------------------------------------------------------------------
+  // R3.3 FEEDER ACK CLASSIFICATION (ON/OFF button outcome must be truthful)
+  // -------------------------------------------------------------------------
+  {
+    GwTrackedCommand done;
+    while (gwMesh.pollCompletedCommand(done)) {
+    }
+
+    // Build a PKT_CMD_FEEDER_ACK exactly as a field pole would uplink it.
+    auto sendFeederAck = [&](uint8_t feederId, uint32_t seq, uint8_t state, uint8_t relayMask, uint8_t auxMask) {
+      MeshWireFrame f;
+      memset(&f, 0, sizeof(f));
+      f.header.magic[0] = MSCB_PROTOCOL_MAGIC_0;
+      f.header.magic[1] = MSCB_PROTOCOL_MAGIC_1;
+      f.header.version = MSCB_PROTOCOL_VERSION;
+      f.header.type = PKT_CMD_FEEDER_ACK;
+      f.header.dstAddress = MSCB_GATEWAY_NODE_ID;
+      f.header.srcAddress = GW_POLE_ID_START;
+      f.header.nextHop = MSCB_GATEWAY_NODE_ID;
+      f.header.previousHopAddress = GW_POLE_ID_START;
+      f.header.maxHops = 1;
+      static uint16_t ackFrameSeq = 1000; // unique per frame: duplicates are dropped
+      f.header.seqNumber = ackFrameSeq++;
+      f.header.payloadLen = sizeof(PktFeederAckPayload);
+      PktFeederAckPayload p;
+      memset(&p, 0, sizeof(p));
+      p.poleId = GW_POLE_ID_START;
+      p.feederId = feederId;
+      p.sequenceNumber = seq;
+      p.ackState = state;
+      p.currentRelayMask = relayMask;
+      p.currentAuxMask = auxMask;
+      p.auxFeedbackValid = 1;
+      p.mcbStatusValid = 1;
+      memcpy(f.payload, &p, sizeof(p));
+      f.header.hopAuthToken = cmdSecurity.computeFrameHopAuthToken(f);
+      gwMesh.processIncomingWireFrame(f, -70, 8);
+    };
+
+    // 1. Single feeder ON answered by CONTACTOR_CLOSED is a verified success.
+    uint32_t seqOn = 0;
+    bool sentOn = gwMesh.sendFeederCommand(GW_POLE_ID_START, 2, 1, 0, seqOn, adminChatId);
+    TEST_ASSERT(sentOn && seqOn > 0, "R3.3 single-feeder ON dispatched");
+    sendFeederAck(2, seqOn, FEEDER_ACK_CONTACTOR_CLOSED, 0x02, 0x02);
+    bool gotOn = gwMesh.pollCompletedCommand(done);
+    TEST_ASSERT(gotOn && done.seqNumber == seqOn, "R3.3 single-feeder ON completes on CONTACTOR_CLOSED ACK");
+    TEST_ASSERT(gotOn && done.rejectedMask == 0, "R3.3 CONTACTOR_CLOSED is NOT counted as a rejection");
+    TEST_ASSERT(gotOn && (done.outputConfirmedMask & 0x02) && (done.auxConfirmedMask & 0x02),
+                "R3.3 ON success requires output AND contactor aux proof");
+
+    // 2. ON refused by the pole safety lock is reported as rejected, never success.
+    uint32_t seqLock = 0;
+    bool sentLock = gwMesh.sendFeederCommand(GW_POLE_ID_START, 3, 1, 0, seqLock, adminChatId);
+    TEST_ASSERT(sentLock && seqLock > 0, "R3.3 locked ON dispatched");
+    sendFeederAck(3, seqLock, FEEDER_ACK_REJECTED_LOCKED, 0x00, 0x00);
+    bool gotLock = gwMesh.pollCompletedCommand(done);
+    TEST_ASSERT(gotLock && (done.rejectedMask & 0x04), "R3.3 LOCKED ON is reported as rejected");
+    TEST_ASSERT(gotLock && (done.auxConfirmedMask & 0x04) == 0, "R3.3 LOCKED ON is not reported as verified");
+
+    // 3. ON that energised but has no aux proof is NOT verified.
+    uint32_t seqNoAux = 0;
+    bool sentNoAux = gwMesh.sendFeederCommand(GW_POLE_ID_START, 4, 1, 0, seqNoAux, adminChatId);
+    TEST_ASSERT(sentNoAux && seqNoAux > 0, "R3.3 no-aux ON dispatched");
+    sendFeederAck(4, seqNoAux, FEEDER_ACK_FEEDBACK_NOT_CONNECTED, 0x08, 0x00);
+    bool gotNoAux = gwMesh.pollCompletedCommand(done);
+    TEST_ASSERT(gotNoAux && (done.auxConfirmedMask & 0x08) == 0,
+                "R3.3 ON without contactor feedback is not verified");
+
+    // 4. ALL ON where only feeder 1 closes: the command is NOT fully verified.
+    uint32_t seqAll = 0;
+    bool sentAll = gwMesh.sendFeederCommand(GW_POLE_ID_START, 0x00, 1, 0x3F, seqAll, adminChatId);
+    TEST_ASSERT(sentAll && seqAll > 0, "R3.3 ALL ON dispatched");
+    sendFeederAck(1, seqAll, FEEDER_ACK_CONTACTOR_CLOSED, 0x01, 0x01);
+    for (uint8_t f = 2; f <= 6; f++) {
+      sendFeederAck(f, seqAll, FEEDER_ACK_REJECTED_LOCKED, 0x00, 0x00);
+    }
+    bool gotAll = gwMesh.pollCompletedCommand(done);
+    TEST_ASSERT(gotAll && done.seqNumber == seqAll, "R3.3 ALL ON completes after all six feeder ACKs");
+    TEST_ASSERT(gotAll && done.rejectedMask == 0x3E, "R3.3 ALL ON counts five locked feeders as rejected");
+    TEST_ASSERT(gotAll && (done.auxConfirmedMask & 0x3F) == 0x01,
+                "R3.3 ALL ON verifies only the feeder that actually closed");
+  }
 
   // -------------------------------------------------------------------------
   // FINAL TEST SUITE SUMMARY

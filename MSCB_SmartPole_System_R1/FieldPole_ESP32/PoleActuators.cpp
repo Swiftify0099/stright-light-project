@@ -67,8 +67,13 @@ bool PoleActuators::applyPinConfiguration(const PoleHardwarePinConfig &cfg) {
     }
 
     // 3. De-energize and set all existing pins SAFE OFF
+    // SAFETY ORDER: preload the OFF level into the output latch BEFORE enabling
+    // the output driver. On an active-LOW board, pinMode(OUTPUT) while the latch
+    // is reset drives the pin LOW for one GPIO cycle, which would briefly
+    // energize every relay. Writing first removes that boot/reconfig pulse.
     uint8_t offLevel = getElectricalLevel(false);
     for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
+        digitalWrite(channels[i].pin, offLevel);
         pinMode(channels[i].pin, OUTPUT);
         digitalWrite(channels[i].pin, offLevel);
         channels[i].commandedOn = false;
@@ -78,8 +83,9 @@ bool PoleActuators::applyPinConfiguration(const PoleHardwarePinConfig &cfg) {
     // 4. Apply new validated mapping
     configurePinMapping(cfg.feederPins);
 
-    // 5. Initialize new pins to SAFE OFF
+    // 5. Initialize new pins to SAFE OFF (preload latch before output enable)
     for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
+        digitalWrite(channels[i].pin, offLevel);
         pinMode(channels[i].pin, OUTPUT);
         digitalWrite(channels[i].pin, offLevel);
     }
@@ -140,6 +146,7 @@ void PoleActuators::init(bool useSafeVerifiedPins) {
     if (gpio12HazardPresent) {
         Serial.println(F("[ACTUATOR] ⚠️ WARNING: GPIO 12 (MTDI) detected in relay mapping!"));
         Serial.println(F("[ACTUATOR] Clamping GPIO 12 LOW to avoid 1.8V VDD_SDIO boot brownout."));
+        digitalWrite(12, LOW);
         pinMode(12, OUTPUT);
         digitalWrite(12, LOW);
     }
@@ -152,6 +159,7 @@ void PoleActuators::init(bool useSafeVerifiedPins) {
     uint8_t offLevel = getElectricalLevel(false);
     for (uint8_t i = 0; i < NUM_FEEDER_ACTUATORS; i++) {
         uint8_t pin = channels[i].pin;
+        digitalWrite(pin, offLevel); // preload OFF latch before driving the pin
         pinMode(pin, OUTPUT);
         digitalWrite(pin, offLevel);
         channels[i].commandedOn = false;
@@ -333,8 +341,9 @@ const char* PoleActuators::getPhysicalAuthStatusString() const {
 }
 
 bool PoleActuators::areRelaysLockedDisabled() const {
-#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1)
+#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1) && defined(MSCB_BENCH_TEST_PROFILE_ENABLED) && (MSCB_BENCH_TEST_PROFILE_ENABLED == 1)
     // Dedicated isolated low-voltage DC bench commissioning profile:
+    // Requires BOTH explicit benchTestOverride flag AND verified local physical authorization (debounced GPIO 39) AND diagnostic self-test passed!
     if (benchTestOverride && isLocalPhysicalAuthorized() && isDiagnosticPassed()) {
         return false;
     }
@@ -348,7 +357,7 @@ bool PoleActuators::areRelaysLockedDisabled() const {
 }
 
 void PoleActuators::setRelaysLockedDisabled(bool locked) {
-#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1)
+#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1) && defined(MSCB_BENCH_TEST_PROFILE_ENABLED) && (MSCB_BENCH_TEST_PROFILE_ENABLED == 1)
     relaysLockedDisabled = locked;
 #elif defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
     (void)locked;
@@ -359,7 +368,7 @@ void PoleActuators::setRelaysLockedDisabled(bool locked) {
 }
 
 void PoleActuators::setBenchTestOverride(bool override) {
-#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1)
+#if defined(MSCB_COMMISSIONING_LVDC_PROFILE) && (MSCB_COMMISSIONING_LVDC_PROFILE == 1) && defined(MSCB_BENCH_TEST_PROFILE_ENABLED) && (MSCB_BENCH_TEST_PROFILE_ENABLED == 1)
     benchTestOverride = override;
 #elif defined(MSCB_RELAYS_LOCKED_DISABLED) && (MSCB_RELAYS_LOCKED_DISABLED != 0)
     (void)override;

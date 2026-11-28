@@ -37,6 +37,8 @@ typedef bool boolean;
 #define HEX 16
 #define DEC 10
 
+#define MSCB_PIN_TRACE_CAP 256
+
 #if defined(ARDUINO_MOCK_IMPLEMENTATION)
 uint8_t g_pinStates[40] = {
   1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -45,13 +47,36 @@ uint8_t g_pinStates[40] = {
   1, 1, 1, 1, 1, 1, 1, 1, 1, 1
 };
 unsigned long g_simulatedMillis = 1000UL;
+bool g_pinTraceEnabled = false;
+int g_pinTraceCount = 0;
+uint8_t g_pinTraceOp[MSCB_PIN_TRACE_CAP];   // 1 = pinMode, 2 = digitalWrite
+uint8_t g_pinTracePin[MSCB_PIN_TRACE_CAP];
+uint8_t g_pinTraceVal[MSCB_PIN_TRACE_CAP];
 #else
 extern uint8_t g_pinStates[40];
 extern unsigned long g_simulatedMillis;
+extern bool g_pinTraceEnabled;
+extern int g_pinTraceCount;
+extern uint8_t g_pinTraceOp[MSCB_PIN_TRACE_CAP];
+extern uint8_t g_pinTracePin[MSCB_PIN_TRACE_CAP];
+extern uint8_t g_pinTraceVal[MSCB_PIN_TRACE_CAP];
 #endif
 
-inline void pinMode(uint8_t, uint8_t) {}
+inline void pinMode(uint8_t pin, uint8_t mode) {
+  if (g_pinTraceEnabled && g_pinTraceCount < MSCB_PIN_TRACE_CAP) {
+    g_pinTraceOp[g_pinTraceCount] = 1;
+    g_pinTracePin[g_pinTraceCount] = pin;
+    g_pinTraceVal[g_pinTraceCount] = mode;
+    g_pinTraceCount++;
+  }
+}
 inline void digitalWrite(uint8_t pin, uint8_t val) {
+  if (g_pinTraceEnabled && g_pinTraceCount < MSCB_PIN_TRACE_CAP) {
+    g_pinTraceOp[g_pinTraceCount] = 2;
+    g_pinTracePin[g_pinTraceCount] = pin;
+    g_pinTraceVal[g_pinTraceCount] = val;
+    g_pinTraceCount++;
+  }
   if (pin < 40) g_pinStates[pin] = val;
 }
 inline int digitalRead(uint8_t pin) {

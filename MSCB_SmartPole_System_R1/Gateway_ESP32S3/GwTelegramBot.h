@@ -39,6 +39,15 @@
 #define GW_TG_MAX_RETRIES           5
 #define GW_TG_DEFAULT_THROTTLE_MS   3000UL
 #define GW_TG_GROUP_BATCH_MAX       12
+#define GW_TG_MAX_ADMIN_RECIPIENTS  12
+// An ambiguous HTTP outcome is never resent immediately. After this quiet
+// period only the still-unresolved admins are retried.
+#define GW_TG_AMBIGUOUS_RECONCILE_MS 30000UL
+// Network-wide ON/OFF is dispatched asynchronously: one tracked LoRa command
+// per interval, so a 50-pole command cannot block the control loop or overflow
+// the 16-entry ACK tracker.
+#define GW_TG_NET_BATCH_INTERVAL_MS  800UL
+#define GW_TG_NET_BATCH_MAX_POLES    50
 
 enum TgNotifyEventType : uint8_t {
   TG_EVT_NONE             = 0,
@@ -94,6 +103,11 @@ struct TgNotifyQueueItem {
   uint8_t           retryCount;
   uint32_t          nextAttemptMs;
   uint32_t          lastAttemptMs;
+  // Per-recipient delivery truth. Bit N corresponds to the Nth unique admin in
+  // the gateway allowlist. An event is terminal only when every admin is either
+  // confirmed or permanently failed - one successful send is NOT "delivered".
+  uint16_t          adminsConfirmedMask;
+  uint16_t          adminsPermanentFailMask;
 };
 
 struct TgBroadcastSummary {
@@ -104,6 +118,10 @@ struct TgBroadcastSummary {
   uint8_t            permanentFailCount;
   uint32_t           maxRetryAfterSec;
   TgTransportOutcome overallOutcome;
+  uint16_t           recipientMask;      // all admins addressed in this pass
+  uint16_t           confirmedMask;      // admins with a confirmed send
+  uint16_t           permanentFailMask;  // admins Telegram permanently rejected
+  uint16_t           ambiguousMask;      // admins with an ambiguous result
 };
 
 class GwTelegramBot {
@@ -124,7 +142,9 @@ public:
   void sendMessageWithKeyboard(int64_t chatId, const char* text, const char* keyboardJson);
   void sendReplyKeyboard(int64_t chatId, const char* text);
   bool broadcastAdminAlert(const char* alertText);
-  bool broadcastAdminAlertDetailed(const char* alertText, TgBroadcastSummary &outSummary);
+  bool broadcastAdminAlertDetailed(const char* alertText, TgBroadcastSummary &outSummary,
+                                   uint16_t alreadyConfirmedMask = 0,
+                                   uint16_t alreadyPermanentMask = 0);
 
   // Bounded Reliable Notification Queue (R3.2.2 P0)
   bool enqueueNotification(TgNotifyEventType type, const char* dedupKey, const char* text,
@@ -132,6 +152,8 @@ public:
                            uint32_t tsSec = 0, const char* reason = nullptr);
   void processNotificationQueue(uint32_t nowMs);
   void resetNotificationQueue();
+  void flushNotificationOutbox();
+  void loadNotificationOutbox();
   uint8_t  getNotifyQueueCount() const { return notifyQueueCount; }
   uint32_t getNotifyInsertedCount() const { return notifyInsertedCount; }
   uint32_t getNotifyDeliveredCount() const { return notifyDeliveredCount; }
@@ -194,6 +216,7 @@ public:
 
   // Network-wide Execution
   void executeAllPolesNetworkWide(int64_t chatId, uint8_t action);
+  void serviceNetworkBatch();
 
   bool isOnline() const { return telegramOnline; }
 
@@ -241,6 +264,22 @@ private:
   uint32_t notifyOverflowDroppedCount;
   uint32_t notifyRetryCount;
   TgNotifyQueueItem notifyQueue[GW_TG_NOTIFY_QUEUE_CAPACITY];
+  // Durable outbox bookkeeping: one dirty bit per slot, persisted on flush.
+  uint64_t notifyDirtyMask;
+  bool     notifyMetaDirty;
+  void     markNotifySlotDirty(uint8_t idx);
+
+  // Asynchronous network-wide dispatch state
+  bool     netBatchActive;
+  int64_t  netBatchChatId;
+  uint8_t  netBatchAction;
+  uint16_t netBatchPoleIds[GW_TG_NET_BATCH_MAX_POLES];
+  uint16_t netBatchTotal;
+  uint16_t netBatchCursor;
+  uint16_t netBatchDispatched;
+  uint16_t netBatchFailed;
+  uint32_t netBatchNextMs;
+
   TgTlsStatus tlsStatus;
 #if !defined(ARDUINO)
   bool mockTimeSynced;

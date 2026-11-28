@@ -21,6 +21,116 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#if defined(ARDUINO)
+#include <Preferences.h>
+#endif
+
+// ---------------------------------------------------------------------------
+// Durable notification outbox (R3.3 section 11: alerts survive a reboot).
+// Every active queue slot is stored under its own NVS key ("o00".."o63"),
+// and a slot is removed from storage once it reaches a terminal state.
+// Writes are batched through a dirty mask, so only changed slots hit flash.
+// ---------------------------------------------------------------------------
+#define GW_TG_OUTBOX_NS "tgoutbox"
+
+#if !defined(ARDUINO)
+namespace {
+struct SimOutboxStore {
+  bool used[GW_TG_NOTIFY_QUEUE_CAPACITY];
+  TgNotifyQueueItem items[GW_TG_NOTIFY_QUEUE_CAPACITY];
+  uint32_t nextEventId;
+  bool metaValid;
+};
+SimOutboxStore s_simOutbox;
+}
+#endif
+
+static void outboxSlotKey(uint8_t idx, char* key, size_t len) {
+  snprintf(key, len, "o%02u", (unsigned)idx);
+}
+
+static bool outboxWriteSlot(uint8_t idx, const TgNotifyQueueItem* item) {
+#if defined(ARDUINO)
+  Preferences p;
+  if (!p.begin(GW_TG_OUTBOX_NS, false)) return false;
+  char key[8];
+  outboxSlotKey(idx, key, sizeof(key));
+  bool ok = true;
+  if (item) {
+    ok = (p.putBytes(key, item, sizeof(TgNotifyQueueItem)) == sizeof(TgNotifyQueueItem));
+  } else {
+    p.remove(key);
+  }
+  p.end();
+  return ok;
+#else
+  if (idx >= GW_TG_NOTIFY_QUEUE_CAPACITY) return false;
+  if (item) {
+    s_simOutbox.items[idx] = *item;
+    s_simOutbox.used[idx] = true;
+  } else {
+    s_simOutbox.used[idx] = false;
+  }
+  return true;
+#endif
+}
+
+static bool outboxReadSlot(uint8_t idx, TgNotifyQueueItem &out) {
+#if defined(ARDUINO)
+  Preferences p;
+  if (!p.begin(GW_TG_OUTBOX_NS, true)) return false;
+  char key[8];
+  outboxSlotKey(idx, key, sizeof(key));
+  size_t n = p.getBytes(key, &out, sizeof(TgNotifyQueueItem));
+  p.end();
+  return n == sizeof(TgNotifyQueueItem);
+#else
+  if (idx >= GW_TG_NOTIFY_QUEUE_CAPACITY || !s_simOutbox.used[idx]) return false;
+  out = s_simOutbox.items[idx];
+  return true;
+#endif
+}
+
+static bool outboxWriteNextId(uint32_t nextId) {
+#if defined(ARDUINO)
+  Preferences p;
+  if (!p.begin(GW_TG_OUTBOX_NS, false)) return false;
+  size_t n = p.putUInt("nextId", nextId);
+  p.end();
+  return n > 0;
+#else
+  s_simOutbox.nextEventId = nextId;
+  s_simOutbox.metaValid = true;
+  return true;
+#endif
+}
+
+static bool outboxReadNextId(uint32_t &out) {
+#if defined(ARDUINO)
+  Preferences p;
+  if (!p.begin(GW_TG_OUTBOX_NS, true)) return false;
+  out = p.getUInt("nextId", 0);
+  p.end();
+  return out != 0;
+#else
+  out = s_simOutbox.nextEventId;
+  return s_simOutbox.metaValid;
+#endif
+}
+
+static void outboxClearAll() {
+#if defined(ARDUINO)
+  Preferences p;
+  if (p.begin(GW_TG_OUTBOX_NS, false)) {
+    p.clear();
+    p.end();
+  }
+#else
+  memset(s_simOutbox.used, 0, sizeof(s_simOutbox.used));
+  s_simOutbox.metaValid = false;
+  s_simOutbox.nextEventId = 0;
+#endif
+}
 
 GwTelegramBot gwTelegram;
 
@@ -76,6 +186,16 @@ GwTelegramBot::GwTelegramBot() :
   notifyDedupSuppressedCount(0),
   notifyOverflowDroppedCount(0),
   notifyRetryCount(0),
+  notifyDirtyMask(0),
+  notifyMetaDirty(false),
+  netBatchActive(false),
+  netBatchChatId(0),
+  netBatchAction(0),
+  netBatchTotal(0),
+  netBatchCursor(0),
+  netBatchDispatched(0),
+  netBatchFailed(0),
+  netBatchNextMs(0),
   tlsStatus(TG_TLS_OK)
 #if !defined(ARDUINO)
   , mockTimeSynced(true),
@@ -91,6 +211,7 @@ GwTelegramBot::GwTelegramBot() :
   memset(lastSentKeyboardJson, 0, sizeof(lastSentKeyboardJson));
   memset(lastSentMessageText, 0, sizeof(lastSentMessageText));
   memset(notifyQueue, 0, sizeof(notifyQueue));
+  memset(netBatchPoleIds, 0, sizeof(netBatchPoleIds));
 #if !defined(ARDUINO)
   memset(testAllowlist, 0, sizeof(testAllowlist));
 #endif
@@ -146,7 +267,7 @@ bool GwTelegramBot::begin() {
 #endif
 
   loadFeederNames();
-  resetNotificationQueue();
+  loadNotificationOutbox();
 
   lastPollMs = millis();
   telegramOnline = false;
@@ -467,7 +588,10 @@ bool GwTelegramBot::loadFeederNames() {
   return true; // Loaded via gwRegistry.loadRegistry()
 }
 
-bool GwTelegramBot::broadcastAdminAlertDetailed(const char* alertText, TgBroadcastSummary &outSummary) {
+bool GwTelegramBot::broadcastAdminAlertDetailed(const char* alertText,
+                                                  TgBroadcastSummary &outSummary,
+                                                  uint16_t alreadyConfirmedMask,
+                                                  uint16_t alreadyPermanentMask) {
   memset(&outSummary, 0, sizeof(outSummary));
   outSummary.overallOutcome = TG_TX_TRANSIENT_FAILURE;
   if (!alertText || strlen(alertText) == 0) {
@@ -475,7 +599,7 @@ bool GwTelegramBot::broadcastAdminAlertDetailed(const char* alertText, TgBroadca
     return false;
   }
 
-  int64_t uniqueAdmins[12];
+  int64_t uniqueAdmins[GW_TG_MAX_ADMIN_RECIPIENTS];
   size_t uniqueCount = 0;
 
   auto appendUnique = [&uniqueAdmins, &uniqueCount](int64_t cid) {
@@ -483,7 +607,7 @@ bool GwTelegramBot::broadcastAdminAlertDetailed(const char* alertText, TgBroadca
     for (size_t j = 0; j < uniqueCount; j++) {
       if (uniqueAdmins[j] == cid) return;
     }
-    if (uniqueCount < 12) {
+    if (uniqueCount < GW_TG_MAX_ADMIN_RECIPIENTS) {
       uniqueAdmins[uniqueCount++] = cid;
     }
   };
@@ -513,18 +637,29 @@ bool GwTelegramBot::broadcastAdminAlertDetailed(const char* alertText, TgBroadca
     return false;
   }
 
+  const uint16_t recipientMask = (uint16_t)((1u << uniqueCount) - 1u);
+  outSummary.recipientMask = recipientMask;
+  const uint16_t resolvedMask =
+      (uint16_t)((alreadyConfirmedMask | alreadyPermanentMask) & recipientMask);
+
   for (size_t i = 0; i < uniqueCount; i++) {
+    const uint16_t bit = (uint16_t)(1u << i);
+    if (resolvedMask & bit) continue; // already delivered/rejected on an earlier pass
+
     uint32_t retryAfter = 0;
     TgTransportOutcome res = sendMessageWithOutcome(uniqueAdmins[i], alertText, retryAfter);
     if (res == TG_TX_OK) {
       outSummary.confirmedCount++;
+      outSummary.confirmedMask |= bit;
     } else if (res == TG_TX_RATE_LIMITED) {
       outSummary.transientFailCount++;
       if (retryAfter > outSummary.maxRetryAfterSec) outSummary.maxRetryAfterSec = retryAfter;
     } else if (res == TG_TX_AMBIGUOUS_TIMEOUT) {
       outSummary.ambiguousCount++;
+      outSummary.ambiguousMask |= bit;
     } else if (res == TG_TX_PERMANENT_ERROR) {
       outSummary.permanentFailCount++;
+      outSummary.permanentFailMask |= bit;
     } else {
       outSummary.transientFailCount++;
     }
@@ -534,16 +669,28 @@ bool GwTelegramBot::broadcastAdminAlertDetailed(const char* alertText, TgBroadca
     rateLimitUntilMs = millis() + (outSummary.maxRetryAfterSec * 1000UL);
   }
 
-  if (outSummary.confirmedCount > 0) {
-    outSummary.overallOutcome = TG_TX_OK;
-    return true;
+  const uint16_t allConfirmed =
+      (uint16_t)((alreadyConfirmedMask | outSummary.confirmedMask) & recipientMask);
+  const uint16_t allResolved =
+      (uint16_t)((alreadyConfirmedMask | alreadyPermanentMask |
+                  outSummary.confirmedMask | outSummary.permanentFailMask) &
+                 recipientMask);
+
+  if (allResolved == recipientMask) {
+    // Terminal: every admin either has the message or can never receive it.
+    // Only a fully confirmed event is reported as delivered.
+    if (allConfirmed == recipientMask) {
+      outSummary.overallOutcome = TG_TX_OK;
+      return true;
+    }
+    outSummary.overallOutcome = TG_TX_PERMANENT_ERROR;
+    return false;
   }
+
   if (outSummary.maxRetryAfterSec > 0) {
     outSummary.overallOutcome = TG_TX_RATE_LIMITED;
-  } else if (outSummary.ambiguousCount > 0) {
+  } else if (outSummary.ambiguousCount > 0 && outSummary.transientFailCount == 0) {
     outSummary.overallOutcome = TG_TX_AMBIGUOUS_TIMEOUT;
-  } else if (outSummary.permanentFailCount == outSummary.totalRecipients) {
-    outSummary.overallOutcome = TG_TX_PERMANENT_ERROR;
   } else {
     outSummary.overallOutcome = TG_TX_TRANSIENT_FAILURE;
   }
@@ -1990,35 +2137,86 @@ void GwTelegramBot::cmdAll(int64_t chatId, uint16_t poleId, uint8_t action) {
 }
 
 void GwTelegramBot::executeAllPolesNetworkWide(int64_t chatId, uint8_t action) {
+  if (netBatchActive) {
+    sendMessage(chatId, "⏳ A network-wide command is already in progress. Wait for its per-pole ACK reports before starting another.");
+    return;
+  }
+
   uint8_t count = gwRegistry.getActiveCount();
   if (count == 0) {
     sendMessage(chatId, "⚠️ No active registered poles in network to switch.");
     return;
   }
 
-  char buf[280];
-  snprintf(buf, sizeof(buf),
-           "⏳ *DISPATCHING NETWORK-WIDE ALL FEEDERS %s*\n"
-           "━━━━━━━━━━━━━━━━━━━━━━\n"
-           "Target Active Poles: *%u*\n"
-           "Total Relays: *Up to %u*\n"
-           "Dispatching authenticated per-pole commands across LoRa mesh...",
-           (action == 1) ? "ON" : "OFF", count, count * 6);
-  sendMessage(chatId, buf);
-
-  uint8_t dispatched = 0;
-  for (uint8_t i = 0; i < count; i++) {
+  // Snapshot the target list. Dispatch is asynchronous: one LoRa command per
+  // interval in service(), never a 50-packet blocking loop in the callback.
+  netBatchTotal = 0;
+  for (uint8_t i = 0; i < count && netBatchTotal < GW_TG_NET_BATCH_MAX_POLES; i++) {
     const RegisteredPole* p = gwRegistry.getPoleByIndex(i);
-    if (!p) continue;
-    uint32_t seq = 0;
-    if (gwMesh.sendFeederCommand(p->poleId, 0x00, action, 0x3F, seq, chatId)) {
-      dispatched++;
-    }
+    if (p) netBatchPoleIds[netBatchTotal++] = p->poleId;
+  }
+  if (netBatchTotal == 0) {
+    sendMessage(chatId, "⚠️ No active registered poles in network to switch.");
+    return;
   }
 
-  char resBuf[180];
-  snprintf(resBuf, sizeof(resBuf), "✅ Successfully dispatched authenticated commands to %u / %u poles. Awaiting ACK progression...", dispatched, count);
-  sendMessage(chatId, resBuf);
+  netBatchActive = true;
+  netBatchChatId = chatId;
+  netBatchAction = action;
+  netBatchCursor = 0;
+  netBatchDispatched = 0;
+  netBatchFailed = 0;
+  netBatchNextMs = millis();
+
+  char buf[320];
+  snprintf(buf, sizeof(buf),
+           "⏳ *NETWORK-WIDE ALL FEEDERS %s STARTED*\n"
+           "━━━━━━━━━━━━━━━━━━━━━━\n"
+           "Target Active Poles: *%u*\n"
+           "Mode: asynchronously queued, one authenticated command every %lu ms.\n"
+           "This message confirms *queueing only* - each pole's physical result follows in its own ACK report.",
+           (action == 1) ? "ON" : "OFF", (unsigned)netBatchTotal,
+           (unsigned long)GW_TG_NET_BATCH_INTERVAL_MS);
+  sendMessage(chatId, buf);
+
+  serviceNetworkBatch(); // dispatch the first command without waiting a tick
+}
+
+void GwTelegramBot::serviceNetworkBatch() {
+  if (!netBatchActive) return;
+
+  uint32_t now = millis();
+  if (netBatchNextMs != 0 && (int32_t)(now - netBatchNextMs) < 0) return;
+
+  if (netBatchCursor >= netBatchTotal) {
+    char resBuf[420];
+    snprintf(resBuf, sizeof(resBuf),
+             "📋 *NETWORK-WIDE DISPATCH COMPLETE*\n"
+             "━━━━━━━━━━━━━━━━━━━━━━\n"
+             "• Accepted for ACK tracking: *%u / %u*\n"
+             "• Not dispatched (radio error or tracker full): *%u*\n\n"
+             "This is NOT a physical switching confirmation. Only a per-pole ACK proves relay/contactor state; "
+             "poles without a valid ACK remain unconfirmed.",
+             (unsigned)netBatchDispatched, (unsigned)netBatchTotal,
+             (unsigned)netBatchFailed);
+    sendMessage(netBatchChatId, resBuf);
+    netBatchActive = false;
+    return;
+  }
+
+  const uint16_t poleId = netBatchPoleIds[netBatchCursor++];
+  const RegisteredPole* p = gwRegistry.findPoleById(poleId);
+  uint32_t seq = 0;
+  if (!p) {
+    netBatchFailed++;
+  } else if (gwMesh.sendFeederCommand(poleId, 0x00, netBatchAction, 0x3F, seq,
+                                      netBatchChatId)) {
+    netBatchDispatched++;
+  } else {
+    netBatchFailed++;
+  }
+
+  netBatchNextMs = now + GW_TG_NET_BATCH_INTERVAL_MS;
 }
 
 void GwTelegramBot::cmdWifi(int64_t chatId, const char* args) {
@@ -2898,6 +3096,48 @@ void GwTelegramBot::serviceTrackedCommands() {
     const char* poleName = p ? p->stringId : "POLE";
     const char* fdrName = getFeederName(cmd.poleId, cmd.feederId);
 
+    if (cmd.feederId == 0x00 || cmd.feederId == 0xF0) {
+      // Multi-feeder command: judge from every feeder's ACK masks, never from
+      // the last ACK alone (a single good ACK must not mask rejected feeders).
+      uint8_t exp = cmd.expectedMask;
+      uint8_t okMask = (cmd.action != 0) ? cmd.auxConfirmedMask : cmd.outputConfirmedMask;
+      uint8_t nExp = 0, nOk = 0, nRej = 0, nTerm = 0;
+      for (uint8_t b = 0; b < 6; b++) {
+        uint8_t bit = (uint8_t)(1 << b);
+        if (!(exp & bit)) continue;
+        nExp++;
+        if (okMask & bit) nOk++;
+        if (cmd.rejectedMask & bit) nRej++;
+        if (cmd.terminalAckMask & bit) nTerm++;
+      }
+      const char* actionText = (cmd.action == 1) ? "ENERGIZED (ON)" : "DE-ENERGIZED (OFF)";
+      char mBuf[448];
+      if (!cmd.timedOut && nTerm == nExp && nOk == nExp && nRej == 0) {
+        snprintf(mBuf, sizeof(mBuf),
+                 "✅ *ALL-FEEDER COMMAND VERIFIED*\n"
+                 "━━━━━━━━━━━━━━━━━━━━━━\n"
+                 "📍 *Pole:* `%s` (0x%04X)\n"
+                 "⚡ *Action:* %s\n"
+                 "• Feeders verified: %u/%u",
+                 poleName, cmd.poleId, actionText, nOk, nExp);
+      } else {
+        snprintf(mBuf, sizeof(mBuf),
+                 "⚠️ *ALL-FEEDER COMMAND NOT FULLY VERIFIED*\n"
+                 "━━━━━━━━━━━━━━━━━━━━━━\n"
+                 "📍 *Pole:* `%s` (0x%04X)\n"
+                 "⚡ *Action:* %s\n"
+                 "━━━━━━━━━━━━━━━━━━━━━━\n"
+                 "• Verified: %u/%u\n"
+                 "• Rejected by field node: %u/%u\n"
+                 "• No final answer: %u/%u%s",
+                 poleName, cmd.poleId, actionText, nOk, nExp, nRej, nExp,
+                 (uint8_t)(nExp - nTerm), nExp,
+                 cmd.timedOut ? "\n• Command timed out on the gateway." : "");
+      }
+      sendMessage(targetChatId, mBuf);
+      continue;
+    }
+
     char reportBuf[384];
     if (cmd.lastAckState == FEEDER_ACK_COMPLETED || cmd.lastAckState == FEEDER_ACK_CONTACTOR_CLOSED || cmd.lastAckState == FEEDER_ACK_AUXILIARY_FEEDBACK_VERIFIED) {
       snprintf(reportBuf, sizeof(reportBuf),
@@ -2962,17 +3202,78 @@ void GwTelegramBot::serviceTrackedCommands() {
                "❌ *COMMAND TIMEOUT / EXECUTION FAILURE*\n"
                "━━━━━━━━━━━━━━━━━━━━━━\n"
                "📍 *Pole:* `%s` (0x%04X) | Feeder %u\n"
-               "• No confirmed ACK received over LoRa mesh within 4.5s.\n"
+               "• No confirmed ACK received over LoRa mesh within %lus.\n"
                "• Link degraded or node offline.",
-               poleName, cmd.poleId, cmd.feederId);
+               poleName, cmd.poleId, cmd.feederId,
+               (unsigned long)(cmd.timeoutMs / 1000));
     }
     sendMessage(targetChatId, reportBuf);
+  }
+}
+
+void GwTelegramBot::markNotifySlotDirty(uint8_t idx) {
+  if (idx < GW_TG_NOTIFY_QUEUE_CAPACITY) notifyDirtyMask |= ((uint64_t)1 << idx);
+}
+
+void GwTelegramBot::flushNotificationOutbox() {
+  if (notifyDirtyMask != 0) {
+    for (uint8_t i = 0; i < GW_TG_NOTIFY_QUEUE_CAPACITY; i++) {
+      const uint64_t bit = ((uint64_t)1 << i);
+      if (!(notifyDirtyMask & bit)) continue;
+      const TgNotifyQueueItem *it = notifyQueue[i].active ? &notifyQueue[i] : nullptr;
+      // A failed write stays dirty and is retried on the next flush.
+      if (outboxWriteSlot(i, it)) notifyDirtyMask &= ~bit;
+    }
+  }
+  if (notifyMetaDirty && outboxWriteNextId(nextEventId)) {
+    notifyMetaDirty = false;
+  }
+}
+
+void GwTelegramBot::loadNotificationOutbox() {
+  // RAM counters restart each boot; queued events do not.
+  memset(notifyQueue, 0, sizeof(notifyQueue));
+  notifyQueueCount = 0;
+  notifyDirtyMask = 0;
+  notifyMetaDirty = false;
+  rateLimitUntilMs = 0;
+  lastAlertBroadcastMs = 0;
+
+  uint32_t metaNextId = 1;
+  if (outboxReadNextId(metaNextId) && metaNextId == 0) metaNextId = 1;
+  nextEventId = metaNextId;
+
+  for (uint8_t i = 0; i < GW_TG_NOTIFY_QUEUE_CAPACITY; i++) {
+    TgNotifyQueueItem it;
+    if (!outboxReadSlot(i, it)) continue;
+    const bool valid = it.active && it.eventId != 0 &&
+                       it.eventType >= TG_EVT_SYSTEM_ONLINE &&
+                       it.eventType <= TG_EVT_GENERAL_ALERT &&
+                       it.deliveryState <= TG_DELIVERY_FAILED_PERMANENT;
+    if (!valid) {
+      Serial.printf("[TG] Discarding corrupt outbox slot %u\n", (unsigned)i);
+      outboxWriteSlot(i, nullptr);
+      continue;
+    }
+    // millis() restarts at boot, so stored timers are meaningless. Ambiguous
+    // items keep their state and reconcile after the quiet window.
+    it.nextAttemptMs = 0;
+    it.lastAttemptMs = (it.deliveryState == TG_DELIVERY_UNKNOWN_AMBIGUOUS) ? 1 : 0;
+    notifyQueue[i] = it;
+    notifyQueueCount++;
+    if (it.eventId >= nextEventId) nextEventId = it.eventId + 1;
+  }
+  if (notifyQueueCount > 0) {
+    Serial.printf("[TG] Restored %u queued notification(s) from outbox\n", (unsigned)notifyQueueCount);
   }
 }
 
 void GwTelegramBot::resetNotificationQueue() {
   memset(notifyQueue, 0, sizeof(notifyQueue));
   notifyQueueCount = 0;
+  notifyDirtyMask = 0;
+  notifyMetaDirty = false;
+  outboxClearAll();
   notifyInsertedCount = 0;
   notifyDeliveredCount = 0;
   notifyAmbiguousCount = 0;
@@ -3041,6 +3342,8 @@ bool GwTelegramBot::enqueueNotification(TgNotifyEventType type, const char* dedu
   item.nextAttemptMs = 0;
   item.lastAttemptMs = 0;
 
+  markNotifySlotDirty((uint8_t)freeSlot);
+  notifyMetaDirty = true;
   notifyQueueCount++;
   notifyInsertedCount++;
   return true;
@@ -3060,7 +3363,16 @@ void GwTelegramBot::processNotificationQueue(uint32_t nowMs) {
   for (uint8_t i = 0; i < GW_TG_NOTIFY_QUEUE_CAPACITY; i++) {
     TgNotifyQueueItem &it = notifyQueue[i];
     if (!it.active) continue;
-    if (it.deliveryState != TG_DELIVERY_PENDING && it.deliveryState != TG_DELIVERY_RETRY_SCHEDULED) continue;
+    bool eligible = (it.deliveryState == TG_DELIVERY_PENDING ||
+                     it.deliveryState == TG_DELIVERY_RETRY_SCHEDULED);
+    if (it.deliveryState == TG_DELIVERY_UNKNOWN_AMBIGUOUS) {
+      // The HTTP write may or may not have reached Telegram. Never resend
+      // immediately; reconcile after a quiet period, and only to admins whose
+      // delivery is still unresolved.
+      eligible = (it.lastAttemptMs != 0 &&
+                  (uint32_t)(nowMs - it.lastAttemptMs) >= GW_TG_AMBIGUOUS_RECONCILE_MS);
+    }
+    if (!eligible) continue;
     if (it.nextAttemptMs != 0 && nowMs < it.nextAttemptMs) continue;
 
     if (firstEligibleIdx < 0) firstEligibleIdx = (int)i;
@@ -3074,37 +3386,71 @@ void GwTelegramBot::processNotificationQueue(uint32_t nowMs) {
   if (firstEligibleIdx < 0) return;
 
   auto applyOutcomeToSlot = [this, nowMs](uint8_t slot, const TgBroadcastSummary &summary) {
+    markNotifySlotDirty(slot);
     TgNotifyQueueItem &it = notifyQueue[slot];
     it.lastAttemptMs = nowMs;
-    if (summary.overallOutcome == TG_TX_OK) {
-      it.deliveryState = TG_DELIVERY_SENT_CONFIRMED;
+    it.adminsConfirmedMask |= summary.confirmedMask;
+    it.adminsPermanentFailMask |= summary.permanentFailMask;
+
+    if (summary.totalRecipients == 0) {
+      // No admin exists yet: retain the event and retry, never fake delivery.
+      it.retryCount++;
+      notifyRetryCount++;
+      it.deliveryState = (it.retryCount >= GW_TG_MAX_RETRIES)
+                             ? TG_DELIVERY_FAILED_PERMANENT
+                             : TG_DELIVERY_RETRY_SCHEDULED;
+      if (it.deliveryState == TG_DELIVERY_FAILED_PERMANENT) {
+        it.active = false;
+        if (notifyQueueCount > 0) notifyQueueCount--;
+        notifyFailedPermanentCount++;
+      } else {
+        it.nextAttemptMs = nowMs + alertThrottleMs;
+      }
+      return;
+    }
+
+    const uint16_t resolved = (uint16_t)((it.adminsConfirmedMask |
+                                          it.adminsPermanentFailMask) &
+                                         summary.recipientMask);
+    if (resolved == summary.recipientMask) {
+      // Every admin is either confirmed or permanently rejected, so the event
+      // is terminal. It counts as delivered only if EVERY admin got it.
+      const bool allConfirmed =
+          ((it.adminsConfirmedMask & summary.recipientMask) == summary.recipientMask);
       it.active = false;
       if (notifyQueueCount > 0) notifyQueueCount--;
-      notifyDeliveredCount++;
-    } else if (summary.overallOutcome == TG_TX_AMBIGUOUS_TIMEOUT) {
-      // Do NOT blindly resend immediately on ambiguous timeout after HTTP write
+      if (allConfirmed) {
+        it.deliveryState = TG_DELIVERY_SENT_CONFIRMED;
+        notifyDeliveredCount++;
+      } else {
+        it.deliveryState = TG_DELIVERY_FAILED_PERMANENT;
+        notifyFailedPermanentCount++;
+      }
+      return;
+    }
+
+    if (summary.overallOutcome == TG_TX_AMBIGUOUS_TIMEOUT) {
+      // Some recipients are still unresolved. Keep the item and reconcile
+      // later instead of leaving it permanently stuck in the queue.
       it.deliveryState = TG_DELIVERY_UNKNOWN_AMBIGUOUS;
+      it.nextAttemptMs = nowMs + GW_TG_AMBIGUOUS_RECONCILE_MS;
       notifyAmbiguousCount++;
-    } else if (summary.overallOutcome == TG_TX_PERMANENT_ERROR) {
+      return;
+    }
+
+    it.retryCount++;
+    notifyRetryCount++;
+    if (it.retryCount >= GW_TG_MAX_RETRIES) {
       it.deliveryState = TG_DELIVERY_FAILED_PERMANENT;
       it.active = false;
       if (notifyQueueCount > 0) notifyQueueCount--;
       notifyFailedPermanentCount++;
     } else {
-      it.retryCount++;
-      notifyRetryCount++;
-      if (it.retryCount >= GW_TG_MAX_RETRIES) {
-        it.deliveryState = TG_DELIVERY_FAILED_PERMANENT;
-        it.active = false;
-        if (notifyQueueCount > 0) notifyQueueCount--;
-        notifyFailedPermanentCount++;
-      } else {
-        it.deliveryState = TG_DELIVERY_RETRY_SCHEDULED;
-        uint32_t backoffMs = (summary.maxRetryAfterSec > 0)
-                                 ? (summary.maxRetryAfterSec * 1000UL)
-                                 : (alertThrottleMs * (uint32_t)(1U << it.retryCount));
-        it.nextAttemptMs = nowMs + backoffMs;
-      }
+      it.deliveryState = TG_DELIVERY_RETRY_SCHEDULED;
+      uint32_t backoffMs = (summary.maxRetryAfterSec > 0)
+                               ? (summary.maxRetryAfterSec * 1000UL)
+                               : (alertThrottleMs * (uint32_t)(1U << it.retryCount));
+      it.nextAttemptMs = nowMs + backoffMs;
     }
   };
 
@@ -3145,10 +3491,13 @@ void GwTelegramBot::processNotificationQueue(uint32_t nowMs) {
     return;
   }
 
-  // Dispatch single priority/status notification
+  // Dispatch single priority/status notification. Skip admins that already
+  // confirmed (or permanently rejected) this exact event on an earlier pass.
   uint8_t slot = (uint8_t)firstEligibleIdx;
   TgBroadcastSummary summary;
-  broadcastAdminAlertDetailed(notifyQueue[slot].text, summary);
+  broadcastAdminAlertDetailed(notifyQueue[slot].text, summary,
+                              notifyQueue[slot].adminsConfirmedMask,
+                              notifyQueue[slot].adminsPermanentFailMask);
   lastAlertBroadcastMs = nowMs;
   applyOutcomeToSlot(slot, summary);
 }
@@ -3233,9 +3582,15 @@ void GwTelegramBot::pollUpdates() {
         if (bot.messages[i].query_id.length() > 0) {
           bot.answerCallbackQuery(bot.messages[i].query_id, ""); // Dismiss loading spinner immediately
         }
-        handleCallback(chatId, text.c_str());
+        // Pass the real sender identity and group context. Without these the
+        // default arguments replace fromUserId with the GROUP chat id, so the
+        // second authorization check inside the handlers rejects a legitimate
+        // admin pressing a button in a group (or, worse, trusts the group id).
+        const bool isGroupChat = (chatId != fromUserId);
+        handleCallback(chatId, text.c_str(), fromUserId, isGroupChat);
       } else {
-        handleCommand(chatId, text.c_str());
+        const bool isGroupChat = (chatId != fromUserId);
+        handleCommand(chatId, text.c_str(), fromUserId, isGroupChat);
       }
     }
     numNew = bot.getUpdates(bot.last_message_received + 1);
@@ -3245,6 +3600,8 @@ void GwTelegramBot::pollUpdates() {
 
 void GwTelegramBot::service() {
   uint32_t now = millis();
+  // Persist first: events raised while Wi-Fi is down must still survive a reboot.
+  flushNotificationOutbox();
 
   if (!gwWifi.isConnected()) {
     if (telegramOnline) {
@@ -3326,6 +3683,10 @@ void GwTelegramBot::service() {
 
   // 5. Rate-limited grouped notification dispatch & retry engine
   processNotificationQueue(now);
+  flushNotificationOutbox();
+
+  // Asynchronous network-wide dispatcher (one command per interval)
+  serviceNetworkBatch();
 
   // Non-blocking tracked command ACK reporter
   serviceTrackedCommands();

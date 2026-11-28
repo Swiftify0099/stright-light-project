@@ -308,9 +308,10 @@ bool PoleRegistrationClient::handleRegisterResponse(const PktRegisterResponsePay
     return false;
   }
 
-  // Validate non-zero correlated nonce
-  if (resp.nonce == 0) {
-    Serial.println(F("[REG_CLIENT] ❌ Registration response rejected: Zero nonce!"));
+  // Validate the response nonce against the newest transmitted request.
+  // Retries intentionally mint new nonces; only the latest request is valid.
+  if (resp.nonce == 0 || lastReqNonce == 0 || resp.nonce != lastReqNonce) {
+    Serial.println(F("[REG_CLIENT] ❌ Registration response rejected: Stale or unrelated nonce!"));
     lastError = REG_ERR_SESSION_MISMATCH;
     return false;
   }
